@@ -1,0 +1,27 @@
+[Unit]
+Description=AGWPE-to-KISS Translation Bridge
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+# Adjust User/Group to a dedicated service account or the user running the TNC.
+User=nobody
+Group=nobody
+# Set to the directory containing agwkiss.py and agwkiss.ini.
+WorkingDirectory=/opt/agwkiss
+
+# Bluetooth TNC (e.g. BTECH UV-Pro): run agwkiss-rfcomm in the background to
+# manage the rfcomm connection.  It will auto-reconnect if the link drops and
+# release the device cleanly on service stop.
+#
+# ExecStartPre=/bin/sh -c '/opt/agwkiss/agwkiss-rfcomm -c /opt/agwkiss/agwkiss.ini &'
+
+ExecStart=/usr/bin/python3 /opt/agwkiss/agwkiss.py -c /opt/agwkiss/agwkiss.ini
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

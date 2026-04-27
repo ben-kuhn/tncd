@@ -1,0 +1,3 @@
+kiss3>=8.0.0
+pyham-ax25>=1.0.0
+pyserial>=3.5

@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+AGWPE-to-KISS Bridge: rfcomm connection manager
+
+Disconnects any active Bluetooth audio profile, then connects via rfcomm.
+With -m watch, automatically reconnects if the connection drops.
+
+Usage:
+  ./agwkiss-rfcomm -b 38:D2:00:01:52:8F              # connect once
+  ./agwkiss-rfcomm -b 38:D2:00:01:52:8F -m watch     # connect + auto-reconnect
+  ./agwkiss-rfcomm -c agwkiss.ini                     # read from config file
+"""
+
+import argparse
+import configparser
+import logging
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+def disconnect_bt(bdaddr, wait=True):
+    """Disconnect all Bluetooth profiles for the device.
+
+    Returns True once the device shows as disconnected (or was already disconnected).
+    """
+    result = subprocess.run(
+        ['bluetoothctl', 'disconnect', bdaddr],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0 and 'not connected' not in result.stderr.lower():
+        logger.debug(f"bluetoothctl disconnect: {result.stderr.strip()}")
+
+    if not wait:
+        return True
+
+    # Poll until BlueZ reports the device as disconnected (up to 5s).
+    for _ in range(10):
+        time.sleep(0.5)
+        info = subprocess.run(
+            ['bluetoothctl', 'info', bdaddr],
+            capture_output=True, text=True
+        )
+        if 'Connected: no' in info.stdout:
+            logger.info(f"Disconnected {bdaddr}")
+            return True
+
+    logger.warning(f"Device {bdaddr} may still be connected; proceeding anyway")
+    return True
+
+
+def release_rfcomm(device):
+    """Release an rfcomm device node if it exists."""
+    dev_name = Path(device).name
+    subprocess.run(['rfcomm', 'release', dev_name],
+                   capture_output=True, check=False)
+
+
+def connect_once(device, bdaddr, channel=1):
+    """Disconnect audio, then run rfcomm connect (blocks until connection drops).
+
+    Returns the exit code of rfcomm connect.
+    """
+    logger.info(f"Disconnecting {bdaddr} from audio profiles...")
+    disconnect_bt(bdaddr)
+    release_rfcomm(device)
+
+    logger.info(f"Connecting {device} -> {bdaddr} channel {channel}")
+    result = subprocess.run(
+        ['rfcomm', 'connect', device, bdaddr, str(channel)],
+        check=False
+    )
+    return result.returncode
+
+
+def watch_loop(device, bdaddr, channel=1, retry_delay=5):
+    """Connect and automatically reconnect whenever the connection drops."""
+    first = True
+    while True:
+        if first:
+            first = False
+        else:
+            logger.info(f"Reconnecting in {retry_delay}s...")
+            time.sleep(retry_delay)
+
+        logger.info(f"Disconnecting {bdaddr} from audio profiles...")
+        disconnect_bt(bdaddr)
+        release_rfcomm(device)
+
+        logger.info(f"Connecting {device} -> {bdaddr} channel {channel}")
+        result = subprocess.run(
+            ['rfcomm', 'connect', device, bdaddr, str(channel)],
+            check=False
+        )
+        logger.warning(f"rfcomm connect exited (code {result.returncode})")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Connect Bluetooth TNC via rfcomm, optionally auto-reconnecting'
+    )
+    parser.add_argument('-c', '--config', help='INI config file (reads [bluetooth] section)')
+    parser.add_argument('-m', '--mode', choices=['connect', 'watch'], default='connect',
+                        help='connect=one-shot (default), watch=auto-reconnect on drop')
+
+    group = parser.add_argument_group('rfcomm options')
+    group.add_argument('-d', '--device', default='/dev/rfcomm0',
+                       help='RFCOMM device (default: /dev/rfcomm0)')
+    group.add_argument('-b', '--bdaddr', help='Bluetooth address (XX:XX:XX:XX:XX:XX)')
+    group.add_argument('-n', '--channel', type=int, default=1,
+                       help='RFCOMM channel (default: 1)')
+    group.add_argument('--retry-delay', type=int, default=5, metavar='SECS',
+                       help='Seconds between reconnect attempts in watch mode (default: 5)')
+
+    args = parser.parse_args()
+
+    # Resolve settings from config file if given.
+    device = args.device
+    bdaddr = args.bdaddr
+    channel = args.channel
+    mode = args.mode
+    retry_delay = args.retry_delay
+
+    if args.config:
+        cfg = configparser.ConfigParser()
+        cfg.read(args.config)
+        if 'bluetooth' in cfg:
+            bt = cfg['bluetooth']
+            if not bt.getboolean('enabled', fallback=True):
+                logger.info("Bluetooth disabled in config")
+                return 0
+            device   = bt.get('bind_dev', fallback=device)
+            bdaddr   = bt.get('bdaddr',   fallback=bdaddr)
+            channel  = bt.getint('channel', fallback=channel)
+            mode     = bt.get('mode',     fallback=mode)
+            retry_delay = bt.getint('retry_delay', fallback=retry_delay)
+
+    if not bdaddr:
+        logger.error("Bluetooth address required (-b / config bdaddr)")
+        return 1
+
+    global _cleanup_device, _cleanup_bdaddr
+    _cleanup_device = device
+    _cleanup_bdaddr = bdaddr
+
+    if mode == 'watch':
+        watch_loop(device, bdaddr, channel, retry_delay)
+        return 0  # unreachable unless interrupted
+    else:
+        rc = connect_once(device, bdaddr, channel)
+        return 0 if rc == 0 else 1
+
+
+if __name__ == '__main__':
+    _cleanup_device = None
+    _cleanup_bdaddr = None
+
+    def _cleanup(signum=None, frame=None):
+        if _cleanup_device:
+            release_rfcomm(_cleanup_device)
+        if _cleanup_bdaddr:
+            disconnect_bt(_cleanup_bdaddr, wait=False)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _cleanup)
+    signal.signal(signal.SIGINT, _cleanup)
+
+    ret = 1
+    try:
+        ret = main()
+    finally:
+        if _cleanup_device:
+            release_rfcomm(_cleanup_device)
+        if _cleanup_bdaddr:
+            disconnect_bt(_cleanup_bdaddr, wait=False)
+
+    sys.exit(ret)
