@@ -10,3 +10,4 @@ venv/
 .mypy_cache/
 .claude/
 *.log
+agwkiss_personal.ini
