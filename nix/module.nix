@@ -41,6 +41,12 @@ in {
             type = "serial";
             device = "/dev/ttyUSB0";
             baudrate = 9600;
+            # Optional serial port settings
+            # parity = "N";      # N=none O=odd E=even M=mark S=space
+            # stopbits = 1;      # 1, 1.5, or 2
+            # rtscts = false;    # RTS/CTS hardware flow control
+            # init_string = "INT KISS\r";  # command to enter KISS mode
+            # init_delay = 1.0;            # seconds to wait after init_string
           };
         }
       '';

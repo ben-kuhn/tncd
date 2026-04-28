@@ -153,6 +153,13 @@ callsign = AGWPE
 type = serial
 device = /dev/ttyUSB0
 baudrate = 9600
+# parity = N       # N=none, O=odd, E=even, M=mark, S=space (default: N)
+# stopbits = 1     # 1, 1.5, or 2 (default: 1)
+# rtscts = false   # RTS/CTS hardware flow control (default: false)
+
+# KISS mode initialization (for TNCs that need a command to enter KISS mode)
+# init_string = INT KISS\r
+# init_delay = 1.0
 
 # Optional KISS timing parameters (values in 10ms units)
 # tx_delay = 40
