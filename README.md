@@ -132,7 +132,7 @@ baudrate = 9600
 # rtscts = false   # RTS/CTS hardware flow control (default: false)
 
 # KISS mode initialization (for TNCs that need a command to enter KISS mode)
-# init_string = INT KISS\r
+# init_string = INT KISS\r   # \r = CR, \n = LF
 # init_delay = 1.0
 
 # Optional KISS timing parameters (values in 10ms units)
@@ -218,13 +218,14 @@ to enter KISS mode. Configure under `[client]`:
 type = serial
 device = /dev/ttyUSB0
 baudrate = 9600
-init_string = INT KISS\r
+init_string = INT KISS\r   # \r and \n are interpreted as CR/LF
 init_delay = 1.0
 ```
 
-`init_string` is sent to the serial port before KISS framing starts. `\r` and `\n`
-are interpreted as carriage return / line feed. `init_delay` (default 1.0 s) is the
-wait after sending the string before opening the KISS connection.
+`init_string` is sent to the serial port before KISS framing begins. Use `\r` for
+carriage return and `\n` for line feed — most TNCs expect `\r` to terminate a command.
+`init_delay` (default 1.0 s) is the wait after sending the string before the KISS
+connection opens.
 
 ## systemd Service
 
