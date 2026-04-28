@@ -81,43 +81,17 @@ The bridge fully implements AX.25 v2.0 connected mode for KISS TNCs:
 
 ### Serial TNC
 
-```ini
-[client]
-type = serial
-device = /dev/ttyUSB0
-baudrate = 9600
-```
+Direct serial connection to a TNC via USB or RS-232.
 
 ### Network KISS (TCP)
 
-```ini
-[client]
-type = tcp
-host = localhost
-port = 8001
-```
+Connects to a KISS-over-TCP server (e.g. Dire Wolf, YAAC).
 
 ### Bluetooth TNC (RFCOMM)
 
-Use `tncd-rfcomm` to manage the Bluetooth connection, then point the bridge at
-the resulting `/dev/rfcomm0` device:
-
-```ini
-[client]
-type = serial
-device = /dev/rfcomm0
-
-[bluetooth]
-enabled = true
-bind_dev = /dev/rfcomm0
-bdaddr = AA:BB:CC:DD:EE:FF
-channel = 1
-mode = watch        # auto-reconnect on drop
-retry_delay = 5
-```
-
-`tncd-rfcomm` disconnects any active Bluetooth audio profile before connecting
-so the serial channel is available, and releases the rfcomm binding on exit.
+Use `tncd-rfcomm` to manage the Bluetooth connection. It disconnects any active
+audio profile before connecting so the serial channel is available, and releases
+the rfcomm binding on exit. Point the bridge at the resulting `/dev/rfcomm0` device.
 
 ## Installation
 
