@@ -5,7 +5,7 @@ Summary:        Experimental pure Python AX.25 stack
 License:        Apache-2.0
 URL:            https://pypi.org/project/ax253/
 # https://files.pythonhosted.org/packages/2e/94/f7400f96ed094e9b9daca9e9753e02eba4e3af347ec087b430f1dcd8e281/ax253-0.1.5.post1.tar.gz
-Source0:        ax253-%{version}.tar.gz
+Source0:        ax253_%{version}.orig.tar.gz
 
 BuildArch:      noarch
 BuildRequires:  python3-devel

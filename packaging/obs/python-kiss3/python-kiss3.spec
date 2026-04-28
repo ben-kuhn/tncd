@@ -5,7 +5,7 @@ Summary:        Python KISS TNC protocol library
 License:        Apache-2.0
 URL:            https://pypi.org/project/kiss3/
 # https://files.pythonhosted.org/packages/8b/66/f2a20256f697ca1e55fe25778bfcdd884e0135af687f32d43001e47146ea/kiss3-8.0.0.tar.gz
-Source0:        kiss3-%{version}.tar.gz
+Source0:        kiss3_%{version}.orig.tar.gz
 
 BuildArch:      noarch
 BuildRequires:  python3-devel
