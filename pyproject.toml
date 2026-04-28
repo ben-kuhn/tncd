@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tncd"
+version = "1.0.0"
+description = "AGWPE-to-KISS Translation Bridge"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.8"
+dependencies = [
+    "kiss3>=8.0.0",
+    "pyham-ax25>=1.0.0",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+tncd = "tncd:main"
+
+[project.urls]
+Homepage = "https://github.com/agwkit/tncd"
+
+[tool.setuptools]
+# tncd has a proper main() function and is importable as a module.
+# tncd-rfcomm uses a hyphen in its filename and cannot be an entry point;
+# it is installed as a plain script.
+py-modules = ["tncd"]
+script-files = ["tncd-rfcomm"]

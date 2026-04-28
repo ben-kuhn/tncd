@@ -6,7 +6,7 @@ import re
 import struct
 from unittest.mock import Mock, MagicMock, patch
 
-from agwkiss import (
+from tncd import (
     AGWPEServerProtocol, Bridge, Connection, KISSClient,
     AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, load_config,
 )
@@ -522,7 +522,7 @@ class TestKISSClient:
     async def test_connect_serial(self):
         config = configparser.ConfigParser()
         config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
-        with patch('agwkiss.kiss.SerialKISS') as mock_kiss:
+        with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
             client = KISSClient(config)
@@ -534,7 +534,7 @@ class TestKISSClient:
     async def test_connect_tcp(self):
         config = configparser.ConfigParser()
         config['client'] = {'type': 'tcp', 'host': 'kiss.example.com', 'port': '8001'}
-        with patch('agwkiss.kiss.TCPKISS') as mock_kiss:
+        with patch('tncd.kiss.TCPKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
             client = KISSClient(config)
@@ -546,7 +546,7 @@ class TestKISSClient:
     async def test_send_data(self):
         config = configparser.ConfigParser()
         config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
-        with patch('agwkiss.kiss.SerialKISS') as mock_kiss:
+        with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
             client = KISSClient(config)
@@ -558,7 +558,7 @@ class TestKISSClient:
     async def test_close(self):
         config = configparser.ConfigParser()
         config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
-        with patch('agwkiss.kiss.SerialKISS') as mock_kiss:
+        with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
             client = KISSClient(config)

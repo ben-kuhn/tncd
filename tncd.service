@@ -2,22 +2,25 @@
 Description=AGWPE-to-KISS Translation Bridge
 After=bluetooth.service
 Wants=bluetooth.service
+# When using Bluetooth TNC, uncomment to start after the rfcomm manager:
+# After=tncd-rfcomm.service
+# Wants=tncd-rfcomm.service
 
 [Service]
 Type=simple
 # Adjust User/Group to a dedicated service account or the user running the TNC.
 User=nobody
 Group=nobody
-# Set to the directory containing agwkiss.py and agwkiss.ini.
-WorkingDirectory=/opt/agwkiss
+# Set to the directory containing tncd.py and tncd.ini.
+WorkingDirectory=/opt/tncd
 
-# Bluetooth TNC (e.g. BTECH UV-Pro): run agwkiss-rfcomm in the background to
+# Bluetooth TNC (e.g. BTECH UV-Pro): run tncd-rfcomm in the background to
 # manage the rfcomm connection.  It will auto-reconnect if the link drops and
 # release the device cleanly on service stop.
 #
-# ExecStartPre=/bin/sh -c '/opt/agwkiss/agwkiss-rfcomm -c /opt/agwkiss/agwkiss.ini &'
+# ExecStartPre=/bin/sh -c '/opt/tncd/tncd-rfcomm -c /opt/tncd/tncd.ini &'
 
-ExecStart=/usr/bin/python3 /opt/agwkiss/agwkiss.py -c /opt/agwkiss/agwkiss.ini
+ExecStart=/usr/bin/python3 /opt/tncd/tncd.py -c /opt/tncd/tncd.ini
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

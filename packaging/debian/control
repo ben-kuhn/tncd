@@ -1,0 +1,16 @@
+Source: tncd
+Section: hamradio
+Priority: optional
+Maintainer: tncd contributors <noreply@github.com>
+Build-Depends: debhelper-compat (= 13), python3
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: tncd
+Architecture: all
+Depends: ${misc:Depends}, python3, python3-serial, python3-pyham-ax25, python3-kiss3, bluez
+Description: AGWPE-to-KISS Translation Bridge
+ A userspace bridge allowing AGWPE-compatible client applications to
+ communicate with KISS TNCs (serial or TCP). Implements full AX.25
+ connected mode including SABM/UA handshake, I-frame sequencing, and
+ RR acknowledgement.

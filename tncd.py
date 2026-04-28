@@ -5,7 +5,7 @@ AGWPE-to-KISS Translation Bridge
 A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
 Supports both serial and TCP KISS connections.
 
-Copyright (C) 2024 AGWKISS Contributors
+Copyright (C) 2024 TNCD Contributors
 License: GNU General Public License v3.0 (see COPYING)
 """
 
@@ -17,6 +17,7 @@ import logging
 import struct
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -436,11 +437,32 @@ class KISSClient:
         else:
             device   = self.config.get('client', 'device', fallback='/dev/ttyUSB0')
             baudrate = self.config.getint('client', 'baudrate', fallback=9600)
+            parity   = self.config.get('client', 'parity', fallback='N').upper()
+            stopbits = self.config.getfloat('client', 'stopbits', fallback=1)
+            rtscts   = self.config.getboolean('client', 'rtscts', fallback=False)
             logger.info(f"Connecting to KISS serial device at {device}, {baudrate} baud")
+
+            init_str = self.config.get('client', 'init_string', fallback=None)
+            if init_str:
+                import serial as _serial
+                init_delay = self.config.getfloat('client', 'init_delay', fallback=1.0)
+                init_bytes = init_str.replace('\\r', '\r').replace('\\n', '\n').encode()
+                logger.info(f"Sending TNC init string: {init_str!r}")
+                with _serial.Serial(device, baudrate, parity=parity, stopbits=stopbits,
+                                    rtscts=rtscts, timeout=1) as ser:
+                    ser.write(init_bytes)
+                time.sleep(init_delay)
+
             self.connection = kiss.SerialKISS(port=device, speed=baudrate)
 
         def blocking_start():
             self.connection.start(**kiss_params)
+            if conn_type != 'tcp' and (parity != 'N' or stopbits != 1 or rtscts):
+                logger.info(f"Reconfiguring serial port: parity={parity}, stopbits={stopbits}, rtscts={rtscts}")
+                ser = self.connection.protocol.transport.serial
+                ser.parity   = parity
+                ser.stopbits = stopbits
+                ser.rtscts   = rtscts
 
         with ThreadPoolExecutor() as executor:
             await loop.run_in_executor(executor, blocking_start)

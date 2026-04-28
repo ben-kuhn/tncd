@@ -1,0 +1,20 @@
+[Unit]
+Description=AGWPE-to-KISS Bridge: Bluetooth rfcomm Manager
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+# rfcomm bind/connect requires root.
+User=root
+Group=root
+# Set to the directory containing tncd-rfcomm and tncd.ini.
+WorkingDirectory=/opt/tncd
+ExecStart=/usr/bin/python3 /opt/tncd/tncd-rfcomm -c /opt/tncd/tncd.ini -m watch
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

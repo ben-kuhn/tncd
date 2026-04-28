@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Compute release tarball SHA256
+        run: |
+          URL="https://github.com/agwkit/tncd/archive/v$VERSION.tar.gz"
+          SHA256=$(curl -sL "$URL" | sha256sum | cut -d' ' -f1)
+          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
+
+      - name: Update version in packaging files
+        run: |
+          sed -i "s/^Version:.*/Version:        $VERSION/" packaging/tncd.spec
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/PKGBUILD
+          sed -i "s/sha256sums=.*/sha256sums=('$SHA256')/" packaging/PKGBUILD
+          sed -i \
+            "s|<param name=\"revision\">.*</param>|<param name=\"revision\">v$VERSION</param>|" \
+            packaging/obs/tncd/_service
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packaging/tncd.spec packaging/PKGBUILD packaging/obs/tncd/_service
+          git commit -m "chore: release $VERSION [skip ci]"
+          git push origin HEAD:main
+
+      - name: Install osc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y osc
+
+      - name: Configure osc
+        run: |
+          mkdir -p ~/.config/osc
+          cat > ~/.config/osc/oscrc <<OSCEOF
+          [general]
+          apiurl = https://api.opensuse.org
+          [https://api.opensuse.org]
+          user = ${{ secrets.OBS_USERNAME }}
+          pass = ${{ secrets.OBS_PASSWORD }}
+          OSCEOF
+
+      - name: Push tncd to OBS
+        run: |
+          osc co "home:${{ secrets.OBS_USERNAME }}:tncd" tncd
+          cp packaging/tncd.spec \
+             "home:${{ secrets.OBS_USERNAME }}:tncd/tncd/"
+          cp packaging/obs/tncd/_service \
+             "home:${{ secrets.OBS_USERNAME }}:tncd/tncd/"
+          cd "home:${{ secrets.OBS_USERNAME }}:tncd/tncd"
+          osc ci -m "release $VERSION"

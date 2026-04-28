@@ -1,4 +1,4 @@
-# AGWPE-to-KISS Translation Bridge
+# tncd — AGWPE-to-KISS Bridge
 
 A userspace bridge that allows AGWPE-compatible client applications to communicate
 with KISS TNCs (Terminal Node Controllers), including full AX.25 connected-mode
@@ -7,15 +7,15 @@ breaking applications that previously relied on `AF_AX25` sockets.
 
 ## Purpose
 
-Many packet radio programs — Winlink clients (PAT, Winlink Express), APRS
-applications (Xastir, APRSDroid), and BBS software (Paracon) — talk to TNCs using
+Many packet radio programs — Winlink clients (PAT), APRS
+applications (Xastir), and BBS software (Paracon) — talk to TNCs using
 the AGWPE protocol. This bridge translates AGWPE to KISS and implements the AX.25
 layer 2 state machine that a KISS TNC does not provide.
 
 ## Architecture
 
 ```
-[AGWPE Client App] ----TCP----> [agwkiss Bridge] ----KISS----> [TNC Hardware]
+[AGWPE Client App] ----TCP----> [tncd] ----KISS----> [TNC Hardware]
                           (port 8000)            (serial/TCP)
 ```
 
@@ -47,6 +47,19 @@ sequencing, RR acknowledgement, duplicate detection, and clean DISC handling.
 | `I`  | TX    | Monitor: received I-frame |
 | `S`  | TX    | Monitor: received supervisory frame |
 | `U`  | TX    | Monitor: received unnumbered frame |
+
+## APRS and Unproto (UI) Frames
+
+APRS and other unconnected-mode applications (Xastir, etc.) are fully supported.
+UI frames do not require the AX.25 layer 2 state machine — the bridge passes them
+directly between the AGWPE client and the KISS TNC:
+
+- **Send** — `M` (UI frame) and `V` (UI frame via digipeaters) transmit APRS packets
+- **Receive** — enable monitoring with `m`; received UI frames are delivered as `U`
+  monitor frames to all registered clients
+
+No special configuration is needed; APRS and connected-mode (Winlink/PAT) clients
+can share the same bridge instance simultaneously.
 
 ## AX.25 Connected Mode
 
@@ -86,7 +99,7 @@ port = 8001
 
 ### Bluetooth TNC (RFCOMM)
 
-Use `agwkiss-rfcomm` to manage the Bluetooth connection, then point the bridge at
+Use `tncd-rfcomm` to manage the Bluetooth connection, then point the bridge at
 the resulting `/dev/rfcomm0` device:
 
 ```ini
@@ -103,7 +116,7 @@ mode = watch        # auto-reconnect on drop
 retry_delay = 5
 ```
 
-`agwkiss-rfcomm` disconnects any active Bluetooth audio profile before connecting
+`tncd-rfcomm` disconnects any active Bluetooth audio profile before connecting
 so the serial channel is available, and releases the rfcomm binding on exit.
 
 ## Installation
@@ -122,14 +135,12 @@ pip install -r requirements.txt
 
 ### Via Nix (NixOS)
 
-```nix
-imports = [ /path/to/agwkiss/nix/overlay.nix ];
-environment.systemPackages = [ pkgs.agwkiss ];
-```
+See [`nix/README.md`](nix/README.md) for the full NixOS module with service options,
+automatic config generation, and Bluetooth support.
 
 ## Configuration
 
-Copy `agwkiss.ini` and adjust for your setup:
+Copy `tncd.ini` and adjust for your setup:
 
 ```ini
 [server]
@@ -155,16 +166,16 @@ baudrate = 9600
 
 ```bash
 # Serial TNC
-python agwkiss.py -c agwkiss.ini
+python tncd.py -c tncd.ini
 
 # With verbose frame logging
-python agwkiss.py -c agwkiss.ini -v    # frame types
-python agwkiss.py -c agwkiss.ini -vv   # + data content
-python agwkiss.py -c agwkiss.ini -vvv  # + AGWPE internals
+python tncd.py -c tncd.ini -v    # frame types
+python tncd.py -c tncd.ini -vv   # + data content
+python tncd.py -c tncd.ini -vvv  # + AGWPE internals
 
 # Bluetooth TNC — run rfcomm manager first (in a separate terminal or as a service)
-sudo python agwkiss-rfcomm -c agwkiss.ini   # stays running, auto-reconnects
-python agwkiss.py -c agwkiss.ini
+sudo python tncd-rfcomm -c tncd.ini   # stays running, auto-reconnects
+python tncd.py -c tncd.ini
 ```
 
 ## KISS Parameters
@@ -179,16 +190,90 @@ Configured under `[client]` in the INI file. All values are in 10ms units.
 | tx_tail      | 30      | PTT hold after last byte         |
 | full_duplex  | 0       | Full duplex mode (0 or 1)        |
 
-## systemd Service
+## Serial Port Parameters
 
-```bash
-cp agwkiss.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable agwkiss
-systemctl start agwkiss
+Some TNCs require non-standard serial settings. Configure under `[client]`:
+
+| Parameter | Default | Description                                  |
+|-----------|---------|----------------------------------------------|
+| parity    | `N`     | Parity: `N`=none, `O`=odd, `E`=even, `M`=mark, `S`=space |
+| stopbits  | `1`     | Stop bits: `1`, `1.5`, or `2`               |
+| rtscts    | `false` | Hardware RTS/CTS flow control                |
+
+Example for AEA TNCs that use odd parity:
+
+```ini
+[client]
+type = serial
+device = /dev/ttyUSB0
+baudrate = 9600
+parity = O
+stopbits = 1
 ```
 
-See `agwkiss.service` for Bluetooth `ExecStartPre` configuration.
+## KISS Mode Initialization
+
+Some serial TNCs (e.g. Kantronics KPC-3) power up in terminal mode and need a command
+to enter KISS mode. Configure under `[client]`:
+
+```ini
+[client]
+type = serial
+device = /dev/ttyUSB0
+baudrate = 9600
+init_string = INT KISS\r
+init_delay = 1.0
+```
+
+`init_string` is sent to the serial port before KISS framing starts. `\r` and `\n`
+are interpreted as carriage return / line feed. `init_delay` (default 1.0 s) is the
+wait after sending the string before opening the KISS connection.
+
+## systemd Service
+
+### Main bridge
+
+```bash
+cp tncd.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable tncd
+systemctl start tncd
+```
+
+### Bluetooth rfcomm manager (optional)
+
+Run `tncd-rfcomm` as a service to manage the Bluetooth connection independently of
+the main bridge. It will connect on startup and automatically reconnect if the link drops.
+
+```bash
+cp tncd-rfcomm.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable tncd-rfcomm
+systemctl start tncd-rfcomm
+```
+
+When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
+`tncd.service` so the bridge starts after the rfcomm device is ready.
+
+## Compatibility
+
+### Clients
+
+- [x] PAT (Winlink)
+- [x] Paracon
+- [ ] QTTermTCP
+- [ ] Xastir
+
+### Hardware
+
+- [x] BTECH UV-Pro (Bluetooth)
+- [ ] Mobilinkd TNC4 (Bluetooth)
+- [ ] Mobilinkd TNC3 (Bluetooth)
+- [ ] Mobilinkd TNC2 (Bluetooth)
+- [ ] Kenwood TH-D7
+- [ ] Kenwood TS-2000
+- [ ] AEA PK-232
+- [ ] AEA DSP-2232
 
 ## Running Tests
 

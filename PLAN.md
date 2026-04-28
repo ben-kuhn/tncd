@@ -16,10 +16,10 @@ A userspace bridge allowing AGWPE-compatible client applications to communicate 
 | `pyham-ax25` | AX.25 frame encode/decode |
 | `pyserial` | Serial port access |
 
-Note: `pyham-pe` is a *client* library (used by Paracon, etc.) that connects to this bridge. It is not a runtime dependency of agwkiss itself, but is used in tests to verify protocol compatibility.
+Note: `pyham-pe` is a *client* library (used by Paracon, etc.) that connects to this bridge. It is not a runtime dependency of tncd itself, but is used in tests to verify protocol compatibility.
 
 ## Configuration
-Command-line args OR config file (`agwkiss.ini`):
+Command-line args OR config file (`tncd.ini`):
 
 ```ini
 [server]
@@ -42,7 +42,7 @@ baudrate = 9600
 - systemd service ready
 
 ### Milestone 2: Bluetooth rfcomm Management (COMPLETE)
-- `agwkiss-rfcomm` script to manage Bluetooth rfcomm bindings
+- `tncd-rfcomm` script to manage Bluetooth rfcomm bindings
 - Disconnects audio profiles before connecting serial channel
 - Auto-reconnect (`watch` mode) on connection drop
 - Cleans up rfcomm binding on exit (SIGINT/SIGTERM)

@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	# pure Python — nothing to compile
+
+override_dh_auto_install:
+	install -Dm755 tncd.py     $(CURDIR)/debian/tncd/usr/bin/tncd
+	install -Dm755 tncd-rfcomm $(CURDIR)/debian/tncd/usr/bin/tncd-rfcomm
+	install -Dm644 tncd.ini    $(CURDIR)/debian/tncd/etc/tncd.ini.example
+	# Patch service files for packaged install paths before installing.
+	install -Dm644 /dev/null $(CURDIR)/debian/tncd/lib/systemd/system/tncd.service
+	sed \
+	    -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
+	    -e '/^WorkingDirectory=/d' \
+	    tncd.service > $(CURDIR)/debian/tncd/lib/systemd/system/tncd.service
+	install -Dm644 /dev/null $(CURDIR)/debian/tncd/lib/systemd/system/tncd-rfcomm.service
+	sed \
+	    -e 's|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|' \
+	    -e '/^WorkingDirectory=/d' \
+	    tncd-rfcomm.service > $(CURDIR)/debian/tncd/lib/systemd/system/tncd-rfcomm.service

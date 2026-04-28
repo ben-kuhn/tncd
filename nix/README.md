@@ -1,118 +1,115 @@
-# Nix Overlay for AGWKISS
+# Nix / NixOS support
 
-This overlay allows you to use agwkiss in NixOS without adding it to the main nixpkgs repository.
+Two files are provided:
 
-## Quick Start
+| File | Purpose |
+|------|---------|
+| `overlay.nix` | Adds `pkgs.tncd` to nixpkgs |
+| `module.nix` | NixOS module: `services.tncd.*` options + systemd services |
 
-### Option 1: Import directly in configuration.nix
+## Quick start (NixOS)
 
 ```nix
-# In your configuration.nix
+# configuration.nix
 { config, pkgs, ... }:
-
 {
-  imports = [
-    /path/to/agwkiss/nix/overlay.nix
-  ];
+  nixpkgs.overlays = [ (import /path/to/tncd/nix/overlay.nix) ];
+  imports = [ /path/to/tncd/nix/module.nix ];
 
-  environment.systemPackages = [ pkgs.agwkiss ];
-  
-  # Or use it in a container
-  virtualisation.oci-containers.containers.aprs = {
-    image = "agwkiss";
-    # ...
-  };
-}
-```
-
-### Option 2: Using flakes (modern)
-
-```nix
-# In flake.nix
-{
-  inputs.agwkiss.url = "github:yourusername/agwkiss";
-  inputs.agwkiss.overlays.default = Agwkiss: prev: {
-    agwkiss = prev.python3Packages.buildPythonApplication {
-      pname = "agwkiss";
-      version = "1.0.0";
-      src = Agwkiss;
-      dependencies = with prev.python3Packages; [
-        pyserial
-        ax253
-      ];
+  services.tncd = {
+    enable = true;
+    settings = {
+      server = {
+        listen_host = "0.0.0.0";
+        listen_port = 8000;
+        callsign = "N0CALL";
+      };
+      client = {
+        type = "serial";
+        device = "/dev/ttyUSB0";
+        baudrate = 9600;
+      };
     };
   };
 }
 ```
 
-### Option 3: Standalone nix-build
+This creates a `tncd` system user (with `dialout` group access), generates
+`/etc/tncd.ini` from `settings`, and starts `tncd.service`.
 
-```bash
-# Build the package
-nix-build -I nixpkgs=/path/to/nixpkgs -f overlay.nix -A agwkiss
+## Bluetooth TNC
 
-# Create a GC root
-nix-build -I nixpkgs=/path/to/nixpkgs -f overlay.nix -A agwkiss --out-link /var/lib/agwkiss
-```
-
-## Systemd Service on NixOS
+Enable the rfcomm manager alongside the main bridge:
 
 ```nix
-# In configuration.nix
-{ config, pkgs, ... }:
-
-{
-  systemd.services.agwkiss = {
-    description = "AGWPE-to-KISS Bridge";
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.agwkiss}/bin/agwkiss.py -c /etc/agwkiss.ini";
-      User = "aprs";
-      Group = "aprs";
-      Restart = "on-failure";
-      RestartSec = 5;
+services.tncd = {
+  enable = true;
+  bluetooth.enable = true;   # also starts tncd-rfcomm.service
+  settings = {
+    server = {
+      listen_host = "0.0.0.0";
+      listen_port = 8000;
+      callsign = "N0CALL";
     };
-    wantedBy = [ "multi-user.target" ];
+    client = {
+      type = "serial";
+      device = "/dev/rfcomm0";
+    };
+    bluetooth = {
+      enabled = true;
+      bind_dev = "/dev/rfcomm0";
+      bdaddr = "38:D2:00:01:52:8F";
+      channel = 1;
+      mode = "watch";
+      retry_delay = 5;
+    };
   };
-}
-```
-
-## Configuration File
-
-Create `/etc/agwkiss.ini`:
-
-```ini
-[server]
-listen_host = 0.0.0.0
-listen_port = 8000
-
-[client]
-type = serial
-device = /dev/ttyUSB0
-baudrate = 9600
-```
-
-## Updating the Overlay
-
-When agwkiss is updated, the overlay will automatically pick up the changes if you point to the updated source directory.
-
-For version pins, modify the src in the overlay:
-
-```nix
-src = final.fetchFromGitHub {
-  owner = "yourusername";
-  repo = "agwkiss";
-  rev = "v1.0.0";
-  sha256 = "0000000000000000000000000000000000000000000000000000=";
 };
 ```
 
-## Testing
+`tncd-rfcomm.service` runs as root (required for `rfcomm` commands) and will
+start before `tncd.service`.
+
+## Existing config file
+
+If you manage `/etc/tncd.ini` outside of Nix (e.g. via `environment.etc`),
+point `configFile` at it to skip config generation:
+
+```nix
+services.tncd = {
+  enable = true;
+  configFile = /etc/tncd.ini;
+};
+```
+
+## KISS mode init string (serial TNCs)
+
+For TNCs that need a command to enter KISS mode (e.g. Kantronics KPC-3):
+
+```nix
+services.tncd.settings.client = {
+  type = "serial";
+  device = "/dev/ttyUSB0";
+  baudrate = 9600;
+  init_string = "INT KISS\\r";
+  init_delay = "1.0";
+};
+```
+
+## Module options reference
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `services.tncd.enable` | `false` | Enable the bridge |
+| `services.tncd.package` | `pkgs.tncd` | Package to use |
+| `services.tncd.configFile` | `null` | Use an existing INI file |
+| `services.tncd.settings` | `{}` | Nix-generated INI config |
+| `services.tncd.user` | `"tncd"` | Service user |
+| `services.tncd.group` | `"tncd"` | Service group |
+| `services.tncd.bluetooth.enable` | `false` | Also run rfcomm manager |
+
+## Standalone nix-build
 
 ```bash
-# Test building the package
-nix-build -I nixpkgs=/path/to/nixpkgs -f overlay.nix -A agwkiss
-
-# Test the shell with dependencies
-nix-shell -I nixpkgs=/path/to/nixpkgs -f overlay.nix -A agwkiss.drv
+nix-build -I nixpkgs=/path/to/nixpkgs -f overlay.nix -A tncd
 ```

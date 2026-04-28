@@ -3,7 +3,7 @@
 }:
 
 python3.pkgs.buildPythonApplication rec {
-  pname = "agwkiss";
+  pname = "tncd";
   version = "1.0.0";
 
   src = lib.cleanSource ../.;
@@ -19,7 +19,9 @@ python3.pkgs.buildPythonApplication rec {
   ];
 
   installPhase = ''
-    install -Dm755 agwkiss.py $out/bin/agwkiss
+    install -Dm755 tncd.py      $out/bin/tncd
+    install -Dm755 tncd-rfcomm  $out/bin/tncd-rfcomm
+    install -Dm644 tncd.ini     $out/share/tncd/tncd.ini.example
   '';
 
   meta = with lib; {
@@ -28,7 +30,7 @@ python3.pkgs.buildPythonApplication rec {
       A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
       Supports both serial and TCP KISS connections.
     '';
-    homepage = "https://github.com/agwkit/agwkiss";
+    homepage = "https://github.com/agwkit/tncd";
     license = lib.licenses.gpl3;
     maintainers = [ ];
     platforms = lib.platforms.linux;
