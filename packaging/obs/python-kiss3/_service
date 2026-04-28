@@ -1,6 +1,0 @@
-<services>
-  <service name="obs_pypi">
-    <param name="package">kiss3</param>
-    <param name="filename">python-kiss3</param>
-  </service>
-</services>
