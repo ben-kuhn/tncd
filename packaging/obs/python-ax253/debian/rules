@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	# pure Python — nothing to compile
+
+override_dh_auto_install:
+	SETUPTOOLS_SCM_PRETEND_VERSION=0.1.5.post1 \
+	    python3 -m pip install --no-deps --no-build-isolation \
+	    --root=$(CURDIR)/debian/python3-ax253 --prefix=/usr .
