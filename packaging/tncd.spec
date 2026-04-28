@@ -3,7 +3,7 @@ Version:        1.0.0
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
 License:        GPL-3.0-or-later
-URL:            https://github.com/agwkit/tncd
+URL:            https://github.com/ben-kuhn/tncd
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch

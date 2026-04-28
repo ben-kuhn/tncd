@@ -29,7 +29,7 @@ final: prev:
         A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
         Supports both serial and TCP KISS connections, and full AX.25 connected mode.
       '';
-      homepage = "https://github.com/agwkit/tncd";
+      homepage = "https://github.com/ben-kuhn/tncd";
       license = final.lib.licenses.gpl3;
       platforms = final.lib.platforms.linux;
     };

@@ -1,6 +1,6 @@
 <services>
   <service name="obs_scm">
-    <param name="url">https://github.com/agwkit/tncd</param>
+    <param name="url">https://github.com/ben-kuhn/tncd</param>
     <param name="scm">git</param>
     <param name="revision">v1.0.0</param>
     <param name="versionformat">@PARENT_TAG@</param>

@@ -24,7 +24,7 @@ jobs:
 
       - name: Compute release tarball SHA256
         run: |
-          URL="https://github.com/agwkit/tncd/archive/v$VERSION.tar.gz"
+          URL="https://github.com/ben-kuhn/tncd/archive/v$VERSION.tar.gz"
           SHA256=$(curl -sL "$URL" | sha256sum | cut -d' ' -f1)
           echo "SHA256=$SHA256" >> "$GITHUB_ENV"
 

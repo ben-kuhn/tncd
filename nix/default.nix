@@ -30,7 +30,7 @@ python3.pkgs.buildPythonApplication rec {
       A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
       Supports both serial and TCP KISS connections.
     '';
-    homepage = "https://github.com/agwkit/tncd";
+    homepage = "https://github.com/ben-kuhn/tncd";
     license = lib.licenses.gpl3;
     maintainers = [ ];
     platforms = lib.platforms.linux;

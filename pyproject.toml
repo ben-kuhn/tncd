@@ -19,7 +19,7 @@ dependencies = [
 tncd = "tncd:main"
 
 [project.urls]
-Homepage = "https://github.com/agwkit/tncd"
+Homepage = "https://github.com/ben-kuhn/tncd"
 
 [tool.setuptools]
 # tncd has a proper main() function and is importable as a module.
