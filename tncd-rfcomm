@@ -6,8 +6,8 @@ Disconnects any active Bluetooth audio profile, then connects via rfcomm.
 With -m watch, automatically reconnects if the connection drops.
 
 Usage:
-  ./tncd-rfcomm -b 38:D2:00:01:52:8F              # connect once
-  ./tncd-rfcomm -b 38:D2:00:01:52:8F -m watch     # connect + auto-reconnect
+  ./tncd-rfcomm -b AA:BB:CC:DD:EE:FF              # connect once
+  ./tncd-rfcomm -b AA:BB:CC:DD:EE:FF -m watch     # connect + auto-reconnect
   ./tncd-rfcomm -c tncd.ini                     # read from config file
 """
 

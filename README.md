@@ -110,7 +110,7 @@ device = /dev/rfcomm0
 [bluetooth]
 enabled = true
 bind_dev = /dev/rfcomm0
-bdaddr = 38:D2:00:01:52:8F
+bdaddr = AA:BB:CC:DD:EE:FF
 channel = 1
 mode = watch        # auto-reconnect on drop
 retry_delay = 5
