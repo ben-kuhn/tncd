@@ -11,3 +11,5 @@ venv/
 .claude/
 *.log
 tncd_personal.ini
+README.html
+*_test*.ini
