@@ -36,12 +36,17 @@ jobs:
           sed -i \
             "s|<param name=\"revision\">.*</param>|<param name=\"revision\">v$VERSION</param>|" \
             packaging/obs/tncd/_service
+          DATE=$(date -R)
+          sed -i "1s/tncd ([^)]*)/tncd ($VERSION)/" debian/changelog
+          sed -i "s|^ -- tncd contributors.*| -- tncd contributors <noreply@github.com>  $DATE|" \
+            debian/changelog
 
       - name: Commit version bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packaging/tncd.spec packaging/PKGBUILD packaging/obs/tncd/_service
+          git add packaging/tncd.spec packaging/PKGBUILD packaging/obs/tncd/_service \
+            debian/changelog
           git commit -m "chore: release $VERSION [skip ci]"
           git push origin HEAD:main
 

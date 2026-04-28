@@ -1,0 +1,6 @@
+<services>
+  <service name="obs_pypi">
+    <param name="package">pyham-ax25</param>
+    <param name="filename">python-pyham-ax25</param>
+  </service>
+</services>
