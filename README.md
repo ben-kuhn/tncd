@@ -143,6 +143,22 @@ baudrate = 9600
 # full_duplex = 0
 ```
 
+### Bluetooth TNC
+
+```ini
+[client]
+type = serial
+device = /dev/rfcomm0
+
+[bluetooth]
+enabled = true
+bind_dev = /dev/rfcomm0
+bdaddr = AA:BB:CC:DD:EE:FF
+channel = 1
+mode = watch        # auto-reconnect on drop
+retry_delay = 5
+```
+
 ## Usage
 
 ```bash
