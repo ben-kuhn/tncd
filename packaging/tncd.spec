@@ -11,7 +11,11 @@ BuildRequires:  python3-devel
 
 Requires:       python3
 Requires:       python3-kiss3 >= 8.0.0
+%if 0%{?suse_version}
+Requires:       python3-pyham_ax25 >= 1.0.0
+%else
 Requires:       python3-pyham-ax25 >= 1.0.0
+%endif
 Requires:       python3-pyserial >= 3.5
 Requires:       bluez
 
