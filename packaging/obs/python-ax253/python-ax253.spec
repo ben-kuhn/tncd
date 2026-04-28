@@ -1,11 +1,11 @@
-Name:           python-kiss3
-Version:        8.0.0
+Name:           python-ax253
+Version:        0.1.5.post1
 Release:        1%{?dist}
-Summary:        Python KISS TNC protocol library
+Summary:        Experimental pure Python AX.25 stack
 License:        Apache-2.0
-URL:            https://pypi.org/project/kiss3/
-# https://files.pythonhosted.org/packages/8b/66/f2a20256f697ca1e55fe25778bfcdd884e0135af687f32d43001e47146ea/kiss3-8.0.0.tar.gz
-Source0:        kiss3-%{version}.tar.gz
+URL:            https://pypi.org/project/ax253/
+# https://files.pythonhosted.org/packages/2e/94/f7400f96ed094e9b9daca9e9753e02eba4e3af347ec087b430f1dcd8e281/ax253-0.1.5.post1.tar.gz
+Source0:        ax253-%{version}.tar.gz
 
 BuildArch:      noarch
 BuildRequires:  python3-devel
@@ -15,18 +15,16 @@ BuildRequires:  python3-setuptools_scm
 BuildRequires:  python3-wheel
 
 Requires:       python3
-Requires:       python3-ax253 >= 0.1.5
 Requires:       python3-attrs
 Requires:       python3-bitarray
 Requires:       python3-importlib-metadata
-Requires:       python3-pyserial-asyncio
 
 %description
-A pure-Python implementation of serial KISS and KISS-over-TCP protocols
-for communicating with TNC devices.
+Experimental pure Python AX.25 stack providing frame encoding and
+decoding for packet radio applications.
 
 %prep
-%autosetup -n kiss3-%{version}
+%autosetup -n ax253-%{version}
 
 %build
 # setuptools_scm cannot detect version without git; provide it explicitly
@@ -39,9 +37,9 @@ python3 -m pip install --no-deps --no-build-isolation \
 
 %files
 %license LICENSE
-%{python3_sitelib}/kiss/
-%{python3_sitelib}/kiss3-%{version}.dist-info/
+%{python3_sitelib}/ax253/
+%{python3_sitelib}/ax253-%{version}.dist-info/
 
 %changelog
-* Mon Apr 28 2026 tncd contributors <noreply@github.com> - 8.0.0-1
+* Mon Apr 28 2026 tncd contributors <noreply@github.com> - 0.1.5.post1-1
 - Initial package
