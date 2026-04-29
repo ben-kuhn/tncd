@@ -1,5 +1,5 @@
 Name:           tncd
-Version:        1.0.0
+Version:        0.1
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
 License:        GPL-3.0-or-later
@@ -67,5 +67,5 @@ sed \
 %{_unitdir}/tncd-rfcomm.service
 
 %changelog
-* Mon Apr 28 2026 tncd contributors <noreply@github.com> - 1.0.0-1
+* Mon Apr 28 2026 tncd contributors <noreply@github.com> - 0.1-1
 - Initial package

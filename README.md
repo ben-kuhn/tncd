@@ -95,7 +95,31 @@ the rfcomm binding on exit. Point the bridge at the resulting `/dev/rfcomm0` dev
 
 ## Installation
 
-### Dependencies
+### Debian / Ubuntu
+
+```bash
+curl -fsSL https://tncd.dev/tncd.pub \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tncd.gpg
+echo "deb [signed-by=/usr/share/keyrings/tncd.gpg] https://tncd.dev/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/tncd.list
+sudo apt update && sudo apt install tncd
+```
+
+### Fedora / RHEL / openSUSE
+
+```bash
+sudo curl -fsSL https://tncd.dev/rpm/tncd.repo -o /etc/yum.repos.d/tncd.repo
+sudo dnf install tncd          # Fedora / RHEL
+# sudo zypper install tncd     # openSUSE
+```
+
+### Arch Linux (AUR)
+
+```bash
+yay -S tncd
+```
+
+### From source / pip
 
 ```bash
 pip install kiss3 pyham-ax25 pyserial
@@ -162,17 +186,20 @@ retry_delay = 5
 ## Usage
 
 ```bash
-# Serial TNC
+# Serial TNC (packaged install)
+tncd -c /etc/tncd.ini
+
+# Serial TNC (source install)
 python tncd.py -c tncd.ini
 
 # With verbose frame logging
-python tncd.py -c tncd.ini -v    # frame types
-python tncd.py -c tncd.ini -vv   # + data content
-python tncd.py -c tncd.ini -vvv  # + AGWPE internals
+tncd -c /etc/tncd.ini -v    # frame types
+tncd -c /etc/tncd.ini -vv   # + data content
+tncd -c /etc/tncd.ini -vvv  # + AGWPE internals
 
 # Bluetooth TNC — run rfcomm manager first (in a separate terminal or as a service)
-sudo python tncd-rfcomm -c tncd.ini   # stays running, auto-reconnects
-python tncd.py -c tncd.ini
+sudo tncd-rfcomm -c /etc/tncd.ini   # stays running, auto-reconnects
+tncd -c /etc/tncd.ini
 ```
 
 ## KISS Parameters
@@ -229,25 +256,28 @@ connection opens.
 
 ## systemd Service
 
-### Main bridge
+### Packaged install (apt / dnf / zypper / AUR)
+
+Service files are installed automatically. Copy the example config and start:
+
+```bash
+sudo cp /etc/tncd.ini.example /etc/tncd.ini
+$EDITOR /etc/tncd.ini
+sudo systemctl enable --now tncd
+```
+
+For Bluetooth, also enable the rfcomm manager:
+
+```bash
+sudo systemctl enable --now tncd-rfcomm
+```
+
+### Manual / source install
 
 ```bash
 cp tncd.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable tncd
-systemctl start tncd
-```
-
-### Bluetooth rfcomm manager (optional)
-
-Run `tncd-rfcomm` as a service to manage the Bluetooth connection independently of
-the main bridge. It will connect on startup and automatically reconnect if the link drops.
-
-```bash
-cp tncd-rfcomm.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable tncd-rfcomm
-systemctl start tncd-rfcomm
+systemctl enable --now tncd
 ```
 
 When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
