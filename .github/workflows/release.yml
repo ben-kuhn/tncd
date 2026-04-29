@@ -258,11 +258,20 @@ jobs:
             git commit -m "chore: bump PKGBUILD to $VERSION [skip ci]"
           git push origin main
 
-      - name: Deploy to Cloudflare Pages
+      - name: Generate wrangler.toml
+        run: |
+          cat > wrangler.toml <<'EOF'
+          name = "tncd"
+          compatibility_date = "2025-04-01"
+          [assets]
+          directory = "./repo"
+          EOF
+
+      - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
-          command: pages deploy repo --project-name=tncd --commit-dirty=true
+          command: deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
