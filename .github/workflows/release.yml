@@ -259,7 +259,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: pages deploy repo --project-name=tncd
+          command: pages deploy repo --project-name=tncd --account-id=${{ secrets.CF_ACCOUNT_ID }} --commit-dirty=true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
