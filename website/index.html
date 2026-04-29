@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tncd — AGWPE-to-KISS Translation Bridge</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --code-bg: #1f2937;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 2rem 1rem;
+      text-align: center;
+    }
+    header h1 {
+      font-size: 2.5rem;
+      font-family: "SF Mono", "Fira Code", monospace;
+      color: var(--accent);
+      letter-spacing: -1px;
+    }
+    header p.tagline {
+      color: var(--muted);
+      margin-top: 0.5rem;
+      font-size: 1.05rem;
+    }
+    header .badges {
+      margin-top: 1rem;
+    }
+    header .badges a {
+      display: inline-block;
+      margin: 0.2rem;
+      padding: 0.3rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    header .badges a:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+
+    main {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 2rem 1rem 4rem;
+    }
+
+    section { margin-bottom: 3rem; }
+    h2 {
+      font-size: 1.4rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 1px solid var(--border);
+    }
+    p { margin-bottom: 0.75rem; color: var(--text); }
+
+    .distros {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .distro-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+    }
+    .distro-card h3 {
+      font-size: 1rem;
+      margin-bottom: 0.75rem;
+      color: var(--accent);
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.85rem 1rem;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+    code { font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; }
+    pre code { color: var(--green); }
+
+    .note {
+      background: var(--surface);
+      border-left: 3px solid var(--accent);
+      padding: 0.75rem 1rem;
+      border-radius: 0 6px 6px 0;
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-top: 1rem;
+    }
+
+    .arch-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .arch-tag {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.2rem 0.6rem;
+      font-size: 0.82rem;
+      font-family: monospace;
+      color: var(--muted);
+    }
+
+    footer {
+      text-align: center;
+      padding: 2rem 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>tncd</h1>
+  <p class="tagline">AGWPE-to-KISS Translation Bridge for packet radio</p>
+  <div class="badges">
+    <a href="https://github.com/ben-kuhn/tncd">GitHub</a>
+    <a href="https://github.com/ben-kuhn/tncd/releases">Releases</a>
+    <a href="https://github.com/ben-kuhn/tncd/blob/main/README.md">Documentation</a>
+    <a href="https://github.com/ben-kuhn/tncd/blob/main/COPYING">GPL-3.0</a>
+  </div>
+</header>
+
+<main>
+
+  <section>
+    <h2>About</h2>
+    <p>
+      <code>tncd</code> is a userspace bridge that lets AGWPE-compatible applications (Winlink,
+      Xastir, APRSIS32, etc.) talk to KISS TNCs — serial, TCP, or Bluetooth.
+    </p>
+    <p>
+      It implements full AX.25 connected mode including SABM/UA handshake, I-frame sequencing,
+      and RR acknowledgement, with no kernel AX.25 stack required.
+    </p>
+    <div class="arch-list">
+      <span class="arch-tag">x86_64</span>
+      <span class="arch-tag">i686</span>
+      <span class="arch-tag">arm64</span>
+      <span class="arch-tag">armhf</span>
+      <span class="arch-tag">riscv64</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+
+    <div class="distros">
+
+      <div class="distro-card">
+        <h3>Debian / Ubuntu</h3>
+        <pre><code>curl -fsSL https://tncd.dev/tncd.pub \
+  | sudo gpg --dearmor \
+  -o /usr/share/keyrings/tncd.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/tncd.gpg] \
+https://tncd.dev/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/tncd.list
+
+sudo apt update
+sudo apt install tncd</code></pre>
+      </div>
+
+      <div class="distro-card">
+        <h3>Fedora / RHEL / CentOS</h3>
+        <pre><code>sudo curl -fsSL \
+  https://tncd.dev/rpm/tncd.repo \
+  -o /etc/yum.repos.d/tncd.repo
+
+sudo dnf install tncd</code></pre>
+      </div>
+
+      <div class="distro-card">
+        <h3>openSUSE</h3>
+        <pre><code>sudo curl -fsSL \
+  https://tncd.dev/rpm/tncd.repo \
+  -o /etc/zypp/repos.d/tncd.repo
+
+sudo zypper refresh
+sudo zypper install tncd</code></pre>
+      </div>
+
+      <div class="distro-card">
+        <h3>Arch Linux (AUR)</h3>
+        <pre><code>yay -S tncd</code></pre>
+        <p style="margin-top:0.6rem;font-size:0.85rem;color:var(--muted)">
+          Or any AUR helper. System deps are resolved automatically.
+        </p>
+      </div>
+
+    </div>
+
+    <div class="note">
+      Packages include all Python dependencies. Only <code>python3</code> and
+      <code>bluez</code> need to be installed separately (usually already present).
+    </div>
+  </section>
+
+  <section>
+    <h2>Quick Start</h2>
+    <p>Copy the example config and edit it for your TNC:</p>
+    <pre><code>sudo cp /etc/tncd.ini.example /etc/tncd.ini
+sudo $EDITOR /etc/tncd.ini</code></pre>
+
+    <p style="margin-top:1rem;">Enable and start the service:</p>
+    <pre><code>sudo systemctl enable --now tncd</code></pre>
+
+    <p style="margin-top:1rem;">For a Bluetooth TNC, also start the rfcomm manager:</p>
+    <pre><code>sudo systemctl enable --now tncd-rfcomm</code></pre>
+
+    <p style="margin-top:1rem;">
+      See the <a href="https://github.com/ben-kuhn/tncd/blob/main/README.md">README</a>
+      for full configuration reference.
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  <p>tncd &mdash; <a href="https://github.com/ben-kuhn/tncd">github.com/ben-kuhn/tncd</a> &mdash; GPL-3.0</p>
+</footer>
+
+</body>
+</html>

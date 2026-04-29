@@ -9,69 +9,260 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # ── Build one package set per target architecture ──────────────────────────
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            deb_arch: amd64
+            rpm_arch: x86_64
+            platform: linux/amd64
+            image: ubuntu:22.04
+          - name: i386
+            deb_arch: i386
+            rpm_arch: i686
+            platform: linux/386
+            image: i386/debian:bookworm-slim
+          - name: armhf
+            deb_arch: armhf
+            rpm_arch: armhfp
+            platform: linux/arm/v7
+            image: ubuntu:22.04
+          - name: arm64
+            deb_arch: arm64
+            rpm_arch: aarch64
+            platform: linux/arm64
+            image: ubuntu:22.04
+          - name: riscv64
+            deb_arch: riscv64
+            rpm_arch: riscv64
+            platform: linux/riscv64
+            image: ubuntu:22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
 
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Compute release tarball SHA256
-        run: |
-          URL="https://github.com/ben-kuhn/tncd/archive/v$VERSION.tar.gz"
-          SHA256=$(curl -sL "$URL" | sha256sum | cut -d' ' -f1)
-          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
+      # Register QEMU binfmt handlers for cross-arch container execution.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Update version in packaging files
+      # Install Python deps into vendor/ inside a container matching the
+      # target architecture so that bitarray (C extension) is built correctly.
+      - name: Build vendored Python dependencies
         run: |
-          sed -i "s/^Version:.*/Version:        $VERSION/" packaging/tncd.spec
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -v "$GITHUB_WORKSPACE:/work" \
+            "${{ matrix.image }}" \
+            bash -c "
+              apt-get update -qq &&
+              apt-get install -y --no-install-recommends \
+                python3-pip gcc python3-dev python3-setuptools &&
+              python3 -m pip install \
+                --target /work/vendor \
+                --break-system-packages \
+                --no-compile \
+                bitarray kiss3 pyserial pyserial-asyncio pyham_ax25
+            "
+
+      - name: Install fpm
+        run: |
+          sudo apt-get install -y ruby ruby-dev build-essential rpm rpm-build
+          sudo gem install fpm --no-document
+
+      - name: Stage package tree
+        run: |
+          mkdir -p staging/usr/bin
+          mkdir -p staging/usr/lib/tncd
+          mkdir -p staging/etc
+          mkdir -p staging/lib/systemd/system
+
+          # Main script and all vendored deps
+          cp tncd.py staging/usr/lib/tncd/
+          cp -r vendor/. staging/usr/lib/tncd/
+
+          # rfcomm manager (stdlib only, no vendored deps needed)
+          cp tncd-rfcomm staging/usr/lib/tncd/tncd-rfcomm
+          chmod 755 staging/usr/lib/tncd/tncd-rfcomm
+
+          # /usr/bin wrappers
+          cp packaging/tncd-wrapper staging/usr/bin/tncd
+          chmod 755 staging/usr/bin/tncd
+          printf '#!/bin/sh\nexec python3 /usr/lib/tncd/tncd-rfcomm "$@"\n' \
+            > staging/usr/bin/tncd-rfcomm
+          chmod 755 staging/usr/bin/tncd-rfcomm
+
+          # Example config
+          cp tncd.ini staging/etc/tncd.ini.example
+
+          # Systemd units — patch for installed paths
+          sed \
+            -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
+            -e '/^WorkingDirectory=/d' \
+            tncd.service > staging/lib/systemd/system/tncd.service
+          sed \
+            -e 's|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|' \
+            -e '/^WorkingDirectory=/d' \
+            tncd-rfcomm.service > staging/lib/systemd/system/tncd-rfcomm.service
+
+      - name: Build .deb
+        run: |
+          fpm -s dir -t deb \
+            -n tncd \
+            -v "$VERSION" \
+            --architecture "${{ matrix.deb_arch }}" \
+            --description "AGWPE-to-KISS Translation Bridge for packet radio" \
+            --url "https://tncd.dev" \
+            --license "GPL-3.0-only" \
+            --maintainer "tncd contributors <noreply@github.com>" \
+            --depends python3 \
+            --depends bluez \
+            --config-files /etc/tncd.ini.example \
+            -p "tncd_${VERSION}_${{ matrix.deb_arch }}.deb" \
+            -C staging .
+
+      - name: Build .rpm
+        run: |
+          fpm -s dir -t rpm \
+            -n tncd \
+            -v "$VERSION" \
+            --architecture "${{ matrix.rpm_arch }}" \
+            --description "AGWPE-to-KISS Translation Bridge for packet radio" \
+            --url "https://tncd.dev" \
+            --license "GPL-3.0-only" \
+            --maintainer "tncd contributors <noreply@github.com>" \
+            --depends python3 \
+            --depends bluez \
+            --config-files /etc/tncd.ini.example \
+            -p "tncd-${VERSION}-1.${{ matrix.rpm_arch }}.rpm" \
+            -C staging .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.name }}
+          path: |
+            *.deb
+            *.rpm
+
+  # ── Publish: APT + RPM repos, website, Cloudflare Pages, GitHub Release ────
+  publish:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: pkgs/
+          merge-multiple: true
+
+      - name: Install repo tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y dpkg-dev apt-utils createrepo-c gnupg
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          GPG_FP=$(gpg --list-secret-keys --with-colons \
+                     | awk -F: '/^fpr:/{print $10; exit}')
+          echo "GPG_FP=$GPG_FP" >> "$GITHUB_ENV"
+          gpg --armor --export "$GPG_FP" > pkgs/tncd.pub
+
+      - name: Build APT repository
+        run: |
+          mkdir -p repo/apt/pool/main/t/tncd
+          cp pkgs/*.deb repo/apt/pool/main/t/tncd/
+
+          cd repo/apt
+          for arch in amd64 i386 armhf arm64 riscv64; do
+            mkdir -p "dists/stable/main/binary-${arch}"
+            dpkg-scanpackages --arch "${arch}" pool/ \
+              > "dists/stable/main/binary-${arch}/Packages"
+            gzip -k "dists/stable/main/binary-${arch}/Packages"
+          done
+
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=tncd \
+            -o APT::FTPArchive::Release::Label=tncd \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o "APT::FTPArchive::Release::Architectures=amd64 i386 armhf arm64 riscv64" \
+            -o APT::FTPArchive::Release::Components=main \
+            release dists/stable > dists/stable/Release
+
+          gpg --default-key "$GPG_FP" --clearsign \
+            --output dists/stable/InRelease dists/stable/Release
+          gpg --default-key "$GPG_FP" --detach-sign --armor \
+            --output dists/stable/Release.gpg dists/stable/Release
+          cd "$GITHUB_WORKSPACE"
+
+      - name: Build RPM repository
+        run: |
+          for rpm_arch in x86_64 i686 armhfp aarch64 riscv64; do
+            mkdir -p "repo/rpm/${rpm_arch}"
+            # Copy RPMs for this arch (may be empty if build failed)
+            find pkgs/ -name "*.${rpm_arch}.rpm" \
+              -exec cp {} "repo/rpm/${rpm_arch}/" \;
+            if ls "repo/rpm/${rpm_arch}/"*.rpm 1>/dev/null 2>&1; then
+              createrepo_c "repo/rpm/${rpm_arch}"
+              gpg --default-key "$GPG_FP" --detach-sign --armor \
+                "repo/rpm/${rpm_arch}/repodata/repomd.xml"
+            fi
+          done
+
+          cat > repo/rpm/tncd.repo << 'EOF'
+          [tncd]
+          name=tncd - AGWPE-to-KISS Translation Bridge
+          baseurl=https://tncd.dev/rpm/$basearch
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://tncd.dev/tncd.pub
+          EOF
+
+      - name: Assemble site
+        run: |
+          cp pkgs/tncd.pub repo/tncd.pub
+          cp -r website/. repo/
+
+      - name: Update PKGBUILD version for AUR
+        run: |
+          SHA256=$(curl -sL \
+            "https://github.com/ben-kuhn/tncd/archive/v${VERSION}.tar.gz" \
+            | sha256sum | cut -d' ' -f1)
           sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/PKGBUILD
           sed -i "s/sha256sums=.*/sha256sums=('$SHA256')/" packaging/PKGBUILD
-          sed -i \
-            "s|<param name=\"revision\">.*</param>|<param name=\"revision\">v$VERSION</param>|" \
-            packaging/obs/tncd/_service
-          DATE=$(date -R)
-          sed -i "1s/tncd ([^)]*)/tncd ($VERSION)/" debian/changelog
-          sed -i "s|^ -- tncd contributors.*| -- tncd contributors <noreply@github.com>  $DATE|" \
-            debian/changelog
 
       - name: Commit version bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packaging/tncd.spec packaging/PKGBUILD packaging/obs/tncd/_service \
-            debian/changelog
-          git commit -m "chore: release $VERSION [skip ci]"
+          git add packaging/PKGBUILD
+          git diff --cached --quiet || \
+            git commit -m "chore: bump PKGBUILD to $VERSION [skip ci]"
           git push origin HEAD:main
 
-      - name: Install osc
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y osc
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages deploy repo --project-name=tncd
 
-      - name: Configure osc
-        run: |
-          mkdir -p ~/.config/osc
-          cat > ~/.config/osc/oscrc <<OSCEOF
-          [general]
-          apiurl = https://api.opensuse.org
-          [https://api.opensuse.org]
-          user = ${{ secrets.OBS_USERNAME }}
-          pass = ${{ secrets.OBS_PASSWORD }}
-          OSCEOF
-
-      - name: Push tncd to OBS
-        run: |
-          osc co "home:${{ secrets.OBS_USERNAME }}:tncd" tncd
-          cp packaging/tncd.spec \
-             "home:${{ secrets.OBS_USERNAME }}:tncd/tncd/"
-          cp packaging/obs/tncd/_service \
-             "home:${{ secrets.OBS_USERNAME }}:tncd/tncd/"
-          cd "home:${{ secrets.OBS_USERNAME }}:tncd/tncd"
-          osc ci -m "release $VERSION"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pkgs/*.deb pkgs/*.rpm
+          generate_release_notes: true
