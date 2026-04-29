@@ -1,5 +1,5 @@
 Name:           tncd
-Version:        0.1
+Version:        0.2
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
 License:        GPL-3.0-or-later
