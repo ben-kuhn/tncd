@@ -209,6 +209,7 @@ def write_direwolf_config(path, mycall, agwport=0, kissport=0):
         "TXTAIL 5",
         "SLOTTIME 10",
         "PERSIST 63",
+        "FULLDUP ON",
     ])
     Path(path).write_text("\n".join(lines) + "\n")
 
@@ -337,7 +338,7 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
         "persistence = 63",
         "slot_time = 10",
         "tx_tail = 5",
-        "full_duplex = 0",
+        "full_duplex = 1",
     ])
     Path(path).write_text("\n".join(lines) + "\n")
 
@@ -460,3 +461,206 @@ class TestAPRS:
         assert "T#001" in log_content, (
             f"Telemetry packet not found in Direwolf-B output:\n{log_content}"
         )
+
+
+def write_pat_config(config_dir, mailbox_dir, mycall, locator, agwpe_addr):
+    """Write a minimal PAT configuration file."""
+    config = {
+        "mycall": mycall,
+        "secure_login_password": "TESTPASSWORD",
+        "locator": locator,
+        "service_codes": ["PUBLIC"],
+        "http_addr": f"127.0.0.1:{free_port()}",
+        "motd": [],
+        "connect_aliases": {},
+        "listen": [],
+        "ax25": {
+            "engine": "agwpe",
+            "beacon": {"every": 0, "message": "", "destination": ""},
+        },
+        "agwpe": {"addr": agwpe_addr, "radio_port": 0},
+    }
+    config_path = Path(config_dir) / "config.json"
+    config_path.write_text(json.dumps(config, indent=2))
+
+
+@pytest.fixture()
+def pat_pair(tncd_instance, direwolf_pair, tmp_path):
+    """Set up two PAT instances with isolated configs and mailboxes.
+
+    PAT-A connects to tncd's AGWPE port.
+    PAT-B connects to Direwolf-B's native AGWPE port.
+
+    Yields a dict with config paths, mailbox paths, and callsigns.
+    """
+    config_dir_a = tmp_path / "pat-a" / "config"
+    config_dir_b = tmp_path / "pat-b" / "config"
+    mbox_a = tmp_path / "pat-a" / "mailbox"
+    mbox_b = tmp_path / "pat-b" / "mailbox"
+
+    config_dir_a.mkdir(parents=True)
+    config_dir_b.mkdir(parents=True)
+    mbox_a.mkdir(parents=True)
+    mbox_b.mkdir(parents=True)
+
+    tncd_agwpe = f"127.0.0.1:{tncd_instance['agwpe_port']}"
+    dw_b_agwpe = f"127.0.0.1:{direwolf_pair['agwpe_port_b']}"
+
+    write_pat_config(config_dir_a, mbox_a, "N0CALL-1", "AA00aa", tncd_agwpe)
+    write_pat_config(config_dir_b, mbox_b, "N0CALL-2", "AA00ab", dw_b_agwpe)
+
+    yield {
+        "config_a": str(config_dir_a / "config.json"),
+        "mbox_a": str(mbox_a),
+        "config_b": str(config_dir_b / "config.json"),
+        "mbox_b": str(mbox_b),
+        "call_a": "N0CALL-1",
+        "call_b": "N0CALL-2",
+    }
+
+
+def pat_compose_and_send(config_path, mbox_path, from_call, to_call,
+                         subject, body, attachment_path, timeout=180):
+    """Compose a PAT message and send it via AGWPE connect."""
+    pat_base = ["pat", "--config", config_path, "--mbox", mbox_path,
+                "--mycall", from_call]
+
+    # Compose the message
+    compose_cmd = pat_base + [
+        "compose",
+        "--subject", subject,
+        "--p2p-only",
+    ]
+    if attachment_path:
+        compose_cmd.extend(["--attachment", str(attachment_path)])
+    compose_cmd.append(to_call)
+
+    result = subprocess.run(
+        compose_cmd,
+        input=body,
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"pat compose failed: {result.stderr}\n{result.stdout}"
+        )
+
+    # Connect and send — pipe "c\n" to stdin to auto-confirm the
+    # Winlink account activation prompt that PAT shows for unknown callsigns
+    connect_cmd = pat_base + [
+        "--send-only",
+        "connect", f"ax25+agwpe:///{to_call}",
+    ]
+    result = subprocess.run(
+        connect_cmd,
+        input="c\n",
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"pat connect failed: {result.stderr}\n{result.stdout}"
+        )
+
+
+def find_received_messages(mbox_path, callsign):
+    """List message files in PAT's inbox for a given callsign."""
+    inbox = Path(mbox_path) / callsign / "in"
+    if not inbox.exists():
+        return []
+    return sorted(inbox.iterdir())
+
+
+class TestPATFixture:
+    @needs_pat
+    def test_pat_config_valid(self, pat_pair):
+        """PAT should accept the generated config files."""
+        result = subprocess.run(
+            ["pat", "--config", pat_pair["config_a"],
+             "--mbox", pat_pair["mbox_a"], "env"],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "N0CALL-1" in result.stdout
+
+
+def pat_listen(config_path, mbox_path, mycall):
+    """Start PAT in listen mode to accept incoming P2P connections.
+
+    Returns the subprocess. Caller must kill_proc() when done.
+    """
+    proc = subprocess.Popen(
+        ["pat", "--config", config_path, "--mbox", mbox_path,
+         "--mycall", mycall, "--listen", "ax25", "interactive"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    # Auto-confirm the Winlink account activation prompt
+    try:
+        proc.stdin.write(b"c\n")
+        proc.stdin.flush()
+    except BrokenPipeError:
+        pass
+    # Give PAT time to register with AGWPE and start listening
+    time.sleep(3.0)
+    return proc
+
+
+class TestConnectedModeKISSTCP:
+    """Connected-mode P2P messaging over KISS TCP."""
+
+    @needs_pat
+    def test_p2p_message_both_directions(self, pat_pair, tmp_path):
+        """Send a P2P message with ~10KB attachment in both directions."""
+        # Generate random attachment
+        attachment_data = os.urandom(10 * 1024)
+        attachment_file = tmp_path / "test_attachment.bin"
+        attachment_file.write_bytes(attachment_data)
+
+        # --- A → B ---
+        # Start PAT-B listening for incoming connections
+        listener_b = pat_listen(
+            pat_pair["config_b"], pat_pair["mbox_b"], pat_pair["call_b"],
+        )
+        try:
+            pat_compose_and_send(
+                config_path=pat_pair["config_a"],
+                mbox_path=pat_pair["mbox_a"],
+                from_call=pat_pair["call_a"],
+                to_call=pat_pair["call_b"],
+                subject="Test A to B",
+                body="E2E test message from A to B",
+                attachment_path=attachment_file,
+                timeout=180,
+            )
+            time.sleep(5.0)
+        finally:
+            kill_proc(listener_b)
+
+        # Verify B received the message
+        msgs_b = find_received_messages(pat_pair["mbox_b"], pat_pair["call_b"])
+        assert len(msgs_b) > 0, "PAT-B did not receive any messages"
+
+        # --- B → A ---
+        # Start PAT-A listening for incoming connections
+        listener_a = pat_listen(
+            pat_pair["config_a"], pat_pair["mbox_a"], pat_pair["call_a"],
+        )
+        try:
+            pat_compose_and_send(
+                config_path=pat_pair["config_b"],
+                mbox_path=pat_pair["mbox_b"],
+                from_call=pat_pair["call_b"],
+                to_call=pat_pair["call_a"],
+                subject="Test B to A",
+                body="E2E test message from B to A",
+                attachment_path=attachment_file,
+                timeout=180,
+            )
+            time.sleep(5.0)
+        finally:
+            kill_proc(listener_a)
+
+        # Verify A received the message
+        msgs_a = find_received_messages(pat_pair["mbox_a"], pat_pair["call_a"])
+        assert len(msgs_a) > 0, "PAT-A did not receive any messages"
