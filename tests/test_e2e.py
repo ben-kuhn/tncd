@@ -66,15 +66,18 @@ def kill_proc(proc):
         proc.wait(timeout=5)
 
 
-def get_pw_port_ids(pid):
-    """Find PipeWire port IDs for a process by its PID.
+def get_pw_ports(pid):
+    """Find PipeWire port IDs for a Direwolf process by its PID.
 
-    Returns dict with 'output' and 'input' port ID lists.
-    Direwolf creates:
-      - alsa_playback.direwolf output ports (TX audio)
-      - alsa_capture.direwolf input port (RX audio)
+    Returns dict with:
+      - 'tx_output': playback output port ID (TX audio out, first channel)
+      - 'rx_input': capture input port ID (RX audio in)
+      - 'all': list of all port IDs (for disconnecting defaults)
 
     PipeWire object hierarchy: Client (has PID) → Node (has client.id) → Port (has node.id)
+    Direwolf creates two nodes:
+      - alsa_playback.direwolf: output_FL, output_FR (TX audio)
+      - alsa_capture.direwolf: input_MONO (RX audio), monitor_MONO
     """
     result = subprocess.run(
         ["pw-dump"], capture_output=True, text=True, timeout=5,
@@ -89,75 +92,96 @@ def get_pw_port_ids(pid):
                 and obj.get("type") == "PipeWire:Interface:Client"):
             client_ids.add(obj["id"])
 
-    # Find node IDs belonging to those clients
-    node_ids = set()
+    # Find node IDs and their names belonging to those clients
+    nodes = {}  # node_id -> node_name
     for obj in data:
         props = obj.get("info", {}).get("props", {})
         if (props.get("client.id") in client_ids
                 and obj.get("type") == "PipeWire:Interface:Node"):
-            node_ids.add(obj["id"])
+            nodes[obj["id"]] = props.get("node.name", "")
 
-    # Find ports belonging to those nodes
-    output_ports = []
-    input_ports = []
+    # Find relevant ports
+    tx_output = None
+    rx_input = None
+    all_ports = []
     for obj in data:
         if obj.get("type") != "PipeWire:Interface:Port":
             continue
         props = obj.get("info", {}).get("props", {})
-        if props.get("node.id") not in node_ids:
+        node_id = props.get("node.id")
+        if node_id not in nodes:
             continue
         port_id = obj["id"]
-        direction = obj.get("info", {}).get("direction")
-        if direction == "output":
-            output_ports.append(port_id)
-        elif direction == "input":
-            input_ports.append(port_id)
+        port_name = props.get("port.name", "")
+        node_name = nodes[node_id]
+        all_ports.append(port_id)
 
-    return {"output": output_ports, "input": input_ports}
+        # TX: first output channel from playback node
+        if "playback" in node_name and port_name == "output_FL":
+            tx_output = port_id
+        # RX: input from capture node
+        if "capture" in node_name and port_name == "input_MONO":
+            rx_input = port_id
+
+    return {"tx_output": tx_output, "rx_input": rx_input, "all": all_ports}
+
+
+def pw_disconnect_links(port_ids, pw_data):
+    """Disconnect all PipeWire links involving the given port IDs."""
+    port_set = set(port_ids)
+    for obj in pw_data:
+        if obj.get("type") != "PipeWire:Interface:Link":
+            continue
+        props = obj.get("info", {}).get("props", {})
+        out_port = props.get("link.output.port")
+        in_port = props.get("link.input.port")
+        if out_port in port_set or in_port in port_set:
+            link_id = obj["id"]
+            subprocess.run(
+                ["pw-link", "-d", str(link_id)],
+                capture_output=True, timeout=5,
+            )
 
 
 def pw_crosslink(pid_a, pid_b):
     """Cross-link two Direwolf instances' audio via PipeWire.
 
     Disconnects both from default audio devices, then links:
-      - Direwolf-A playback output → Direwolf-B capture input
-      - Direwolf-B playback output → Direwolf-A capture input
+      - Direwolf-A TX output → Direwolf-B RX input
+      - Direwolf-B TX output → Direwolf-A RX input
     """
-    ports_a = get_pw_port_ids(pid_a)
-    ports_b = get_pw_port_ids(pid_b)
+    ports_a = get_pw_ports(pid_a)
+    ports_b = get_pw_ports(pid_b)
 
-    if not ports_a["output"] or not ports_a["input"]:
+    if not ports_a["tx_output"] or not ports_a["rx_input"]:
         raise RuntimeError(
             f"Direwolf PID {pid_a} missing PipeWire ports: {ports_a}"
         )
-    if not ports_b["output"] or not ports_b["input"]:
+    if not ports_b["tx_output"] or not ports_b["rx_input"]:
         raise RuntimeError(
             f"Direwolf PID {pid_b} missing PipeWire ports: {ports_b}"
         )
 
-    # Disconnect existing links for both processes
-    for ports in [ports_a, ports_b]:
-        for port_id in ports["output"] + ports["input"]:
-            subprocess.run(
-                ["pw-link", "-d", str(port_id)],
-                capture_output=True, timeout=5,
-            )
+    # Get full pw-dump data for finding links
+    result = subprocess.run(
+        ["pw-dump"], capture_output=True, text=True, timeout=5,
+    )
+    pw_data = json.loads(result.stdout)
 
-    # Cross-link: A output → B input (use first output port for mono)
-    for out_id in ports_a["output"]:
-        for in_id in ports_b["input"]:
-            subprocess.run(
-                ["pw-link", str(out_id), str(in_id)],
-                capture_output=True, timeout=5, check=True,
-            )
+    # Disconnect all existing links for both processes
+    pw_disconnect_links(ports_a["all"] + ports_b["all"], pw_data)
 
-    # Cross-link: B output → A input
-    for out_id in ports_b["output"]:
-        for in_id in ports_a["input"]:
-            subprocess.run(
-                ["pw-link", str(out_id), str(in_id)],
-                capture_output=True, timeout=5, check=True,
-            )
+    # Cross-link: A TX → B RX
+    subprocess.run(
+        ["pw-link", str(ports_a["tx_output"]), str(ports_b["rx_input"])],
+        capture_output=True, timeout=5, check=True,
+    )
+
+    # Cross-link: B TX → A RX
+    subprocess.run(
+        ["pw-link", str(ports_b["tx_output"]), str(ports_a["rx_input"])],
+        capture_output=True, timeout=5, check=True,
+    )
 
 
 def write_direwolf_config(path, mycall, agwport=0, kissport=0):
@@ -371,3 +395,68 @@ class TestTncdFixture:
         port = tncd_instance["agwpe_port"]
         with socket.create_connection(("127.0.0.1", port), timeout=5):
             pass  # Connection succeeded
+
+
+class TestAPRS:
+    """Test APRS/UI frame forwarding through tncd."""
+
+    def test_aprs_packets(self, tncd_instance, direwolf_pair):
+        """Send APRS position, message, and telemetry through tncd,
+        verify Direwolf-B decodes them."""
+        import threading
+        from tests.emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
+
+        agwpe_port = tncd_instance["agwpe_port"]
+        log_b_path = direwolf_pair["log_b_path"]
+
+        # Send APRS packets through tncd
+        async def send_packets():
+            client = AGWPEClientEmulator("127.0.0.1", agwpe_port)
+            await client.connect()
+
+            # Register callsign first (X frame)
+            reg = create_agwpe_frame(0, ord(b'X'), 'N0CALL-1', '', b'')
+            client.writer.write(reg)
+            await client.writer.drain()
+            await client.receive(timeout=2.0)
+
+            # Allow audio link to settle
+            await asyncio.sleep(3.0)
+
+            # Position report
+            await client.send_unproto(
+                "N0CALL-1", "APRS",
+                b"!4903.50N/07201.75W-Test Position",
+            )
+            await asyncio.sleep(5.0)
+
+            # Message
+            await client.send_unproto(
+                "N0CALL-1", "APRS",
+                b":BLN1     :Test E2E message",
+            )
+            await asyncio.sleep(5.0)
+
+            # Telemetry
+            await client.send_unproto(
+                "N0CALL-1", "APRS",
+                b"T#001,100,200,300,400,500,10000000",
+            )
+            await asyncio.sleep(5.0)
+
+            await client.close()
+
+        asyncio.run(send_packets())
+
+        # Read Direwolf-B's log and verify packets arrived
+        log_content = Path(log_b_path).read_text(errors="replace")
+
+        assert "4903.50N" in log_content, (
+            f"Position packet not found in Direwolf-B output:\n{log_content}"
+        )
+        assert "BLN1" in log_content, (
+            f"Message packet not found in Direwolf-B output:\n{log_content}"
+        )
+        assert "T#001" in log_content, (
+            f"Telemetry packet not found in Direwolf-B output:\n{log_content}"
+        )
