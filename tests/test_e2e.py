@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import signal
+import sys
 import socket
 import subprocess
 import tempfile
@@ -287,9 +288,86 @@ def direwolf_pair(tmp_path, request):
         log_b.close()
 
 
+def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
+                      kiss_port=None, kiss_device=None, callsign="N0CALL-1"):
+    """Write a tncd INI configuration file."""
+    lines = [
+        "[server]",
+        "listen_host = 127.0.0.1",
+        f"listen_port = {agwpe_port}",
+        f"callsign = {callsign}",
+        "",
+        "[client]",
+        f"type = {kiss_type}",
+    ]
+    if kiss_type == "tcp":
+        lines.append(f"host = {kiss_host}")
+        lines.append(f"port = {kiss_port}")
+    elif kiss_type == "serial":
+        lines.append(f"device = {kiss_device}")
+        lines.append("baudrate = 9600")
+    lines.extend([
+        "",
+        "[kiss]",
+        "tx_delay = 10",
+        "persistence = 63",
+        "slot_time = 10",
+        "tx_tail = 5",
+        "full_duplex = 0",
+    ])
+    Path(path).write_text("\n".join(lines) + "\n")
+
+
+@pytest.fixture()
+def tncd_instance(direwolf_pair, tmp_path):
+    """Start tncd connected to Direwolf-A's KISS interface.
+
+    Yields a dict with:
+      - agwpe_port: tncd's AGWPE listen port
+      - proc: tncd subprocess
+    """
+    agwpe_port = free_port()
+    config_path = tmp_path / "tncd.ini"
+
+    if direwolf_pair["kiss_pty_a"]:
+        write_tncd_config(
+            config_path, agwpe_port, "serial",
+            kiss_device=direwolf_pair["kiss_pty_a"],
+        )
+    else:
+        write_tncd_config(
+            config_path, agwpe_port, "tcp",
+            kiss_host="127.0.0.1",
+            kiss_port=direwolf_pair["kiss_port_a"],
+        )
+
+    proc = subprocess.Popen(
+        [sys.executable, "tncd.py", "-c", str(config_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    try:
+        wait_for_port(agwpe_port)
+        yield {
+            "agwpe_port": agwpe_port,
+            "proc": proc,
+        }
+    finally:
+        kill_proc(proc)
+
+
 class TestDirewolfFixture:
     def test_direwolf_pair_starts(self, direwolf_pair):
         """Both Direwolf instances should be running after audio cross-link."""
         assert direwolf_pair["proc_a"].poll() is None
         assert direwolf_pair["proc_b"].poll() is None
         assert direwolf_pair["agwpe_port_b"] > 0
+
+
+class TestTncdFixture:
+    def test_tncd_accepts_connections(self, tncd_instance):
+        """tncd should accept TCP connections on its AGWPE port."""
+        port = tncd_instance["agwpe_port"]
+        with socket.create_connection(("127.0.0.1", port), timeout=5):
+            pass  # Connection succeeded
