@@ -57,7 +57,7 @@
     header .badges a:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
 
     main {
-      max-width: 860px;
+      max-width: 90%;
       margin: 0 auto;
       padding: 2rem 1rem 4rem;
     }
@@ -71,23 +71,6 @@
     }
     p { margin-bottom: 0.75rem; color: var(--text); }
 
-    .distros {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 1rem;
-      margin-top: 1rem;
-    }
-    .distro-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1.25rem;
-    }
-    .distro-card h3 {
-      font-size: 1rem;
-      margin-bottom: 0.75rem;
-      color: var(--accent);
-    }
     pre {
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -124,6 +107,39 @@
       font-size: 0.82rem;
       font-family: monospace;
       color: var(--muted);
+    }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 1.5rem;
+    }
+    .tab {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 0.95rem;
+      padding: 0.6rem 1.2rem;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab:hover {
+      color: var(--text);
+    }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
     }
 
     footer {
@@ -172,11 +188,18 @@
   <section>
     <h2>Install</h2>
 
-    <div class="distros">
+    <div class="tabs">
+      <button class="tab active" data-tab="debian">Debian / Ubuntu</button>
+      <button class="tab" data-tab="fedora">Fedora / RHEL</button>
+      <button class="tab" data-tab="opensuse">openSUSE</button>
+      <button class="tab" data-tab="arch">Arch Linux</button>
+      <button class="tab" data-tab="nixos">NixOS</button>
+      <button class="tab" data-tab="macos">macOS</button>
+      <button class="tab" data-tab="windows">Windows</button>
+    </div>
 
-      <div class="distro-card">
-        <h3>Debian / Ubuntu</h3>
-        <pre><code>curl -fsSL https://tncd.dev/tncd.pub \
+    <div class="tab-content active" id="tab-debian">
+      <pre><code>curl -fsSL https://tncd.dev/tncd.pub \
   | sudo gpg --dearmor \
   -o /usr/share/keyrings/tncd.gpg
 
@@ -186,35 +209,83 @@ https://tncd.dev/apt stable main" \
 
 sudo apt update
 sudo apt install tncd</code></pre>
-      </div>
+    </div>
 
-      <div class="distro-card">
-        <h3>Fedora / RHEL / CentOS</h3>
-        <pre><code>sudo curl -fsSL \
+    <div class="tab-content" id="tab-fedora">
+      <pre><code>sudo curl -fsSL \
   https://tncd.dev/rpm/tncd.repo \
   -o /etc/yum.repos.d/tncd.repo
 
 sudo dnf install tncd</code></pre>
-      </div>
+    </div>
 
-      <div class="distro-card">
-        <h3>openSUSE</h3>
-        <pre><code>sudo curl -fsSL \
+    <div class="tab-content" id="tab-opensuse">
+      <pre><code>sudo curl -fsSL \
   https://tncd.dev/rpm/tncd.repo \
   -o /etc/zypp/repos.d/tncd.repo
 
 sudo zypper refresh
 sudo zypper install tncd</code></pre>
-      </div>
+    </div>
 
-      <div class="distro-card">
-        <h3>Arch Linux (AUR)</h3>
-        <pre><code>yay -S tncd</code></pre>
-        <p style="margin-top:0.6rem;font-size:0.85rem;color:var(--muted)">
-          Or any AUR helper. System deps are resolved automatically.
-        </p>
-      </div>
+    <div class="tab-content" id="tab-arch">
+      <pre><code>yay -S tncd</code></pre>
+      <p style="margin-top:0.6rem;font-size:0.85rem;color:var(--muted)">
+        Or any AUR helper. System deps are resolved automatically.
+      </p>
+    </div>
 
+    <div class="tab-content" id="tab-nixos">
+      <p>Add the tncd overlay to your NixOS configuration:</p>
+      <pre><code># flake.nix or configuration.nix
+{
+  nixpkgs.overlays = [
+    (import (builtins.fetchTarball
+      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
+    ) + "/nix/overlay.nix")
+  ];
+
+  environment.systemPackages = [ pkgs.tncd ];
+}</code></pre>
+      <p style="margin-top:1rem;">Or use the NixOS service module for managed operation:</p>
+      <pre><code>{
+  imports = [
+    ((builtins.fetchTarball
+      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
+    ) + "/nix/module.nix")
+  ];
+
+  services.tncd = {
+    enable = true;
+    configFile = ./tncd.ini;
+  };
+}</code></pre>
+    </div>
+
+    <div class="tab-content" id="tab-macos">
+      <p>Install from source using pip:</p>
+      <pre><code>git clone https://github.com/ben-kuhn/tncd.git
+cd tncd
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python tncd.py -c tncd.ini</code></pre>
+      <p style="margin-top:1rem;font-size:0.85rem;color:var(--muted)">
+        Homebrew package coming soon.
+      </p>
+    </div>
+
+    <div class="tab-content" id="tab-windows">
+      <p>
+        tncd is best run under
+        <a href="https://learn.microsoft.com/en-us/windows/wsl/install">Windows Subsystem for Linux (WSL)</a>.
+        Install WSL with a Debian or Ubuntu distribution, then follow the Debian / Ubuntu instructions above.
+      </p>
+      <pre><code>wsl --install -d Ubuntu</code></pre>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">
+        Once inside WSL, serial devices are accessible via
+        <code>/dev/ttyS<em>N</em></code> and TCP TNCs work normally.
+      </p>
     </div>
 
     <div class="note">
@@ -246,6 +317,17 @@ sudo $EDITOR /etc/tncd.ini</code></pre>
 <footer>
   <p>tncd &mdash; <a href="https://github.com/ben-kuhn/tncd">github.com/ben-kuhn/tncd</a> &mdash; GPL-3.0</p>
 </footer>
+
+<script>
+  document.querySelectorAll('.tab').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+</script>
 
 </body>
 </html>
