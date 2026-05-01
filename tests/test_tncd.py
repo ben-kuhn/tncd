@@ -8,7 +8,8 @@ from unittest.mock import Mock, MagicMock, patch
 
 from tncd import (
     AGWPEServerProtocol, Bridge, Connection, KISSClient,
-    AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, load_config,
+    AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, MAX_WINDOW, T1_TIMEOUT,
+    load_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -710,6 +711,110 @@ class TestConnectedMode:
         protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'x' * 300))
         assert bridge.kiss_client.send.call_count == 2
 
+    def test_D_window_limits_sends(self):
+        """Must not send more than 7 I-frames without receiving ACKs."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        # Send 10 small D-frames — only 7 should be transmitted
+        for i in range(10):
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
+        assert bridge.kiss_client.send.call_count == 7
+        assert conn.unacked == 7
+        assert len(conn.outbound_queue) == 3
+
+    def test_D_window_drains_on_ack(self):
+        """Queued frames must be sent when ACKs open the window."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        # Fill window + queue 3 more
+        for i in range(10):
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
+        assert bridge.kiss_client.send.call_count == 7
+        # Remote ACKs all 7 with RR N(R)=7
+        rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                         control=ax25.Control(ax25.FrameType.RR, recv_seqno=7))
+        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        # The 3 queued frames should now be drained
+        assert bridge.kiss_client.send.call_count == 7 + 3
+        assert conn.unacked == 3
+        assert len(conn.outbound_queue) == 0
+
+    def test_D_retains_sent_frames_in_retransmit_buffer(self):
+        """Sent I-frames must be retained in retransmit buffer for replay."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'hello'))
+        protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'world'))
+        assert len(conn.retransmit_buf) == 2
+        assert 0 in conn.retransmit_buf
+        assert 1 in conn.retransmit_buf
+
+    def test_D_retransmit_buffer_purged_on_ack(self):
+        """ACKs must purge retransmit buffer entries up to N(R)."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        for i in range(3):
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
+        assert len(conn.retransmit_buf) == 3
+        # Remote ACKs first 2 with RR N(R)=2
+        rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                         control=ax25.Control(ax25.FrameType.RR, recv_seqno=2))
+        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        assert len(conn.retransmit_buf) == 1
+        assert 2 in conn.retransmit_buf  # only the unacked one remains
+
+    def test_rej_retransmits_from_requested_seqno(self):
+        """REJ N(R)=X must retransmit all frames from N(S)=X onward."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        for i in range(3):
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
+        assert bridge.kiss_client.send.call_count == 3
+        # Remote sends REJ N(R)=1 (frame 0 was lost, retransmit from 1)
+        rej = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.REJ, recv_seqno=1))
+        bridge.on_kiss_frame(b'\x00' + bytes(rej))
+        # Frames with N(S)=1 and N(S)=2 should be retransmitted
+        assert bridge.kiss_client.send.call_count == 3 + 2
+
+    async def test_t1_timer_retransmits_on_expiry(self):
+        """T1 timer expiry must poll with RR P=1 and retransmit unacked frames."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'hello'))
+        assert bridge.kiss_client.send.call_count == 1
+        assert conn.t1_handle is not None
+        # Manually fire the T1 callback
+        bridge._t1_expired(conn)
+        # Should have sent: RR P=1 poll + retransmit of the I-frame = 2 more
+        assert bridge.kiss_client.send.call_count == 3
+
+    async def test_t1_timer_cancelled_on_full_ack(self):
+        """T1 timer must be cancelled when all frames are ACKed."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'hello'))
+        assert conn.t1_handle is not None
+        # ACK everything
+        rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                         control=ax25.Control(ax25.FrameType.RR, recv_seqno=1))
+        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        assert conn.t1_handle is None
+
     def test_d_sends_disc(self):
         """'d' must send AX.25 DISC to the TNC."""
         protocol, _, bridge = make_real_protocol()
@@ -866,6 +971,43 @@ class TestConnectedModeReceivePath:
         rr_frames = [f for f in sent_frames if f.control.frame_type is ax25.FrameType.RR]
         assert len(rr_frames) == 1
         assert rr_frames[0].control.recv_seqno == 1  # N(R) = N(S)+1 = 1
+
+    def test_received_iframe_nonpoll_sends_rr(self):
+        """Non-polled I-frame (P=0) must still be acknowledged with RR."""
+        bridge = self._make_bridge()
+        owner = Mock()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+        iframe = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                            control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                                 recv_seqno=0, poll_final=False),
+                            pid=0xF0, data=b'hello')
+        bridge.on_kiss_frame(b'\x00' + bytes(iframe))
+        sent_frames = [ax25.Frame.unpack(c[0][0]) for c in bridge.kiss_client.send.call_args_list]
+        rr_frames = [f for f in sent_frames if f.control.frame_type is ax25.FrameType.RR]
+        assert len(rr_frames) == 1
+        assert rr_frames[0].control.recv_seqno == 1
+        assert rr_frames[0].control.poll_final is False  # P/F must echo the I-frame
+
+    def test_received_iframe_window_sends_rr_for_each(self):
+        """A window of P=0 I-frames must each get an RR, advancing N(R)."""
+        bridge = self._make_bridge()
+        owner = Mock()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+        for ns in range(4):
+            iframe = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                                control=ax25.Control(ax25.FrameType.I, send_seqno=ns,
+                                                     recv_seqno=0, poll_final=False),
+                                pid=0xF0, data=f'data{ns}'.encode())
+            bridge.on_kiss_frame(b'\x00' + bytes(iframe))
+        sent_frames = [ax25.Frame.unpack(c[0][0]) for c in bridge.kiss_client.send.call_args_list]
+        rr_frames = [f for f in sent_frames if f.control.frame_type is ax25.FrameType.RR]
+        assert len(rr_frames) == 4
+        for i, rr in enumerate(rr_frames):
+            assert rr.control.recv_seqno == (i + 1) % 8
 
     def test_received_iframe_delivers_data_to_owner(self):
         """Received I-frame must deliver data to connection owner as 'D'."""

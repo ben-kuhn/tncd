@@ -66,6 +66,10 @@ AGWPE_HEADER_FORMAT = '<BBBBBBBB10s10sII'
 AGWPE_HEADER_SIZE = 36
 
 
+MAX_WINDOW = 7   # mod-8 AX.25: max outstanding I-frames
+T1_TIMEOUT = 3.0  # seconds before retransmit poll (AX.25 T1 timer)
+
+
 class Connection:
     """State for a single AX.25 connected-mode session."""
 
@@ -79,6 +83,9 @@ class Connection:
         self.unacked = 0      # I-frames sent but not yet acked by remote (for AGWPE 'Y' query)
         self.last_acked = 0   # last N(R) received from remote
         self.owner = None     # AGWPEServerProtocol that initiated/accepted this connection
+        self.outbound_queue = collections.deque()  # (data_chunk, pid) awaiting window space
+        self.retransmit_buf = {}  # N(S) -> raw AX.25 frame bytes for retransmit
+        self.t1_handle = None    # asyncio TimerHandle for T1 retransmit timer
 
 
 class AGWPEServerProtocol(asyncio.Protocol):
@@ -276,20 +283,10 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 # I-frame info field is limited to 256 bytes; fragment if needed.
                 payload = data if data else b''
                 chunks = [payload[i:i+256] for i in range(0, len(payload), 256)] or [b'']
+                frame_pid = pid if pid else 0xF0
                 for chunk in chunks:
-                    try:
-                        frame = _cmd_frame(to_str, from_str,
-                                           control=ax25.Control(ax25.FrameType.I,
-                                                                send_seqno=conn.send_seqno,
-                                                                recv_seqno=conn.recv_seqno),
-                                           pid=pid if pid else 0xF0,
-                                           data=chunk)
-                        self.bridge._send_ax25(frame)
-                        conn.send_seqno = (conn.send_seqno + 1) % 8
-                        conn.unacked += 1
-                    except Exception as e:
-                        logger.error(f"Failed to build I-frame: {e}")
-                        break
+                    conn.outbound_queue.append((chunk, frame_pid))
+                self.bridge._drain_outbound(conn)
 
         elif datakind_bytes == b'd':
             # Disconnect: send DISC to TNC.
@@ -563,7 +560,9 @@ class Bridge:
         return self.connections[key]
 
     def remove_connection(self, port, local, remote):
-        self.connections.pop(self._conn_key(port, local, remote), None)
+        conn = self.connections.pop(self._conn_key(port, local, remote), None)
+        if conn:
+            self._cancel_t1(conn)
 
     def _log_ax25(self, frame, direction):
         """Print per-frame AX.25 info when -v or -vv is active.
@@ -609,6 +608,88 @@ class Bridge:
     def send_to_kiss(self, data):
         self._sent_frames.append(bytes(data))
         self.kiss_client.send(data)
+
+    def _drain_outbound(self, conn):
+        """Send queued I-frames while the outbound window has space."""
+        sent_any = False
+        while conn.outbound_queue and conn.unacked < MAX_WINDOW:
+            chunk, pid = conn.outbound_queue.popleft()
+            try:
+                frame = _cmd_frame(conn.remote, conn.local,
+                                   control=ax25.Control(ax25.FrameType.I,
+                                                        send_seqno=conn.send_seqno,
+                                                        recv_seqno=conn.recv_seqno),
+                                   pid=pid,
+                                   data=chunk)
+                ns = conn.send_seqno
+                self._send_ax25(frame)
+                conn.retransmit_buf[ns] = bytes(frame)
+                conn.send_seqno = (ns + 1) % 8
+                conn.unacked += 1
+                sent_any = True
+            except Exception as e:
+                logger.error(f"Failed to send queued I-frame: {e}")
+                break
+        if sent_any:
+            self._start_t1(conn)
+
+    def _start_t1(self, conn):
+        """Start (or restart) the T1 retransmit timer for a connection."""
+        self._cancel_t1(conn)
+        try:
+            loop = asyncio.get_running_loop()
+            conn.t1_handle = loop.call_later(T1_TIMEOUT, self._t1_expired, conn)
+        except RuntimeError:
+            pass  # no event loop (e.g. in tests)
+
+    def _cancel_t1(self, conn):
+        """Cancel the T1 timer if running."""
+        if conn.t1_handle is not None:
+            conn.t1_handle.cancel()
+            conn.t1_handle = None
+
+    def _t1_expired(self, conn):
+        """T1 timer fired: poll the remote with RR P=1 and retransmit unacked frames."""
+        conn.t1_handle = None
+        if conn.state != 'CONNECTED' or not conn.retransmit_buf:
+            return
+        logger.debug(f"T1 expired for {conn.local}<->{conn.remote}, "
+                     f"{conn.unacked} unacked, retransmitting from {conn.last_acked}")
+        try:
+            rr = _cmd_frame(conn.remote, conn.local,
+                            control=ax25.Control(ax25.FrameType.RR,
+                                                 poll_final=True,
+                                                 recv_seqno=conn.recv_seqno))
+            self._send_ax25(rr)
+        except Exception as e:
+            logger.error(f"Failed to send T1 poll: {e}")
+        self._retransmit_from(conn, conn.last_acked)
+        self._start_t1(conn)
+
+    def _ack_frames(self, conn, r_seq):
+        """Process cumulative ACK: update unacked, purge retransmit buffer, drain queue."""
+        newly_acked = (r_seq - conn.last_acked) % 8
+        if newly_acked:
+            # Purge retransmit buffer for ACKed sequence numbers.
+            seq = conn.last_acked
+            for _ in range(newly_acked):
+                conn.retransmit_buf.pop(seq, None)
+                seq = (seq + 1) % 8
+            conn.last_acked = r_seq
+            conn.unacked = max(0, conn.unacked - newly_acked)
+            if conn.retransmit_buf:
+                self._start_t1(conn)
+            else:
+                self._cancel_t1(conn)
+            self._drain_outbound(conn)
+
+    def _retransmit_from(self, conn, from_seq):
+        """Retransmit all buffered I-frames from from_seq onward."""
+        seq = from_seq
+        while seq in conn.retransmit_buf:
+            frame_bytes = conn.retransmit_buf[seq]
+            self._send_ax25(ax25.Frame.unpack(frame_bytes))
+            seq = (seq + 1) % 8
 
     # ------------------------------------------------------------------
     # KISS receive path
@@ -692,6 +773,9 @@ class Bridge:
         # Find connection: local=dst (frame addressed to us), remote=src
         conn = self.get_connection(0, dst, src)
         if conn and conn.state == 'CONNECTED':
+            # I-frames carry N(R) which implicitly ACKs our sent frames.
+            self._ack_frames(conn, frame.control.recv_seqno)
+
             expected_ns = conn.recv_seqno
             if frame.control.send_seqno != expected_ns:
                 # Duplicate or out-of-order frame — discard data but still
@@ -708,19 +792,16 @@ class Bridge:
                     except Exception as e:
                         logger.error(f"Failed to send RR for duplicate: {e}")
             else:
-                # In-sequence frame: advance V(R) and deliver to owner.
+                # In-sequence frame: advance V(R) and ACK immediately.
                 conn.recv_seqno = (frame.control.send_seqno + 1) % 8
-                # Only send RR when the remote polls us (P=1). For P=0 frames the
-                # acknowledgement will be piggybacked in the next I or RR we send.
-                if frame.control.poll_final:
-                    try:
-                        rr = _resp_frame(src, dst,
-                                         control=ax25.Control(ax25.FrameType.RR,
-                                                              poll_final=True,
-                                                              recv_seqno=conn.recv_seqno))
-                        self._send_ax25(rr)
-                    except Exception as e:
-                        logger.error(f"Failed to send RR: {e}")
+                try:
+                    rr = _resp_frame(src, dst,
+                                     control=ax25.Control(ax25.FrameType.RR,
+                                                          poll_final=frame.control.poll_final,
+                                                          recv_seqno=conn.recv_seqno))
+                    self._send_ax25(rr)
+                except Exception as e:
+                    logger.error(f"Failed to send RR: {e}")
                 # Deliver data to connection owner as 'D' frame
                 if conn.owner:
                     try:
@@ -840,13 +921,14 @@ class Bridge:
         except TypeError:
             r_seq = 0
 
-        # Update unacked count: remote's N(R) tells us how many of our I-frames were acked.
+        # Update unacked count and purge retransmit buffer.
         conn = self.get_connection(0, dst, src)
         if conn and conn.state == 'CONNECTED':
-            newly_acked = (r_seq - conn.last_acked) % 8
-            if newly_acked:
-                conn.last_acked = r_seq
-                conn.unacked = max(0, conn.unacked - newly_acked)
+            self._ack_frames(conn, r_seq)
+
+            # REJ: retransmit from the requested sequence number.
+            if ft is ax25.FrameType.REJ:
+                self._retransmit_from(conn, r_seq)
 
         # If the remote set P=1 (poll), we must respond with RR F=1 immediately.
         # Without this the remote T1 timer fires, it retransmits, and eventually disconnects.
