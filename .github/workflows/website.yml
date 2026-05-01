@@ -1,0 +1,113 @@
+name: Deploy Website
+
+on:
+  push:
+    branches: [main]
+    paths: [website/**]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: tncd_cloudflare
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install repo tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y dpkg-dev apt-utils createrepo-c gnupg
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          GPG_FP=$(gpg --list-secret-keys --with-colons \
+                     | awk -F: '/^fpr:/{print $10; exit}')
+          echo "GPG_FP=$GPG_FP" >> "$GITHUB_ENV"
+
+      - name: Download latest release packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pkgs
+          gh release download --pattern '*.deb' --pattern '*.rpm' --dir pkgs/ \
+            || echo "No release found — deploying website only"
+
+      - name: Build APT repository
+        run: |
+          mkdir -p repo/apt/pool/main/t/tncd
+          if ls pkgs/*.deb 1>/dev/null 2>&1; then
+            cp pkgs/*.deb repo/apt/pool/main/t/tncd/
+
+            cd repo/apt
+            for arch in amd64 i386 armhf arm64 riscv64; do
+              mkdir -p "dists/stable/main/binary-${arch}"
+              dpkg-scanpackages --arch "${arch}" pool/ \
+                > "dists/stable/main/binary-${arch}/Packages"
+              gzip -k "dists/stable/main/binary-${arch}/Packages"
+            done
+
+            apt-ftparchive \
+              -o APT::FTPArchive::Release::Origin=tncd \
+              -o APT::FTPArchive::Release::Label=tncd \
+              -o APT::FTPArchive::Release::Suite=stable \
+              -o APT::FTPArchive::Release::Codename=stable \
+              -o "APT::FTPArchive::Release::Architectures=amd64 i386 armhf arm64 riscv64" \
+              -o APT::FTPArchive::Release::Components=main \
+              release dists/stable > dists/stable/Release
+
+            gpg --default-key "$GPG_FP" --clearsign \
+              --output dists/stable/InRelease dists/stable/Release
+            gpg --default-key "$GPG_FP" --detach-sign --armor \
+              --output dists/stable/Release.gpg dists/stable/Release
+            cd "$GITHUB_WORKSPACE"
+          fi
+
+      - name: Build RPM repository
+        run: |
+          if ls pkgs/*.rpm 1>/dev/null 2>&1; then
+            for rpm_arch in x86_64 i686 armhfp aarch64 riscv64; do
+              mkdir -p "repo/rpm/${rpm_arch}"
+              find pkgs/ -name "*.${rpm_arch}.rpm" \
+                -exec cp {} "repo/rpm/${rpm_arch}/" \;
+              if ls "repo/rpm/${rpm_arch}/"*.rpm 1>/dev/null 2>&1; then
+                createrepo_c "repo/rpm/${rpm_arch}"
+                gpg --default-key "$GPG_FP" --detach-sign --armor \
+                  "repo/rpm/${rpm_arch}/repodata/repomd.xml"
+              fi
+            done
+
+            cat > repo/rpm/tncd.repo << 'REPOEOF'
+          [tncd]
+          name=tncd - AGWPE-to-KISS Translation Bridge
+          baseurl=https://tncd.dev/rpm/$basearch
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://tncd.dev/tncd.pub
+          REPOEOF
+          fi
+
+      - name: Assemble site
+        run: |
+          gpg --armor --export "$GPG_FP" > repo/tncd.pub 2>/dev/null || true
+          cp -r website/. repo/
+
+      - name: Generate wrangler.toml
+        run: |
+          cat > wrangler.toml <<'EOF'
+          name = "tncd"
+          compatibility_date = "2025-04-01"
+          [assets]
+          directory = "./repo"
+          EOF
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          command: deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
