@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tncd Documentation</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --code-bg: #1f2937;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 2rem 1rem;
+      text-align: center;
+    }
+    header h1 {
+      font-size: 2.5rem;
+      font-family: "SF Mono", "Fira Code", monospace;
+      color: var(--accent);
+      letter-spacing: -1px;
+    }
+    header p.tagline {
+      color: var(--muted);
+      margin-top: 0.5rem;
+      font-size: 1.05rem;
+    }
+    header .badges {
+      margin-top: 1rem;
+    }
+    header .badges a {
+      display: inline-block;
+      margin: 0.2rem;
+      padding: 0.3rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    header .badges a:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+
+    main {
+      max-width: 90%;
+      margin: 0 auto;
+      padding: 2rem 1rem 4rem;
+    }
+
+    section { margin-bottom: 3rem; }
+    h2 {
+      font-size: 1.4rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h3 {
+      font-size: 1.15rem;
+      margin-top: 1.5rem;
+      margin-bottom: 0.75rem;
+      color: var(--accent);
+    }
+    p { margin-bottom: 0.75rem; color: var(--text); }
+    ul, ol {
+      margin-bottom: 0.75rem;
+      padding-left: 1.5rem;
+    }
+    li { margin-bottom: 0.4rem; }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.85rem 1rem;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin-bottom: 1rem;
+    }
+    code { font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; }
+    pre code { color: var(--green); }
+    p code, li code {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0.15rem 0.4rem;
+      font-size: 0.88rem;
+      color: var(--green);
+    }
+
+    .note {
+      background: var(--surface);
+      border-left: 3px solid var(--accent);
+      padding: 0.75rem 1rem;
+      border-radius: 0 6px 6px 0;
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-bottom: 1rem;
+    }
+
+    .toc {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 2rem;
+    }
+    .toc h2 {
+      border-bottom: none;
+      padding-bottom: 0;
+      margin-bottom: 0.75rem;
+      font-size: 1.1rem;
+    }
+    .toc ol {
+      padding-left: 1.25rem;
+    }
+    .toc li {
+      margin-bottom: 0.3rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+    }
+    th {
+      background: var(--surface);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    td { color: var(--text); }
+    td code {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0.1rem 0.35rem;
+      font-size: 0.82rem;
+      color: var(--green);
+    }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 1.5rem;
+    }
+    .tab {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 0.95rem;
+      padding: 0.6rem 1.2rem;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab:hover {
+      color: var(--text);
+    }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+
+    footer {
+      text-align: center;
+      padding: 2rem 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>tncd</h1>
+  <p class="tagline">Documentation</p>
+  <div class="badges">
+    <a href="/">Home</a>
+    <a href="https://github.com/ben-kuhn/tncd">GitHub</a>
+    <a href="https://github.com/ben-kuhn/tncd/releases">Releases</a>
+    <a href="https://github.com/ben-kuhn/tncd/blob/main/COPYING">GPL-3.0</a>
+  </div>
+</header>
+
+<main>
+
+  <nav class="toc">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#what-is-tncd">What is tncd?</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#configuration">Configuration</a></li>
+      <li><a href="#running-tncd">Running tncd</a></li>
+      <li><a href="#bluetooth">Bluetooth TNC Setup</a></li>
+      <li><a href="#services">Running as a Service</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+    </ol>
+  </nav>
+
+  <!-- ============================================================ -->
+  <section id="what-is-tncd">
+    <h2>What is tncd?</h2>
+    <p>
+      <code>tncd</code> is a bridge between your packet radio software and your TNC
+      (Terminal Node Controller). Many ham radio programs &mdash; like
+      <a href="https://getpat.io">PAT</a> for Winlink,
+      <a href="https://xastir.org">Xastir</a> for APRS, and Paracon for packet BBS &mdash;
+      use a protocol called <strong>AGWPE</strong> to talk to a TNC. But most TNCs speak a
+      different protocol called <strong>KISS</strong>.
+    </p>
+    <p>
+      <code>tncd</code> sits in the middle and translates between the two. It also handles
+      the AX.25 "connected mode" handshaking that KISS TNCs don't do on their own &mdash;
+      this is what makes Winlink and other connection-based applications work.
+    </p>
+    <p>
+      You can connect your TNC to <code>tncd</code> over a USB serial cable, a TCP network
+      connection, or Bluetooth. Multiple AGWPE client programs can share the same TNC through
+      a single <code>tncd</code> instance &mdash; for example, you could run PAT and Xastir
+      at the same time.
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="install">
+    <h2>Install</h2>
+
+    <p>
+      Pick your operating system below. If you installed your Linux distribution recently,
+      you probably already have the two dependencies (<code>python3</code> and
+      <code>bluez</code>) &mdash; the packages handle everything else.
+    </p>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="debian">Debian / Ubuntu</button>
+      <button class="tab" data-tab="fedora">Fedora / RHEL</button>
+      <button class="tab" data-tab="opensuse">openSUSE</button>
+      <button class="tab" data-tab="arch">Arch Linux</button>
+      <button class="tab" data-tab="nixos">NixOS</button>
+      <button class="tab" data-tab="macos">macOS</button>
+      <button class="tab" data-tab="windows">Windows</button>
+    </div>
+
+    <div class="tab-content active" id="tab-debian">
+      <p>Open a terminal and run these commands one at a time. The first two lines add the
+        tncd package repository to your system so <code>apt</code> knows where to find it.
+        You only need to do this once.</p>
+      <pre><code># Download the signing key so your system trusts the tncd repo
+curl -fsSL https://tncd.dev/tncd.pub \
+  | sudo gpg --dearmor \
+  -o /usr/share/keyrings/tncd.gpg
+
+# Add the tncd repository
+echo "deb [signed-by=/usr/share/keyrings/tncd.gpg] \
+https://tncd.dev/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/tncd.list
+
+# Update the package list and install
+sudo apt update
+sudo apt install tncd</code></pre>
+      <p><code>sudo</code> runs a command with administrator privileges. You'll be prompted
+        for your password.</p>
+    </div>
+
+    <div class="tab-content" id="tab-fedora">
+      <p>Open a terminal and run these commands. <code>sudo</code> runs a command with
+        administrator privileges &mdash; you'll be prompted for your password.</p>
+      <pre><code># Add the tncd repository
+sudo curl -fsSL \
+  https://tncd.dev/rpm/tncd.repo \
+  -o /etc/yum.repos.d/tncd.repo
+
+# Install
+sudo dnf install tncd</code></pre>
+    </div>
+
+    <div class="tab-content" id="tab-opensuse">
+      <p>Open a terminal and run these commands. <code>sudo</code> runs a command with
+        administrator privileges &mdash; you'll be prompted for your password.</p>
+      <pre><code># Add the tncd repository
+sudo curl -fsSL \
+  https://tncd.dev/rpm/tncd.repo \
+  -o /etc/zypp/repos.d/tncd.repo
+
+# Refresh and install
+sudo zypper refresh
+sudo zypper install tncd</code></pre>
+    </div>
+
+    <div class="tab-content" id="tab-arch">
+      <p>Download the PKGBUILD and build the package locally. <code>makepkg</code> will
+        download the source and dependencies automatically. <code>sudo</code> runs a command
+        with administrator privileges &mdash; you'll be prompted for your password.</p>
+      <pre><code># Download the PKGBUILD
+curl -fsSL https://raw.githubusercontent.com/ben-kuhn/tncd/main/packaging/PKGBUILD \
+  -o PKGBUILD
+
+# Build the package
+makepkg -si</code></pre>
+      <p>The <code>-s</code> flag installs missing dependencies and <code>-i</code>
+        installs the package after building. You can also build and install separately:</p>
+      <pre><code>makepkg -s
+sudo pacman -U tncd-*.pkg.tar.zst</code></pre>
+    </div>
+
+    <div class="tab-content" id="tab-nixos">
+      <p>Add the tncd overlay to your NixOS configuration:</p>
+      <pre><code># In your configuration.nix or flake.nix
+{
+  nixpkgs.overlays = [
+    (import (builtins.fetchTarball
+      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
+    ) + "/nix/overlay.nix")
+  ];
+
+  environment.systemPackages = [ pkgs.tncd ];
+}</code></pre>
+      <p>Or use the NixOS service module for a fully managed setup:</p>
+      <pre><code>{
+  imports = [
+    ((builtins.fetchTarball
+      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
+    ) + "/nix/module.nix")
+  ];
+
+  services.tncd = {
+    enable = true;
+    configFile = ./tncd.ini;
+  };
+}</code></pre>
+      <p>After editing your configuration, rebuild with
+        <code>sudo nixos-rebuild switch</code>.</p>
+    </div>
+
+    <div class="tab-content" id="tab-macos">
+      <p>Install from source using pip:</p>
+      <pre><code>git clone https://github.com/ben-kuhn/tncd.git
+cd tncd
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python tncd.py -c tncd.ini</code></pre>
+      <p style="font-size:0.85rem;color:var(--muted)">
+        Homebrew package coming soon.
+      </p>
+    </div>
+
+    <div class="tab-content" id="tab-windows">
+      <p>
+        tncd is best run under
+        <a href="https://learn.microsoft.com/en-us/windows/wsl/install">Windows Subsystem for Linux (WSL)</a>,
+        which gives you a full Linux environment inside Windows.
+        Open PowerShell as Administrator and run:
+      </p>
+      <pre><code>wsl --install -d Ubuntu</code></pre>
+      <p>After WSL finishes installing and you've set up a username, open the Ubuntu terminal
+        and follow the Debian / Ubuntu instructions above. Serial devices from Windows are
+        accessible inside WSL as <code>/dev/ttyS<em>N</em></code> (e.g., COM3 becomes
+        <code>/dev/ttyS3</code>). TCP TNCs work normally.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="configuration">
+    <h2>Configuration</h2>
+
+    <p>
+      tncd uses a plain text configuration file in INI format. If you installed from a
+      package, an example file is at <code>/etc/tncd.ini.example</code>. Copy it to create
+      your actual config:
+    </p>
+    <pre><code>sudo cp /etc/tncd.ini.example /etc/tncd.ini</code></pre>
+    <p>
+      Then open it in a text editor. You can use <code>nano</code> if you're not sure
+      which editor to use &mdash; it's simple and shows keyboard shortcuts at the bottom
+      of the screen:
+    </p>
+    <pre><code>sudo nano /etc/tncd.ini</code></pre>
+    <p>
+      The file has three sections: <code>[server]</code>, <code>[client]</code>, and
+      <code>[bluetooth]</code>. Lines starting with <code>#</code> are comments and are
+      ignored &mdash; remove the <code>#</code> to enable a setting.
+    </p>
+
+    <h3>[server] &mdash; AGWPE Server Settings</h3>
+    <p>This controls how your radio applications connect to tncd.</p>
+    <pre><code>[server]
+listen_host = 127.0.0.1
+listen_port = 8000
+callsign = N0CALL</code></pre>
+    <table>
+      <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
+      <tr>
+        <td><code>listen_host</code></td>
+        <td>The network address to listen on. <code>127.0.0.1</code> only allows connections
+          from the same computer, which is the safest option. If you need other computers on
+          your network to connect (e.g., running PAT on a laptop while tncd is on a
+          Raspberry Pi), change this to <code>0.0.0.0</code>.</td>
+        <td><code>127.0.0.1</code></td>
+      </tr>
+      <tr>
+        <td><code>listen_port</code></td>
+        <td>The port number your AGWPE applications connect to. Port 8000 is the standard
+          for AGWPE. Change this only if something else is already using port 8000.</td>
+        <td><code>8000</code></td>
+      </tr>
+      <tr>
+        <td><code>callsign</code></td>
+        <td>Your amateur radio callsign. This is used in AGWPE protocol responses.</td>
+        <td><code>N0CALL</code></td>
+      </tr>
+    </table>
+
+    <h3>[client] &mdash; TNC Connection</h3>
+    <p>This tells tncd how to talk to your TNC. There are two connection types:
+      serial (USB cable) and TCP (network).</p>
+
+    <h3>Serial TNC (USB)</h3>
+    <p>This is the most common setup. Your TNC is plugged into a USB port and shows up as
+      a serial device like <code>/dev/ttyUSB0</code> or <code>/dev/ttyACM0</code>.</p>
+    <pre><code>[client]
+type = serial
+device = /dev/ttyUSB0
+baudrate = 9600</code></pre>
+    <p>
+      To find your device name, plug in your TNC and run <code>ls /dev/ttyUSB*
+      /dev/ttyACM*</code> in a terminal. If you see multiple devices, unplug the TNC and
+      run the command again &mdash; the one that disappeared is your TNC.
+    </p>
+    <div class="note">
+      If you get "permission denied" when tncd tries to open the serial port, see the
+      <a href="#troubleshooting">Troubleshooting</a> section for how to fix serial port
+      permissions.
+    </div>
+
+    <p>Some TNCs need non-standard serial settings. Most users can skip these:</p>
+    <table>
+      <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
+      <tr>
+        <td><code>parity</code></td>
+        <td>Error-checking mode. <code>N</code>=none, <code>O</code>=odd,
+          <code>E</code>=even. Some older TNCs (like AEA PK-232) use odd parity.</td>
+        <td><code>N</code></td>
+      </tr>
+      <tr>
+        <td><code>stopbits</code></td>
+        <td>Number of stop bits: <code>1</code>, <code>1.5</code>, or <code>2</code>.</td>
+        <td><code>1</code></td>
+      </tr>
+      <tr>
+        <td><code>rtscts</code></td>
+        <td>Hardware flow control. Set to <code>true</code> if your TNC requires it.</td>
+        <td><code>false</code></td>
+      </tr>
+    </table>
+
+    <h3>KISS Mode Initialization</h3>
+    <p>
+      Some older serial TNCs (like the Kantronics KPC-3) start up in "terminal mode" and
+      need a special command to switch into KISS mode. If your TNC requires this, add these
+      lines under <code>[client]</code>:
+    </p>
+    <pre><code># Kantronics KPC-3:
+init_string = INT KISS\r
+init_delay = 1.0
+
+# Kenwood TH-D7 / TM-D700 / TM-D710:
+init_string = KISS ON\rRESTART\r
+init_delay = 1.0</code></pre>
+    <p>
+      <code>\r</code> means "carriage return" (like pressing Enter). You can chain multiple
+      commands by putting <code>\r</code> between them. The <code>init_delay</code> is how
+      many seconds to wait after sending the command before tncd starts talking KISS. Check
+      your TNC's manual for the correct command.
+    </p>
+
+    <h3>TCP TNC (Network)</h3>
+    <p>
+      If your TNC is connected over the network (for example,
+      <a href="https://github.com/wb2osz/direwolf">Dire Wolf</a> running on another
+      computer), use the TCP connection type instead:
+    </p>
+    <pre><code>[client]
+type = tcp
+host = 192.168.1.50
+port = 8001</code></pre>
+    <p>Replace the host and port with the address of your KISS TCP server.</p>
+
+    <h3>KISS Parameters</h3>
+    <p>
+      These control the timing of your radio transmissions. The defaults work well for most
+      setups. Only change these if you know what you're doing or if you're troubleshooting
+      transmission problems.
+    </p>
+    <table>
+      <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
+      <tr>
+        <td><code>tx_delay</code></td>
+        <td>How long to key up the transmitter before sending data (in 10ms units,
+          so 40 = 400ms). Increase if the beginning of your packets are getting cut off.</td>
+        <td><code>40</code></td>
+      </tr>
+      <tr>
+        <td><code>persistence</code></td>
+        <td>Controls how aggressively tncd tries to transmit when the channel is busy.
+          Higher values mean more aggressive. Range: 0&ndash;63.</td>
+        <td><code>63</code></td>
+      </tr>
+      <tr>
+        <td><code>slot_time</code></td>
+        <td>How often to check if the channel is clear (in 10ms units).</td>
+        <td><code>20</code></td>
+      </tr>
+      <tr>
+        <td><code>tx_tail</code></td>
+        <td>How long to keep transmitting after the last byte (in 10ms units).</td>
+        <td><code>30</code></td>
+      </tr>
+      <tr>
+        <td><code>full_duplex</code></td>
+        <td>Set to <code>1</code> for full-duplex operation (rare). Leave at <code>0</code>
+          for normal half-duplex.</td>
+        <td><code>0</code></td>
+      </tr>
+    </table>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="running-tncd">
+    <h2>Running tncd</h2>
+
+    <p>Once your config file is set up, you can start tncd from a terminal:</p>
+    <pre><code># If installed from a package
+tncd -c /etc/tncd.ini
+
+# If running from source
+python tncd.py -c tncd.ini</code></pre>
+
+    <p>
+      tncd will start up and listen for AGWPE client connections. You should see a message
+      confirming it connected to your TNC. Now point your radio application (PAT, Xastir,
+      etc.) at <code>localhost:8000</code> (or whatever port you configured).
+    </p>
+
+    <h3>Verbose Output</h3>
+    <p>
+      If you want to see what's happening &mdash; useful for testing or debugging &mdash;
+      add one or more <code>-v</code> flags:
+    </p>
+    <table>
+      <tr><th>Flag</th><th>What it shows</th></tr>
+      <tr>
+        <td><code>-v</code></td>
+        <td>Frame types, source and destination callsigns for every packet</td>
+      </tr>
+      <tr>
+        <td><code>-vv</code></td>
+        <td>All of the above, plus the data content of each frame</td>
+      </tr>
+      <tr>
+        <td><code>-vvv</code></td>
+        <td>All of the above, plus low-level AGWPE protocol details</td>
+      </tr>
+    </table>
+    <p>Example:</p>
+    <pre><code>tncd -c /etc/tncd.ini -vv</code></pre>
+    <p>
+      Press <code>Ctrl+C</code> to stop tncd when you're done. For long-term use, you'll
+      want to run it as a service instead (see below).
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="bluetooth">
+    <h2>Bluetooth TNC Setup</h2>
+
+    <p>
+      If your TNC connects over Bluetooth (like the BTECH UV-Pro or Mobilinkd), there's an
+      extra step: you need to set up an RFCOMM serial connection before tncd can talk to it.
+      The <code>tncd-rfcomm</code> helper handles this for you.
+    </p>
+
+    <h3>Step 1: Pair your TNC</h3>
+    <p>
+      First, make sure your TNC is paired with your computer. Turn on the TNC and put it in
+      pairing mode (check your TNC's manual), then pair it from your Linux system:
+    </p>
+    <pre><code># Open the Bluetooth control tool
+bluetoothctl
+
+# Inside bluetoothctl:
+power on
+scan on
+# Wait until you see your TNC appear — it will show up like:
+#   [NEW] Device AA:BB:CC:DD:EE:FF TNC-DeviceName
+# The AA:BB:CC:DD:EE:FF part is your TNC's Bluetooth address (MAC address).
+# Copy it and use it in the commands below:
+pair AA:BB:CC:DD:EE:FF
+trust AA:BB:CC:DD:EE:FF
+exit</code></pre>
+    <p>
+      Replace <code>AA:BB:CC:DD:EE:FF</code> throughout this guide with your TNC's actual
+      Bluetooth address. You only need to pair once &mdash; your system will remember the
+      device.
+    </p>
+    <p>
+      If you've already paired but don't remember the address, you can list paired devices:
+    </p>
+    <pre><code>bluetoothctl devices</code></pre>
+
+    <h3>Step 2: Configure the Bluetooth section</h3>
+    <p>Add these settings to your <code>tncd.ini</code>, replacing
+      <code>AA:BB:CC:DD:EE:FF</code> with the Bluetooth address you found in Step 1:</p>
+    <pre><code>[client]
+type = serial
+device = /dev/rfcomm0
+
+[bluetooth]
+enabled = true
+bind_dev = /dev/rfcomm0
+bdaddr = AA:BB:CC:DD:EE:FF
+channel = 1
+mode = watch
+retry_delay = 5</code></pre>
+    <table>
+      <tr><th>Setting</th><th>What it does</th></tr>
+      <tr>
+        <td><code>enabled</code></td>
+        <td>Set to <code>true</code> to enable Bluetooth management.</td>
+      </tr>
+      <tr>
+        <td><code>bind_dev</code></td>
+        <td>The RFCOMM device that will be created. <code>/dev/rfcomm0</code> is standard.</td>
+      </tr>
+      <tr>
+        <td><code>bdaddr</code></td>
+        <td>Your TNC's Bluetooth address.</td>
+      </tr>
+      <tr>
+        <td><code>channel</code></td>
+        <td>RFCOMM channel number. Most TNCs use <code>1</code>. Mobilinkd TNC3 and
+          TNC4 use channel <code>2</code>.</td>
+      </tr>
+      <tr>
+        <td><code>mode</code></td>
+        <td><code>watch</code> automatically reconnects if the Bluetooth link drops.
+          Use <code>connect</code> for a one-shot connection.</td>
+      </tr>
+      <tr>
+        <td><code>retry_delay</code></td>
+        <td>Seconds to wait before reconnecting after a drop (only in watch mode).</td>
+      </tr>
+    </table>
+    <p>
+      Notice that <code>[client]</code> still says <code>type = serial</code> and points at
+      <code>/dev/rfcomm0</code>. That's because the Bluetooth RFCOMM connection looks like a
+      regular serial port to tncd.
+    </p>
+
+    <h3>Step 3: Start the rfcomm manager</h3>
+    <p>
+      The rfcomm manager needs to run <strong>before</strong> tncd, because it creates the
+      <code>/dev/rfcomm0</code> device that tncd connects to. It also disconnects any
+      Bluetooth audio profiles first (some TNCs connect as audio devices by default, which
+      blocks the serial channel).
+    </p>
+    <pre><code># Start the rfcomm manager (needs root for Bluetooth access)
+sudo tncd-rfcomm -c /etc/tncd.ini
+
+# In another terminal, start tncd
+tncd -c /etc/tncd.ini</code></pre>
+    <p>
+      In <code>watch</code> mode, <code>tncd-rfcomm</code> stays running and automatically
+      reconnects if the TNC turns off or goes out of range. For long-term use, run both as
+      services (see below).
+    </p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="services">
+    <h2>Running as a Service</h2>
+
+    <p>
+      Running tncd in a terminal is fine for testing, but for everyday use you'll want it to
+      start automatically when your computer boots. Linux uses <strong>systemd</strong> to
+      manage services &mdash; think of it as a supervisor that starts programs, restarts them
+      if they crash, and collects their log output.
+    </p>
+
+    <h3>Setting Up the Service</h3>
+    <p>
+      If you installed from a package (apt, dnf, zypper, AUR), the service files are already
+      in place. Just make sure you have a config file ready:
+    </p>
+    <pre><code># Copy the example config if you haven't already
+sudo cp /etc/tncd.ini.example /etc/tncd.ini
+
+# Edit it with your settings
+sudo nano /etc/tncd.ini</code></pre>
+
+    <h3>Starting and Enabling the Service</h3>
+    <pre><code># Start tncd right now
+sudo systemctl start tncd
+
+# Also make it start automatically on boot
+sudo systemctl enable tncd</code></pre>
+    <p>Or do both at once:</p>
+    <pre><code>sudo systemctl enable --now tncd</code></pre>
+
+    <h3>Bluetooth Service</h3>
+    <p>
+      If you're using a Bluetooth TNC, you also need to run the rfcomm manager service.
+      It must start before tncd so the Bluetooth serial device is ready:
+    </p>
+    <pre><code># Enable and start both services
+sudo systemctl enable --now tncd-rfcomm
+sudo systemctl enable --now tncd</code></pre>
+    <p>
+      The package already configures tncd to wait for the rfcomm manager, so they'll start
+      in the right order.
+    </p>
+
+    <h3>Checking Status</h3>
+    <p>To see if tncd is running and whether there are any errors:</p>
+    <pre><code>sudo systemctl status tncd</code></pre>
+    <p>
+      You'll see output showing whether the service is <span style="color:var(--green)">active
+      (running)</span> or has failed, along with the last few log lines.
+    </p>
+
+    <h3>Viewing Logs</h3>
+    <p>
+      tncd writes its log output to the system journal. To view it, use
+      <code>journalctl</code>:
+    </p>
+    <pre><code># Show recent tncd logs
+sudo journalctl -u tncd --no-pager -n 50
+
+# Follow the log in real time (like tail -f)
+sudo journalctl -u tncd -f
+
+# Show rfcomm manager logs
+sudo journalctl -u tncd-rfcomm --no-pager -n 50</code></pre>
+    <p>
+      The <code>-u tncd</code> part filters the log to only show tncd output. The
+      <code>-n 50</code> shows the last 50 lines. Press <code>Ctrl+C</code> to stop
+      following.
+    </p>
+
+    <h3>Stopping and Restarting</h3>
+    <pre><code># Stop tncd
+sudo systemctl stop tncd
+
+# Restart (useful after changing the config file)
+sudo systemctl restart tncd
+
+# Disable auto-start on boot
+sudo systemctl disable tncd</code></pre>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="troubleshooting">
+    <h2>Troubleshooting</h2>
+
+    <h3>"Permission denied" on the serial port</h3>
+    <p>
+      Your user account needs to be in the group that owns the serial device. First, check
+      which group that is:
+    </p>
+    <pre><code>ls -l /dev/ttyUSB0</code></pre>
+    <p>
+      You'll see something like <code>crw-rw---- 1 root dialout ...</code> &mdash; the
+      group name is the one after <code>root</code>. It's usually <code>dialout</code>,
+      but some distributions (like Arch and openSUSE) use <code>uucp</code> instead.
+      Add yourself to whatever group you see:
+    </p>
+    <pre><code>sudo gpasswd -a $USER dialout</code></pre>
+    <p>
+      Replace <code>dialout</code> with <code>uucp</code> (or whatever group was shown)
+      if needed. You'll need to <strong>log out and back in</strong> (or reboot) for the
+      change to take effect.
+    </p>
+    <p>
+      When running as a systemd service, the service runs as its own user and the package
+      configures the correct permissions automatically.
+    </p>
+
+    <h3>"Device not found" or "No such file or directory"</h3>
+    <p>
+      The serial device name might be different from what's in the config. Plug in your TNC
+      and check what devices appear:
+    </p>
+    <pre><code>ls /dev/ttyUSB* /dev/ttyACM*</code></pre>
+    <p>
+      If you see <code>/dev/ttyACM0</code> instead of <code>/dev/ttyUSB0</code>, update
+      your config file to match. The device name can change if you plug the TNC into a
+      different USB port.
+    </p>
+
+    <h3>Bluetooth TNC won't connect</h3>
+    <ul>
+      <li>Make sure the TNC is powered on and in range.</li>
+      <li>Check that it's paired: run <code>bluetoothctl info AA:BB:CC:DD:EE:FF</code> and
+        look for "Paired: yes".</li>
+      <li>Check the rfcomm manager logs:
+        <code>sudo journalctl -u tncd-rfcomm --no-pager -n 20</code></li>
+      <li>Some TNCs connect as an audio device first. The rfcomm manager handles this
+        automatically, but if you're having trouble, try manually disconnecting first:
+        <code>bluetoothctl disconnect AA:BB:CC:DD:EE:FF</code></li>
+    </ul>
+
+    <h3>Client application can't connect to tncd</h3>
+    <ul>
+      <li>Make sure tncd is running: <code>sudo systemctl status tncd</code></li>
+      <li>Check that your application is pointing at the right address and port (default:
+        <code>localhost:8000</code>).</li>
+      <li>If tncd is on a different computer, make sure <code>listen_host</code> is set to
+        <code>0.0.0.0</code> (not <code>127.0.0.1</code>) and that port 8000 isn't blocked
+        by a firewall.</li>
+    </ul>
+
+    <h3>Packets aren't getting through</h3>
+    <ul>
+      <li>Run tncd with <code>-vv</code> to see frame-level detail and confirm packets are
+        being sent and received.</li>
+      <li>Check your KISS parameters &mdash; if the beginning of packets is garbled, try
+        increasing <code>tx_delay</code>.</li>
+      <li>Make sure your callsign is set correctly in both tncd and your client
+        application.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Further Reading</h2>
+    <p>
+      This guide covers everyday use. For full technical details &mdash; supported AGWPE
+      frame types, AX.25 connected mode internals, and the complete protocol reference &mdash;
+      see the <a href="https://github.com/ben-kuhn/tncd/blob/main/README.md">README on GitHub</a>.
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  <p>tncd &mdash; <a href="https://github.com/ben-kuhn/tncd">github.com/ben-kuhn/tncd</a> &mdash; GPL-3.0</p>
+</footer>
+
+<script>
+  document.querySelectorAll('.tab').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var tabs = btn.closest('section').querySelectorAll('.tab');
+      var contents = btn.closest('section').querySelectorAll('.tab-content');
+      tabs.forEach(function(t) { t.classList.remove('active'); });
+      contents.forEach(function(c) { c.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+</script>
+
+</body>
+</html>

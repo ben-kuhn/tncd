@@ -159,7 +159,7 @@
   <div class="badges">
     <a href="https://github.com/ben-kuhn/tncd">GitHub</a>
     <a href="https://github.com/ben-kuhn/tncd/releases">Releases</a>
-    <a href="https://github.com/ben-kuhn/tncd/blob/main/README.md">Documentation</a>
+    <a href="/docs.html">Documentation</a>
     <a href="https://github.com/ben-kuhn/tncd/blob/main/COPYING">GPL-3.0</a>
   </div>
 </header>
@@ -229,10 +229,12 @@ sudo zypper install tncd</code></pre>
     </div>
 
     <div class="tab-content" id="tab-arch">
-      <pre><code>yay -S tncd</code></pre>
-      <p style="margin-top:0.6rem;font-size:0.85rem;color:var(--muted)">
-        Or any AUR helper. System deps are resolved automatically.
-      </p>
+      <pre><code># Download the PKGBUILD
+curl -fsSL https://raw.githubusercontent.com/ben-kuhn/tncd/main/packaging/PKGBUILD \
+  -o PKGBUILD
+
+# Build and install
+makepkg -si</code></pre>
     </div>
 
     <div class="tab-content" id="tab-nixos">
