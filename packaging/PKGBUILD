@@ -1,6 +1,6 @@
 # Maintainer: Your Callsign <callsign@example.com>
 pkgname=tncd
-pkgver=0.2-Alpha
+pkgver=0.3-Alpha
 pkgrel=1
 pkgdesc="AGWPE-to-KISS Translation Bridge"
 arch=('any')
@@ -8,7 +8,7 @@ url="https://github.com/ben-kuhn/tncd"
 license=('GPL-3.0-only')
 depends=('python' 'python-pyserial' 'python-kiss3' 'python-pyham-ax25' 'bluez-utils')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('ef2b08d2bf1a3ca9e1c1edb6b498bb9102ee867fbcf28aaa51ffa08a60c66437')
+sha256sums=('bf953df3ff5068d97fd30861a4f39406193ac7501056dfb2bd15d99fd401fd15')
 
 package() {
     cd "$pkgname-$pkgver"
