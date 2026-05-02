@@ -1,9 +1,10 @@
 # tncd — AGWPE-to-KISS Bridge
 
-A userspace bridge that allows AGWPE-compatible client applications to communicate
-with KISS TNCs (Terminal Node Controllers), including full AX.25 connected-mode
-support. Developed because Linux kernel 7.1 removed native AX.25 kernel support,
-breaking applications that previously relied on `AF_AX25` sockets.
+A userspace bridge that lets AGWPE-compatible applications (PAT/Winlink, Paracon,
+Xastir) communicate with KISS TNCs, including full AX.25 connected-mode support.
+Tested over the air with real Winlink sessions at 1200 baud. Developed because
+Linux kernel 7.1 removed native AX.25 kernel support, breaking applications that
+previously relied on `AF_AX25` sockets.
 
 ## Purpose
 
@@ -67,14 +68,18 @@ The bridge fully implements AX.25 v2.0 connected mode for KISS TNCs:
 
 - **SABM/UA handshake** — outgoing connections (PAT/Winlink) and incoming
 - **I-frame sequencing** — N(S)/N(R) send/receive sequence numbers, mod 8 window
-- **RR acknowledgement** — sends RR only when remote polls (P=1); does not flood
-  the channel with unsolicited RRs
+- **RR acknowledgement** — T2 delayed ACK batches acknowledgments for burst
+  I-frames; immediate response to polls (P=1)
+- **Piggybacked N(R)** — outgoing and retransmitted I-frames carry the current
+  receive sequence number, so data transfer implicitly acknowledges received frames
 - **Duplicate detection** — retransmitted I-frames from the remote are silently
   discarded; only in-sequence frames are forwarded to the AGWPE client
 - **AGWPE flow control** — `Y` (outstanding frames) accurately reflects unacked
   I-frames so clients like PAT know when it is safe to send the next data block
 - **TX echo suppression** — some TNCs (e.g. BTECH UV-Pro) echo transmitted frames
   back via KISS; these are detected and discarded
+- **Dynamic T1/T2 timers** — retransmit and delayed-ACK timeouts calculated from
+  the configured over-the-air baud rate and window size
 - **DISC/DM handling** — clean disconnect in both directions
 
 ## Supported TNC Connections
@@ -150,16 +155,18 @@ callsign = AGWPE
 # type = serial or tcp
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600
-# parity = N       # N=none, O=odd, E=even, M=mark, S=space (default: N)
-# stopbits = 1     # 1, 1.5, or 2 (default: 1)
-# rtscts = false   # RTS/CTS hardware flow control (default: false)
+serial_baudrate = 9600
+ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
+# parity = N            # N=none, O=odd, E=even, M=mark, S=space (default: N)
+# stopbits = 1          # 1, 1.5, or 2 (default: 1)
+# rtscts = false        # RTS/CTS hardware flow control (default: false)
 
 # KISS mode initialization (for TNCs that need a command to enter KISS mode)
 # init_string = INT KISS\r   # \r = CR, \n = LF
 # init_delay = 1.0
 
-# Optional KISS timing parameters (values in 10ms units)
+[kiss]
+# KISS timing parameters (values in 10ms units)
 # tx_delay = 40
 # persistence = 63
 # slot_time = 20
@@ -204,7 +211,7 @@ tncd -c /etc/tncd.ini
 
 ## KISS Parameters
 
-Configured under `[client]` in the INI file. All values are in 10ms units.
+Configured under `[kiss]` in the INI file. All values are in 10ms units.
 
 | Parameter    | Default | Description                      |
 |--------------|---------|----------------------------------|
@@ -230,7 +237,7 @@ Example for AEA TNCs that use odd parity:
 [client]
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600
+serial_baudrate = 9600
 parity = O
 stopbits = 1
 ```
@@ -244,7 +251,7 @@ to enter KISS mode. Configure under `[client]`:
 [client]
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600
+serial_baudrate = 9600
 init_string = INT KISS\r   # \r and \n are interpreted as CR/LF
 init_delay = 1.0
 ```
@@ -287,12 +294,16 @@ When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
 
 ### Clients
 
-- [x] PAT (Winlink)
+- [x] PAT (Winlink) — connected mode and UI frames, OTA-verified
 - [x] Paracon
 - [ ] QTTermTCP
 - [ ] Xastir
 
-### Hardware
+### Software TNCs
+
+- [x] Dire Wolf — KISS over TCP and PTY serial, OTA-verified at 1200 baud
+
+### Hardware TNCs
 
 - [x] BTECH UV-Pro (Bluetooth)
 - [ ] Mobilinkd TNC4 (Bluetooth)
