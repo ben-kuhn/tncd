@@ -1052,5 +1052,44 @@ class TestConnectedModeReceivePath:
         assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
 
 
+    def test_sabme_rejected_with_dm(self):
+        """SABME (extended mode) must be rejected with DM, not accepted."""
+        bridge = self._make_bridge()
+        sabme = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                           control=ax25.Control(ax25.FrameType.SABME, poll_final=True))
+        bridge.on_kiss_frame(b'\x00' + bytes(sabme))
+        bridge.kiss_client.send.assert_called_once()
+        dm = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert dm.control.frame_type is ax25.FrameType.DM
+        # No connection should be created
+        assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
+
+    def test_incoming_sabm_sets_owner_for_registered_client(self):
+        """Incoming SABM must set conn.owner to the client that registered the callsign."""
+        bridge = self._make_bridge()
+        protocol = AGWPEServerProtocol(bridge)
+        protocol.registered_calls = {'W1ABC'}
+        protocol.send_frame = Mock()
+        bridge.add_client(protocol)
+        sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+        bridge.on_kiss_frame(b'\x00' + bytes(sabm))
+        conn = bridge.get_connection(0, 'W1ABC', 'W2DEF')
+        assert conn is not None
+        assert conn.owner is protocol
+
+    def test_incoming_sabm_message_text(self):
+        """Incoming SABM 'C' notification must use 'CONNECTED To' (not 'With')."""
+        bridge = self._make_bridge()
+        client = Mock()
+        client.registered_calls = set()
+        bridge.add_client(client)
+        sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+        bridge.on_kiss_frame(b'\x00' + bytes(sabm))
+        msg = client.send_frame.call_args[0][4]
+        assert b'CONNECTED To' in msg
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

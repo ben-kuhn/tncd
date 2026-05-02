@@ -875,7 +875,6 @@ class TestConnectedModeKISSTCP:
     """Connected-mode P2P messaging over KISS TCP."""
 
     @needs_pat
-    @pytest.mark.xfail(reason="tncd connected-mode bug: stuck N(R) / missing RR acks")
     def test_p2p_message_both_directions(self, pat_pair, tmp_path):
         """Send a P2P message with attachment in both directions."""
         _run_p2p_test(pat_pair, tmp_path)
@@ -997,7 +996,6 @@ class TestConnectedModeKISSPTY:
     """Connected-mode P2P messaging over KISS serial (pseudo-TTY)."""
 
     @needs_pat
-    @pytest.mark.xfail(reason="tncd connected-mode bug: stuck N(R) / missing RR acks")
     def test_p2p_message_both_directions(self, pat_pair_pty, tmp_path):
         """Send a P2P message with attachment in both directions via KISS PTY."""
         _run_p2p_test(pat_pair_pty, tmp_path)

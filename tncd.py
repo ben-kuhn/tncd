@@ -96,6 +96,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
         self.buffer = b''
         self.traffic_debug = traffic_debug
         self.monitoring = False  # toggled by 'm' frame
+        self.registered_calls = set()  # callsigns registered via 'X' frame
 
     def connection_made(self, transport):
         self.transport = transport
@@ -182,6 +183,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
 
         elif datakind_bytes == b'X':
             logger.debug(f"REGISTER: from={from_str!r}")
+            self.registered_calls.add(from_str)
             # pe reads CallFrom from the response to record registered callsign.
             # data[0] != 0 means success.
             self.send_frame(0, ord(b'X'), call_from, b'', b'\x01')
@@ -189,6 +191,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
         elif datakind_bytes == b'x':
             # Unregister callsign: per spec, no response is sent.
             logger.debug(f"UNREGISTER: from={from_str!r}")
+            self.registered_calls.discard(from_str)
 
         elif datakind_bytes == b'm':
             # Toggle monitoring on/off per call (spec: same frame type both ways).
@@ -732,8 +735,18 @@ class Bridge:
             self._dispatch_i(frame, src, dst)
         elif ft.is_S():
             self._dispatch_s(frame, src, dst)
-        elif ft in (ax25.FrameType.SABM, ax25.FrameType.SABME):
+        elif ft is ax25.FrameType.SABM:
             self._dispatch_sabm(frame, src, dst)
+        elif ft is ax25.FrameType.SABME:
+            # Reject extended (mod-128) mode — we only support basic (mod-8).
+            # Remote should fall back to SABM.
+            logger.debug(f"Rejecting SABME from {src} (mod-128 not supported)")
+            try:
+                dm = _resp_frame(src, dst,
+                                 control=ax25.Control(ax25.FrameType.DM, poll_final=True))
+                self._send_ax25(dm)
+            except Exception as e:
+                logger.error(f"Failed to send DM for SABME: {e}")
         elif ft is ax25.FrameType.UA:
             self._dispatch_ua(frame, src, dst)
         elif ft is ax25.FrameType.DM:
@@ -838,7 +851,16 @@ class Bridge:
         conn.unacked = 0
         conn.last_acked = 0
 
-        msg = f'*** CONNECTED With {src}\r'.encode()
+        # Assign owner to the client that registered this callsign.
+        for client in self.clients:
+            try:
+                if dst in client.registered_calls:
+                    conn.owner = client
+                    break
+            except TypeError:
+                pass
+
+        msg = f'*** CONNECTED To Station {src}\r'.encode()
         for client in self.clients:
             try:
                 client.send_frame(0, ord('C'), src.encode(), dst.encode(), msg)
