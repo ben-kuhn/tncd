@@ -171,10 +171,11 @@
     <p>
       <code>tncd</code> is a userspace bridge that lets AGWPE-compatible applications (Winlink,
       Xastir, APRSIS32, etc.) talk to KISS TNCs — serial, TCP, or Bluetooth.
+      Tested over the air with real Winlink sessions at 1200 baud.
     </p>
     <p>
       It implements full AX.25 connected mode including SABM/UA handshake, I-frame sequencing,
-      and RR acknowledgement, with no kernel AX.25 stack required.
+      delayed acknowledgement, and dynamic T1/T2 timers — with no kernel AX.25 stack required.
     </p>
     <div class="arch-list">
       <span class="arch-tag">x86_64</span>

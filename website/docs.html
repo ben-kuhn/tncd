@@ -409,9 +409,9 @@ python tncd.py -c tncd.ini</code></pre>
     </p>
     <pre><code>sudo nano /etc/tncd.ini</code></pre>
     <p>
-      The file has three sections: <code>[server]</code>, <code>[client]</code>, and
-      <code>[bluetooth]</code>. Lines starting with <code>#</code> are comments and are
-      ignored &mdash; remove the <code>#</code> to enable a setting.
+      The file has four sections: <code>[server]</code>, <code>[client]</code>,
+      <code>[kiss]</code>, and <code>[bluetooth]</code>. Lines starting with <code>#</code>
+      are comments and are ignored &mdash; remove the <code>#</code> to enable a setting.
     </p>
 
     <h3>[server] &mdash; AGWPE Server Settings</h3>
@@ -453,7 +453,14 @@ callsign = N0CALL</code></pre>
     <pre><code>[client]
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600</code></pre>
+serial_baudrate = 9600
+ota_baudrate = 1200</code></pre>
+    <p>
+      <code>serial_baudrate</code> is the speed of the serial connection between your computer
+      and TNC (usually 9600). <code>ota_baudrate</code> is the over-the-air baud rate of your
+      radio link (typically 1200 for VHF packet) &mdash; tncd uses this to calculate retransmit
+      and acknowledgement timeouts.
+    </p>
     <p>
       To find your device name, plug in your TNC and run <code>ls /dev/ttyUSB*
       /dev/ttyACM*</code> in a terminal. If you see multiple devices, unplug the TNC and
@@ -468,6 +475,18 @@ baudrate = 9600</code></pre>
     <p>Some TNCs need non-standard serial settings. Most users can skip these:</p>
     <table>
       <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
+      <tr>
+        <td><code>serial_baudrate</code></td>
+        <td>Serial port speed between your computer and TNC.</td>
+        <td><code>9600</code></td>
+      </tr>
+      <tr>
+        <td><code>ota_baudrate</code></td>
+        <td>Over-the-air baud rate. Used to calculate T1 retransmit and T2 delayed-ACK
+          timeouts. Use <code>1200</code> for VHF packet, <code>9600</code> for 9600-baud
+          packet, or <code>300</code> for HF.</td>
+        <td><code>1200</code></td>
+      </tr>
       <tr>
         <td><code>parity</code></td>
         <td>Error-checking mode. <code>N</code>=none, <code>O</code>=odd,
@@ -508,21 +527,29 @@ init_delay = 1.0</code></pre>
 
     <h3>TCP TNC (Network)</h3>
     <p>
-      If your TNC is connected over the network (for example,
-      <a href="https://github.com/wb2osz/direwolf">Dire Wolf</a> running on another
-      computer), use the TCP connection type instead:
+      If your TNC is connected over the network &mdash; for example,
+      <a href="https://github.com/wb2osz/direwolf">Dire Wolf</a> running on the same or
+      another computer &mdash; use the TCP connection type. Dire Wolf is fully tested with
+      tncd over both KISS-over-TCP and PTY serial modes, including connected-mode Winlink
+      sessions over the air at 1200 baud.
     </p>
     <pre><code>[client]
 type = tcp
 host = 192.168.1.50
-port = 8001</code></pre>
-    <p>Replace the host and port with the address of your KISS TCP server.</p>
+port = 8001
+ota_baudrate = 1200</code></pre>
+    <p>Replace the host and port with the address of your KISS TCP server.
+      For Dire Wolf on the same machine, use <code>host = 127.0.0.1</code> and the
+      port configured with Dire Wolf's <code>KISSPORT</code> directive (default 8001).</p>
+    <p>You can also use Dire Wolf's PTY mode, where it creates a virtual serial port.
+      In that case, use <code>type = serial</code> and point <code>device</code> at the
+      PTY path shown in Dire Wolf's startup output (e.g., <code>/dev/pts/1</code>).</p>
 
-    <h3>KISS Parameters</h3>
+    <h3>[kiss] &mdash; KISS Parameters</h3>
     <p>
-      These control the timing of your radio transmissions. The defaults work well for most
-      setups. Only change these if you know what you're doing or if you're troubleshooting
-      transmission problems.
+      These control the timing of your radio transmissions. Configure them under the
+      <code>[kiss]</code> section. The defaults work well for most setups. Only change these
+      if you know what you're doing or if you're troubleshooting transmission problems.
     </p>
     <table>
       <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
