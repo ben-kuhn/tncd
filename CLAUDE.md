@@ -74,7 +74,6 @@ Tests use pytest with pytest-asyncio (`asyncio_mode = auto`). Tests mock the Bri
 
 - **Nix**: `nix/overlay.nix` (package), `nix/module.nix` (NixOS service module with `services.tncd.*` options)
 - **Arch**: `packaging/PKGBUILD`
-- **OBS dependency packages**: `packaging/obs/` contains RPM specs and Debian packaging for `python-kiss3`, `python-pyham-ax25`, `python-ax253`
 - **Release workflow**: `.github/workflows/release.yml` — triggers on `v*` tags. Builds self-contained .deb and .rpm packages (with vendored Python deps via fpm) for amd64, i386, armhf, arm64, riscv64 using QEMU cross-compilation in Docker. Publishes signed APT and RPM repos plus a static website to Cloudflare Pages (tncd.dev), updates PKGBUILD for AUR, and creates a GitHub Release with all artifacts.
 
 ## Protocol Notes
