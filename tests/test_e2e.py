@@ -416,7 +416,7 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
         lines.append(f"port = {kiss_port}")
     elif kiss_type == "serial":
         lines.append(f"device = {kiss_device}")
-        lines.append("baudrate = 9600")
+        lines.append("serial_baudrate = 9600")
     lines.extend([
         "",
         "[kiss]",

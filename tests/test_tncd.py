@@ -8,7 +8,7 @@ from unittest.mock import Mock, MagicMock, patch
 
 from tncd import (
     AGWPEServerProtocol, Bridge, Connection, KISSClient,
-    AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, MAX_WINDOW, T1_TIMEOUT,
+    AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, DEFAULT_MAX_WINDOW,
     load_config,
 )
 
@@ -99,7 +99,7 @@ class TestLoadConfig:
             kiss_port=None, baudrate=19200,
         )
         cfg = load_config(args)
-        assert cfg.getint('client', 'baudrate') == 19200
+        assert cfg.getint('client', 'serial_baudrate') == 19200
 
 
 # ---------------------------------------------------------------------------
@@ -712,34 +712,38 @@ class TestConnectedMode:
         assert bridge.kiss_client.send.call_count == 2
 
     def test_D_window_limits_sends(self):
-        """Must not send more than 7 I-frames without receiving ACKs."""
+        """Must not send more than max_window I-frames without receiving ACKs."""
         protocol, _, bridge = make_real_protocol()
+        max_win = bridge.max_window
         conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
         conn.state = 'CONNECTED'
         conn.owner = protocol
-        # Send 10 small D-frames — only 7 should be transmitted
-        for i in range(10):
+        # Send more D-frames than window allows — only max_window should be transmitted
+        total = max_win + 3
+        for i in range(total):
             protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
-        assert bridge.kiss_client.send.call_count == 7
-        assert conn.unacked == 7
+        assert bridge.kiss_client.send.call_count == max_win
+        assert conn.unacked == max_win
         assert len(conn.outbound_queue) == 3
 
     def test_D_window_drains_on_ack(self):
         """Queued frames must be sent when ACKs open the window."""
         protocol, _, bridge = make_real_protocol()
+        max_win = bridge.max_window
         conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
         conn.state = 'CONNECTED'
         conn.owner = protocol
         # Fill window + queue 3 more
-        for i in range(10):
+        total = max_win + 3
+        for i in range(total):
             protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
-        assert bridge.kiss_client.send.call_count == 7
-        # Remote ACKs all 7 with RR N(R)=7
+        assert bridge.kiss_client.send.call_count == max_win
+        # Remote ACKs all with RR N(R)=max_win
         rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
-                         control=ax25.Control(ax25.FrameType.RR, recv_seqno=7))
+                         control=ax25.Control(ax25.FrameType.RR, recv_seqno=max_win))
         bridge.on_kiss_frame(b'\x00' + bytes(rr))
         # The 3 queued frames should now be drained
-        assert bridge.kiss_client.send.call_count == 7 + 3
+        assert bridge.kiss_client.send.call_count == max_win + 3
         assert conn.unacked == 3
         assert len(conn.outbound_queue) == 0
 

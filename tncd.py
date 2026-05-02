@@ -66,8 +66,9 @@ AGWPE_HEADER_FORMAT = '<BBBBBBBB10s10sII'
 AGWPE_HEADER_SIZE = 36
 
 
-MAX_WINDOW = 7   # mod-8 AX.25: max outstanding I-frames
-T1_TIMEOUT = 3.0  # seconds before retransmit poll (AX.25 T1 timer)
+DEFAULT_MAX_WINDOW = 3   # mod-8 AX.25: max outstanding I-frames (max 7)
+AX25_OVERHEAD = 20       # AX.25 header + KISS framing bytes per frame
+T2_MULTIPLIER = 1.2      # T2 = multiplier * frame_time (wait for burst to end)
 
 
 class Connection:
@@ -86,6 +87,8 @@ class Connection:
         self.outbound_queue = collections.deque()  # (data_chunk, pid) awaiting window space
         self.retransmit_buf = {}  # N(S) -> raw AX.25 frame bytes for retransmit
         self.t1_handle = None    # asyncio TimerHandle for T1 retransmit timer
+        self.t2_handle = None    # asyncio TimerHandle for T2 delayed ACK timer
+        self.t2_pending = False  # True when we owe the remote an RR
 
 
 class AGWPEServerProtocol(asyncio.Protocol):
@@ -436,7 +439,8 @@ class KISSClient:
             self.connection = kiss.TCPKISS(host=host, port=port)
         else:
             device   = self.config.get('client', 'device', fallback='/dev/ttyUSB0')
-            baudrate = self.config.getint('client', 'baudrate', fallback=9600)
+            baudrate = self.config.getint('client', 'serial_baudrate',
+                                          fallback=self.config.getint('client', 'baudrate', fallback=9600))
             parity   = self.config.get('client', 'parity', fallback='N').upper()
             stopbits = self.config.getfloat('client', 'stopbits', fallback=1)
             rtscts   = self.config.getboolean('client', 'rtscts', fallback=False)
@@ -516,6 +520,27 @@ class Bridge:
         # back via KISS. Track recently-sent raw bytes to discard them.
         self._sent_frames = collections.deque(maxlen=20)
 
+        # Window size and T1 timer calculation
+        self.max_window = config.getint('ax25', 'max_window', fallback=DEFAULT_MAX_WINDOW)
+        self.max_window = max(1, min(7, self.max_window))  # clamp to 1-7
+
+        # Calculate T1 and T2 from OTA baud rate
+        ota_baudrate = config.getint('client', 'ota_baudrate', fallback=1200)
+        max_frame_bytes = 256 + AX25_OVERHEAD
+        frame_time = (max_frame_bytes * 8) / ota_baudrate
+
+        # T1 = 2 * (window_frames * frame_time + turnaround)
+        turnaround = 1.0  # processing + channel turnaround
+        self.t1_timeout = 2.0 * (self.max_window * frame_time + turnaround)
+        self.t1_timeout = max(3.0, self.t1_timeout)  # floor at 3 seconds
+
+        # T2 = slightly longer than one frame time — fires after burst ends
+        self.t2_delay = T2_MULTIPLIER * frame_time
+        self.t2_delay = max(0.1, self.t2_delay)  # floor at 100ms
+
+        logger.info(f"AX.25 window={self.max_window}, T1={self.t1_timeout:.1f}s, "
+                    f"T2={self.t2_delay:.2f}s (ota_baudrate={ota_baudrate})")
+
     async def start(self):
         await self.kiss_client.connect()
         self.kiss_client.set_bridge(self)
@@ -566,6 +591,7 @@ class Bridge:
         conn = self.connections.pop(self._conn_key(port, local, remote), None)
         if conn:
             self._cancel_t1(conn)
+            self._cancel_t2(conn)
 
     def _log_ax25(self, frame, direction):
         """Print per-frame AX.25 info when -v or -vv is active.
@@ -615,7 +641,7 @@ class Bridge:
     def _drain_outbound(self, conn):
         """Send queued I-frames while the outbound window has space."""
         sent_any = False
-        while conn.outbound_queue and conn.unacked < MAX_WINDOW:
+        while conn.outbound_queue and conn.unacked < self.max_window:
             chunk, pid = conn.outbound_queue.popleft()
             try:
                 frame = _cmd_frame(conn.remote, conn.local,
@@ -634,6 +660,10 @@ class Bridge:
                 logger.error(f"Failed to send queued I-frame: {e}")
                 break
         if sent_any:
+            # Outgoing I-frames piggyback N(R), so cancel any pending T2
+            # delayed ACK — the remote will see the acknowledgment in our
+            # I-frames' N(R) field.
+            self._cancel_t2(conn)
             self._start_t1(conn)
 
     def _start_t1(self, conn):
@@ -641,7 +671,7 @@ class Bridge:
         self._cancel_t1(conn)
         try:
             loop = asyncio.get_running_loop()
-            conn.t1_handle = loop.call_later(T1_TIMEOUT, self._t1_expired, conn)
+            conn.t1_handle = loop.call_later(self.t1_timeout, self._t1_expired, conn)
         except RuntimeError:
             pass  # no event loop (e.g. in tests)
 
@@ -650,6 +680,45 @@ class Bridge:
         if conn.t1_handle is not None:
             conn.t1_handle.cancel()
             conn.t1_handle = None
+
+    def _schedule_t2(self, conn, src, dst):
+        """Schedule a delayed RR (T2 timer).  Resets the timer on each call
+        so a burst of I-frames results in a single RR after the burst."""
+        self._cancel_t2(conn)
+        conn.t2_pending = True
+        conn._t2_src = str(src)
+        conn._t2_dst = str(dst)
+        try:
+            loop = asyncio.get_running_loop()
+            conn.t2_handle = loop.call_later(self.t2_delay, self._t2_expired, conn)
+        except RuntimeError:
+            # No event loop (tests) — send immediately
+            self._send_delayed_rr(conn)
+
+    def _cancel_t2(self, conn):
+        """Cancel the T2 delayed ACK timer."""
+        if conn.t2_handle is not None:
+            conn.t2_handle.cancel()
+            conn.t2_handle = None
+        conn.t2_pending = False
+
+    def _t2_expired(self, conn):
+        """T2 fired: send the delayed RR acknowledging all frames received so far."""
+        conn.t2_handle = None
+        conn.t2_pending = False
+        if conn.state != 'CONNECTED':
+            return
+        self._send_delayed_rr(conn)
+
+    def _send_delayed_rr(self, conn):
+        """Send RR with current V(R) for delayed acknowledgment."""
+        try:
+            rr = _resp_frame(conn._t2_src, conn._t2_dst,
+                             control=ax25.Control(ax25.FrameType.RR,
+                                                  recv_seqno=conn.recv_seqno))
+            self._send_ax25(rr)
+        except Exception as e:
+            logger.error(f"Failed to send delayed RR: {e}")
 
     def _t1_expired(self, conn):
         """T1 timer fired: poll the remote with RR P=1 and retransmit unacked frames."""
@@ -687,11 +756,25 @@ class Bridge:
             self._drain_outbound(conn)
 
     def _retransmit_from(self, conn, from_seq):
-        """Retransmit all buffered I-frames from from_seq onward."""
+        """Retransmit all buffered I-frames from from_seq onward,
+        updating N(R) to the current receive sequence number."""
         seq = from_seq
         while seq in conn.retransmit_buf:
             frame_bytes = conn.retransmit_buf[seq]
-            self._send_ax25(ax25.Frame.unpack(frame_bytes))
+            orig = ax25.Frame.unpack(frame_bytes)
+            # Rebuild the frame with current N(R) to piggyback-acknowledge
+            # any frames received since this I-frame was originally built.
+            frame = _cmd_frame(
+                str(orig.dst), str(orig.src),
+                control=ax25.Control(
+                    ax25.FrameType.I,
+                    send_seqno=orig.control.send_seqno,
+                    recv_seqno=conn.recv_seqno,
+                    poll_final=orig.control.poll_final),
+                pid=orig.pid,
+                data=orig.data)
+            conn.retransmit_buf[seq] = bytes(frame)
+            self._send_ax25(frame)
             seq = (seq + 1) % 8
 
     # ------------------------------------------------------------------
@@ -805,16 +888,22 @@ class Bridge:
                     except Exception as e:
                         logger.error(f"Failed to send RR for duplicate: {e}")
             else:
-                # In-sequence frame: advance V(R) and ACK immediately.
+                # In-sequence frame: advance V(R) and schedule delayed ACK.
                 conn.recv_seqno = (frame.control.send_seqno + 1) % 8
-                try:
-                    rr = _resp_frame(src, dst,
-                                     control=ax25.Control(ax25.FrameType.RR,
-                                                          poll_final=frame.control.poll_final,
-                                                          recv_seqno=conn.recv_seqno))
-                    self._send_ax25(rr)
-                except Exception as e:
-                    logger.error(f"Failed to send RR: {e}")
+                if frame.control.poll_final:
+                    # Poll requires immediate response
+                    self._cancel_t2(conn)
+                    try:
+                        rr = _resp_frame(src, dst,
+                                         control=ax25.Control(ax25.FrameType.RR,
+                                                              poll_final=True,
+                                                              recv_seqno=conn.recv_seqno))
+                        self._send_ax25(rr)
+                    except Exception as e:
+                        logger.error(f"Failed to send RR: {e}")
+                else:
+                    # Delay the RR to batch-acknowledge a burst of I-frames
+                    self._schedule_t2(conn, src, dst)
                 # Deliver data to connection owner as 'D' frame
                 if conn.owner:
                     try:
@@ -984,12 +1073,14 @@ def load_config(args):
     config.add_section("server")
     config.add_section("client")
     config.add_section("kiss")
+    config.add_section("ax25")
     config["server"]["listen_host"] = "0.0.0.0"
     config["server"]["listen_port"] = "8000"
     config["server"]["callsign"]    = "AGWPE"
     config["client"]["type"]        = "serial"
     config["client"]["device"]      = "/dev/ttyUSB0"
-    config["client"]["baudrate"]    = "9600"
+    config["client"]["serial_baudrate"] = "9600"
+    config["client"]["ota_baudrate"]    = "1200"
     config["kiss"]["tx_delay"]      = "40"
     config["kiss"]["persistence"]   = "63"
     config["kiss"]["slot_time"]     = "20"
@@ -1017,7 +1108,9 @@ def load_config(args):
     if args.kiss_port:
         config["client"]["port"] = str(args.kiss_port)
     if args.baudrate:
-        config["client"]["baudrate"] = str(args.baudrate)
+        config["client"]["serial_baudrate"] = str(args.baudrate)
+    if getattr(args, 'ota_baudrate', None):
+        config["client"]["ota_baudrate"] = str(args.ota_baudrate)
 
     return config
 
@@ -1057,6 +1150,9 @@ def main():
     client_group.add_argument(
         '-b', '--baudrate', metavar='BAUD', type=int,
         help='Serial baud rate (default: 9600)')
+    client_group.add_argument(
+        '--ota-baudrate', metavar='BAUD', type=int,
+        help='Over-the-air baud rate for T1 calculation (default: 1200)')
 
     parser.add_argument(
         '-v', '--verbose', action='count', default=0,
