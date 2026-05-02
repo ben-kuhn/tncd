@@ -40,7 +40,8 @@ in {
           client = {
             type = "serial";
             device = "/dev/ttyUSB0";
-            baudrate = 9600;
+            serial_baudrate = 9600;
+            ota_baudrate = 1200;    # over-the-air baud rate (for T1/T2 timers)
             # Optional serial port settings
             # parity = "N";      # N=none O=odd E=even M=mark S=space
             # stopbits = 1;      # 1, 1.5, or 2

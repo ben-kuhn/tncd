@@ -29,7 +29,8 @@ listen_port = 8000
 [client]
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600
+serial_baudrate = 9600
+ota_baudrate = 1200
 ```
 
 ## Milestones

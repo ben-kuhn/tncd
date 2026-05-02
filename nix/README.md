@@ -27,7 +27,8 @@ Two files are provided:
       client = {
         type = "serial";
         device = "/dev/ttyUSB0";
-        baudrate = 9600;
+        serial_baudrate = 9600;
+        ota_baudrate = 1200;
       };
     };
   };
@@ -90,7 +91,8 @@ For TNCs that need a command to enter KISS mode (e.g. Kantronics KPC-3):
 services.tncd.settings.client = {
   type = "serial";
   device = "/dev/ttyUSB0";
-  baudrate = 9600;
+  serial_baudrate = 9600;
+  ota_baudrate = 1200;
   init_string = "INT KISS\\r";
   init_delay = "1.0";
 };
