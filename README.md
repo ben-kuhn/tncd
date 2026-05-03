@@ -90,7 +90,7 @@ Direct serial connection to a TNC via USB or RS-232.
 
 ### Network KISS (TCP)
 
-Connects to a KISS-over-TCP server (e.g. Dire Wolf, YAAC).
+Connects to a KISS-over-TCP server (e.g. Dire Wolf, QtSoundModem).
 
 ### Bluetooth TNC (RFCOMM)
 
