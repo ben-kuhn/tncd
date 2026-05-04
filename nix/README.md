@@ -4,26 +4,21 @@ tncd is packaged in [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packa
 which provides the `tncd` package and all its dependencies (`kiss3`, `pyham-ax25`, etc.)
 as a nixpkgs overlay.
 
-The NixOS service module (`module.nix`) in this repository provides `services.tncd.*`
-options and systemd services.
+The NixOS service module is also in
+[nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) and provides
+`services.tncd.*` options and systemd services.
 
 ## Quick start (NixOS)
 
 ```nix
 # configuration.nix
 { config, pkgs, ... }:
-{
-  nixpkgs.overlays = [
-    (import (builtins.fetchTarball
-      "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz"
-    ))
-  ];
-
-  imports = [
-    ((builtins.fetchTarball
-      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
-    ) + "/nix/module.nix")
-  ];
+let
+  ham = builtins.fetchTarball
+    "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz";
+in {
+  nixpkgs.overlays = [ (import ham) ];
+  imports = [ "${ham}/tncd/module.nix" ];
 
   services.tncd = {
     enable = true;

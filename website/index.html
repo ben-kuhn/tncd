@@ -242,18 +242,12 @@ makepkg -si</code></pre>
       <p>tncd is packaged in
         <a href="https://github.com/ben-kuhn/nix-ham-packages">nix-ham-packages</a>.
         Add the overlay and service module to your NixOS configuration:</p>
-      <pre><code>{
-  nixpkgs.overlays = [
-    (import (builtins.fetchTarball
-      "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz"
-    ))
-  ];
-
-  imports = [
-    ((builtins.fetchTarball
-      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
-    ) + "/nix/module.nix")
-  ];
+      <pre><code>let
+  ham = builtins.fetchTarball
+    "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz";
+in {
+  nixpkgs.overlays = [ (import ham) ];
+  imports = [ "${ham}/tncd/module.nix" ];
 
   services.tncd = {
     enable = true;
