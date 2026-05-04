@@ -336,19 +336,17 @@ sudo pacman -U tncd-*.pkg.tar.zst</code></pre>
     </div>
 
     <div class="tab-content" id="tab-nixos">
-      <p>Add the tncd overlay to your NixOS configuration:</p>
-      <pre><code># In your configuration.nix or flake.nix
+      <p>tncd is packaged in
+        <a href="https://github.com/ben-kuhn/nix-ham-packages">nix-ham-packages</a>.
+        Add the overlay and service module to your NixOS configuration:</p>
+      <pre><code># configuration.nix
 {
   nixpkgs.overlays = [
     (import (builtins.fetchTarball
-      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
-    ) + "/nix/overlay.nix")
+      "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz"
+    ))
   ];
 
-  environment.systemPackages = [ pkgs.tncd ];
-}</code></pre>
-      <p>Or use the NixOS service module for a fully managed setup:</p>
-      <pre><code>{
   imports = [
     ((builtins.fetchTarball
       "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
@@ -357,11 +355,21 @@ sudo pacman -U tncd-*.pkg.tar.zst</code></pre>
 
   services.tncd = {
     enable = true;
-    configFile = ./tncd.ini;
+    settings = {
+      server.callsign = "N0CALL";
+      client = {
+        type = "serial";
+        device = "/dev/ttyUSB0";
+        serial_baudrate = 9600;
+        ota_baudrate = 1200;
+      };
+    };
   };
 }</code></pre>
       <p>After editing your configuration, rebuild with
-        <code>sudo nixos-rebuild switch</code>.</p>
+        <code>sudo nixos-rebuild switch</code>. See the
+        <a href="https://github.com/ben-kuhn/tncd/blob/main/nix/README.md">Nix README</a>
+        for Bluetooth setup and all module options.</p>
     </div>
 
     <div class="tab-content" id="tab-macos">
@@ -673,6 +681,8 @@ exit</code></pre>
     <pre><code>[client]
 type = serial
 device = /dev/rfcomm0
+serial_baudrate = 9600
+ota_baudrate = 1200
 
 [bluetooth]
 enabled = true

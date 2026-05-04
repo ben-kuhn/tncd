@@ -1,11 +1,11 @@
 # Nix / NixOS support
 
-Two files are provided:
+tncd is packaged in [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages),
+which provides the `tncd` package and all its dependencies (`kiss3`, `pyham-ax25`, etc.)
+as a nixpkgs overlay.
 
-| File | Purpose |
-|------|---------|
-| `overlay.nix` | Adds `pkgs.tncd` to nixpkgs |
-| `module.nix` | NixOS module: `services.tncd.*` options + systemd services |
+The NixOS service module (`module.nix`) in this repository provides `services.tncd.*`
+options and systemd services.
 
 ## Quick start (NixOS)
 
@@ -13,8 +13,17 @@ Two files are provided:
 # configuration.nix
 { config, pkgs, ... }:
 {
-  nixpkgs.overlays = [ (import /path/to/tncd/nix/overlay.nix) ];
-  imports = [ /path/to/tncd/nix/module.nix ];
+  nixpkgs.overlays = [
+    (import (builtins.fetchTarball
+      "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz"
+    ))
+  ];
+
+  imports = [
+    ((builtins.fetchTarball
+      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
+    ) + "/nix/module.nix")
+  ];
 
   services.tncd = {
     enable = true;
@@ -55,6 +64,8 @@ services.tncd = {
     client = {
       type = "serial";
       device = "/dev/rfcomm0";
+      serial_baudrate = 9600;
+      ota_baudrate = 1200;
     };
     bluetooth = {
       enabled = true;
@@ -109,9 +120,3 @@ services.tncd.settings.client = {
 | `services.tncd.user` | `"tncd"` | Service user |
 | `services.tncd.group` | `"tncd"` | Service group |
 | `services.tncd.bluetooth.enable` | `false` | Also run rfcomm manager |
-
-## Standalone nix-build
-
-```bash
-nix-build -I nixpkgs=/path/to/nixpkgs -f overlay.nix -A tncd
-```

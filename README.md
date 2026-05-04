@@ -138,6 +138,7 @@ pip install -r requirements.txt
 
 ### Via Nix (NixOS)
 
+tncd is packaged in [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages).
 See [`nix/README.md`](nix/README.md) for the full NixOS module with service options,
 automatic config generation, and Bluetooth support.
 
@@ -180,6 +181,8 @@ ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
 [client]
 type = serial
 device = /dev/rfcomm0
+serial_baudrate = 9600
+ota_baudrate = 1200
 
 [bluetooth]
 enabled = true
