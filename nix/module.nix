@@ -114,6 +114,7 @@ in {
       wantedBy = [ "multi-user.target" ];
       after = [ "bluetooth.service" ];
       requires = [ "bluetooth.service" ];
+      path = [ pkgs.bluez ];
       serviceConfig = {
         Type = "simple";
         # rfcomm bind/connect requires root.
