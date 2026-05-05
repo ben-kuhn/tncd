@@ -791,6 +791,24 @@ class TestConnectedMode:
         # Frames with N(S)=1 and N(S)=2 should be retransmitted
         assert bridge.kiss_client.send.call_count == 3 + 2
 
+    def test_rr_poll_retransmits_unacked_frames(self):
+        """RR with P=1 from remote must trigger retransmit of unacked I-frames."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        for i in range(3):
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
+        assert bridge.kiss_client.send.call_count == 3
+        # Remote ACKs first frame only, then polls with RR P=1 N(R)=1
+        # (simulating: remote got frame 0 but frames 1 and 2 were lost)
+        rr_poll = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                             control=ax25.Control(ax25.FrameType.RR, recv_seqno=1,
+                                                  poll_final=True))
+        bridge.on_kiss_frame(b'\x00' + bytes(rr_poll))
+        # Should send: RR F=1 response + retransmit of frames 1 and 2 = 3 more
+        assert bridge.kiss_client.send.call_count == 3 + 3
+
     async def test_t1_timer_retransmits_on_expiry(self):
         """T1 timer expiry must poll with RR P=1 and retransmit unacked frames."""
         protocol, _, bridge = make_real_protocol()

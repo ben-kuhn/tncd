@@ -879,6 +879,7 @@ class Bridge:
                 logger.debug(f"Discarding duplicate I frame N(S)={frame.control.send_seqno}"
                              f" (expected {expected_ns})")
                 if frame.control.poll_final:
+                    self._cancel_t2(conn)
                     try:
                         rr = _resp_frame(src, dst,
                                          control=ax25.Control(ax25.FrameType.RR,
@@ -887,6 +888,9 @@ class Bridge:
                         self._send_ax25(rr)
                     except Exception as e:
                         logger.error(f"Failed to send RR for duplicate: {e}")
+                else:
+                    # Re-send our V(R) so the remote learns the ACK it missed.
+                    self._schedule_t2(conn, src, dst)
             else:
                 # In-sequence frame: advance V(R) and schedule delayed ACK.
                 conn.recv_seqno = (frame.control.send_seqno + 1) % 8
@@ -1054,6 +1058,10 @@ class Bridge:
                     self._send_ax25(rr)
                 except Exception as e:
                     logger.error(f"Failed to send RR F=1 response to poll: {e}")
+                # The remote is polling us — if we have unacked I-frames,
+                # retransmit from where the remote left off.
+                if conn.retransmit_buf:
+                    self._retransmit_from(conn, conn.last_acked)
 
         # Forward to monitoring clients as 'S'
         ts = datetime.now().strftime('%H:%M:%S')
