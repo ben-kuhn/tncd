@@ -87,6 +87,7 @@ class Connection:
         self.outbound_queue = collections.deque()  # (data_chunk, pid) awaiting window space
         self.retransmit_buf = {}  # N(S) -> raw AX.25 frame bytes for retransmit
         self.t1_handle = None    # asyncio TimerHandle for T1 retransmit timer
+        self.t1_polls = 0        # consecutive T1 polls with no ack response
         self.t2_handle = None    # asyncio TimerHandle for T2 delayed ACK timer
         self.t2_pending = False  # True when we owe the remote an RR
         self._last_rr_time = 0.0   # monotonic time of last RR F=1 sent
@@ -750,12 +751,21 @@ class Bridge:
             logger.error(f"Failed to send delayed RR: {e}")
 
     def _t1_expired(self, conn):
-        """T1 timer fired: poll the remote with RR P=1 and retransmit unacked frames."""
+        """T1 timer fired: poll the remote with RR P=1.
+
+        First expiry sends poll only — gives the remote a chance to
+        respond without flooding slow TNC buffers (e.g. Bluetooth).
+        Second consecutive expiry (no ack received) also retransmits
+        unacked I-frames, since the originals were likely lost OTA.
+        """
         conn.t1_handle = None
         if conn.state != 'CONNECTED' or not conn.retransmit_buf:
             return
+        conn.t1_polls += 1
+        retransmit = conn.t1_polls > 1
         logger.debug(f"T1 expired for {conn.local}<->{conn.remote}, "
-                     f"{conn.unacked} unacked, retransmitting from {conn.last_acked}")
+                     f"{conn.unacked} unacked, poll #{conn.t1_polls}"
+                     f"{' + retransmit' if retransmit else ''}")
         try:
             rr = _cmd_frame(conn.remote, conn.local,
                             control=ax25.Control(ax25.FrameType.RR,
@@ -764,7 +774,8 @@ class Bridge:
             self._send_ax25(rr)
         except Exception as e:
             logger.error(f"Failed to send T1 poll: {e}")
-        self._retransmit_from(conn, conn.last_acked)
+        if retransmit:
+            self._retransmit_from(conn, conn.last_acked)
         self._start_t1(conn)
 
     def _ack_frames(self, conn, r_seq):
@@ -778,6 +789,7 @@ class Bridge:
             logger.debug(f"Ignoring backwards N(R)={r_seq} (last_acked={conn.last_acked})")
             return
         if newly_acked:
+            conn.t1_polls = 0  # remote responded — reset consecutive poll counter
             logger.info(f"_ack_frames: N(R)={r_seq}, acked {newly_acked} frames, "
                         f"unacked {conn.unacked}->{conn.unacked - newly_acked}, "
                         f"queue={len(conn.outbound_queue)}")
@@ -912,7 +924,11 @@ class Bridge:
         conn = self.get_connection(0, dst, src)
         if not conn or conn.state != 'CONNECTED':
             # No active connection — send DM so the remote knows to disconnect.
-            if frame.control.poll_final:
+            # But NOT if we're in SABM_SENT state: our SABM will reset the
+            # remote, and a premature DM would kill the handshake.
+            if conn and conn.state == 'SABM_SENT':
+                logger.info(f"Ignoring I-frame from {src} (SABM_SENT, waiting for UA)")
+            elif frame.control.poll_final:
                 try:
                     dm = _resp_frame(src, dst,
                                      control=ax25.Control(ax25.FrameType.DM,

@@ -812,8 +812,8 @@ class TestConnectedMode:
         # Should send: RR F=1 response + retransmit of frames 1 and 2 = 3 more
         assert bridge.kiss_client.send.call_count == 3 + 3
 
-    async def test_t1_timer_retransmits_on_expiry(self):
-        """T1 timer expiry must poll with RR P=1 and retransmit unacked frames."""
+    async def test_t1_timer_polls_then_retransmits(self):
+        """First T1 expiry sends poll only; second adds retransmit."""
         protocol, _, bridge = make_real_protocol()
         conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
         conn.state = 'CONNECTED'
@@ -821,10 +821,18 @@ class TestConnectedMode:
         protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'hello'))
         assert bridge.kiss_client.send.call_count == 1
         assert conn.t1_handle is not None
-        # Manually fire the T1 callback
+        # First T1 expiry: poll only (no retransmit)
         bridge._t1_expired(conn)
-        # Should have sent: RR P=1 poll + retransmit of the I-frame = 2 more
-        assert bridge.kiss_client.send.call_count == 3
+        assert bridge.kiss_client.send.call_count == 2
+        assert conn.t1_polls == 1
+        poll_bytes = bridge.kiss_client.send.call_args_list[1][0][0]
+        poll_frame = ax25.Frame.unpack(poll_bytes)
+        assert poll_frame.control.frame_type is ax25.FrameType.RR
+        assert poll_frame.control.poll_final is True
+        # Second T1 expiry: poll + retransmit
+        bridge._t1_expired(conn)
+        assert bridge.kiss_client.send.call_count == 4  # poll + 1 retransmit
+        assert conn.t1_polls == 2
 
     async def test_t1_timer_cancelled_on_full_ack(self):
         """T1 timer must be cancelled when all frames are ACKed."""
