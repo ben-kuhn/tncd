@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 import argparse
 import ax25
@@ -733,10 +734,10 @@ class TestConnectedMode:
         conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
         conn.state = 'CONNECTED'
         conn.owner = protocol
-        # Fill window + queue 3 more
+        # Fill window + queue 3 more (use 200-byte payloads to prevent coalescing)
         total = max_win + 3
         for i in range(total):
-            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', f'pkt{i}'.encode()))
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', bytes(200)))
         assert bridge.kiss_client.send.call_count == max_win
         # Remote ACKs all with RR N(R)=max_win
         rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
@@ -791,7 +792,7 @@ class TestConnectedMode:
         # Frames with N(S)=1 and N(S)=2 should be retransmitted
         assert bridge.kiss_client.send.call_count == 3 + 2
 
-    def test_rr_poll_retransmits_unacked_frames(self):
+    async def test_rr_poll_retransmits_unacked_frames(self):
         """RR with P=1 from remote must trigger retransmit of unacked I-frames."""
         protocol, _, bridge = make_real_protocol()
         conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
@@ -806,6 +807,8 @@ class TestConnectedMode:
                              control=ax25.Control(ax25.FrameType.RR, recv_seqno=1,
                                                   poll_final=True))
         bridge.on_kiss_frame(b'\x00' + bytes(rr_poll))
+        # Poll response is deferred via call_soon — yield to let it run.
+        await asyncio.sleep(0)
         # Should send: RR F=1 response + retransmit of frames 1 and 2 = 3 more
         assert bridge.kiss_client.send.call_count == 3 + 3
 

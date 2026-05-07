@@ -313,7 +313,7 @@ When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
 - [ ] Mobilinkd TNC3 (Bluetooth)
 - [ ] Mobilinkd TNC2 (Bluetooth)
 - [ ] Kenwood TH-D7
-- [ ] Kenwood TS-2000
+- [x] Kenwood TS-2000 — via Dire Wolf PTY, OTA-verified at 1200 baud
 - [ ] AEA PK-232
 - [ ] AEA DSP-2232
 

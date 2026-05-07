@@ -89,6 +89,8 @@ class Connection:
         self.t1_handle = None    # asyncio TimerHandle for T1 retransmit timer
         self.t2_handle = None    # asyncio TimerHandle for T2 delayed ACK timer
         self.t2_pending = False  # True when we owe the remote an RR
+        self._last_rr_time = 0.0   # monotonic time of last RR F=1 sent
+        self._last_rr_nr = -1      # N(R) of last RR F=1 sent
 
 
 class AGWPEServerProtocol(asyncio.Protocol):
@@ -292,6 +294,9 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 frame_pid = pid if pid else 0xF0
                 for chunk in chunks:
                     conn.outbound_queue.append((chunk, frame_pid))
+                logger.info(f"'D' frame: {len(payload)}B payload -> {len(chunks)} chunks, "
+                            f"queue={len(conn.outbound_queue)}, unacked={conn.unacked}, "
+                            f"window={self.bridge.max_window}")
                 self.bridge._drain_outbound(conn)
 
         elif datakind_bytes == b'd':
@@ -327,10 +332,17 @@ class AGWPEServerProtocol(asyncio.Protocol):
             self.send_frame(port, ord(b'y'), b'', b'', struct.pack('<I', 0))
 
         elif datakind_bytes == b'Y':
-            # Outstanding (sent but unacked) frames for a connection.
+            # Outstanding frames for a connection: queued + unacked.
+            # Matches Direwolf behavior (i_frame_queue + txdata_by_ns).
+            # PAT's Flush() has a 60s timeout waiting for outstanding==0.
+            # Including queued frames makes PAT's Write() flow control
+            # throttle sends (blocking at outstanding > maxFrame), so
+            # Flush() only waits for the last batch — not the whole transfer.
             conn = self.bridge.get_connection(port, from_str, to_str)
-            count = conn.unacked if conn else 0
-            logger.debug(f"Outstanding frames query for {from_str!r}<->{to_str!r}: {count}")
+            unacked = conn.unacked if conn else 0
+            queued = len(conn.outbound_queue) if conn else 0
+            count = unacked + queued
+            logger.info(f"'Y' query {from_str!r}<->{to_str!r}: unacked={unacked}, queue={queued}, reported={count}")
             self.send_frame(port, ord(b'Y'), call_from, call_to, struct.pack('<I', count))
 
         elif datakind_bytes == b'H':
@@ -639,10 +651,23 @@ class Bridge:
         self.kiss_client.send(data)
 
     def _drain_outbound(self, conn):
-        """Send queued I-frames while the outbound window has space."""
+        """Send queued I-frames while the outbound window has space.
+
+        Coalesces adjacent queue entries with the same PID into single
+        I-frames up to 256 bytes, since AGWPE clients may send small
+        'D' payloads (e.g. PAT sends 127-byte chunks).
+        """
         sent_any = False
+        sent_count = 0
         while conn.outbound_queue and conn.unacked < self.max_window:
             chunk, pid = conn.outbound_queue.popleft()
+            # Coalesce adjacent entries with the same PID up to 256 bytes.
+            while conn.outbound_queue and len(chunk) < 256:
+                next_chunk, next_pid = conn.outbound_queue[0]
+                if next_pid != pid or len(chunk) + len(next_chunk) > 256:
+                    break
+                conn.outbound_queue.popleft()
+                chunk = chunk + next_chunk
             try:
                 frame = _cmd_frame(conn.remote, conn.local,
                                    control=ax25.Control(ax25.FrameType.I,
@@ -656,10 +681,13 @@ class Bridge:
                 conn.send_seqno = (ns + 1) % 8
                 conn.unacked += 1
                 sent_any = True
+                sent_count += 1
             except Exception as e:
                 logger.error(f"Failed to send queued I-frame: {e}")
                 break
         if sent_any:
+            logger.info(f"_drain_outbound: sent {sent_count} I-frames, "
+                        f"unacked now={conn.unacked}, queue remaining={len(conn.outbound_queue)}")
             # Outgoing I-frames piggyback N(R), so cancel any pending T2
             # delayed ACK — the remote will see the acknowledgment in our
             # I-frames' N(R) field.
@@ -712,6 +740,7 @@ class Bridge:
 
     def _send_delayed_rr(self, conn):
         """Send RR with current V(R) for delayed acknowledgment."""
+        logger.info(f"TX RR(n(r)={conn.recv_seqno}) to {conn._t2_src} [T2 delayed]")
         try:
             rr = _resp_frame(conn._t2_src, conn._t2_dst,
                              control=ax25.Control(ax25.FrameType.RR,
@@ -741,7 +770,17 @@ class Bridge:
     def _ack_frames(self, conn, r_seq):
         """Process cumulative ACK: update unacked, purge retransmit buffer, drain queue."""
         newly_acked = (r_seq - conn.last_acked) % 8
+        # Guard against backwards N(R) from retransmitted frames.
+        # A retransmit may carry an old N(R) that's behind last_acked;
+        # the mod-8 arithmetic would interpret this as a huge forward ACK.
+        # Only accept N(R) that ACKs at most max_window frames.
+        if newly_acked > self.max_window:
+            logger.debug(f"Ignoring backwards N(R)={r_seq} (last_acked={conn.last_acked})")
+            return
         if newly_acked:
+            logger.info(f"_ack_frames: N(R)={r_seq}, acked {newly_acked} frames, "
+                        f"unacked {conn.unacked}->{conn.unacked - newly_acked}, "
+                        f"queue={len(conn.outbound_queue)}")
             # Purge retransmit buffer for ACKed sequence numbers.
             seq = conn.last_acked
             for _ in range(newly_acked):
@@ -865,10 +904,24 @@ class Bridge:
         """Handle received I-frame: deliver data to connection owner and monitoring clients."""
         pid  = frame.pid
         data = frame.data or b''
+        logger.info(f"RX I-frame {src}->{dst} N(S)={frame.control.send_seqno} "
+                    f"N(R)={frame.control.recv_seqno} P={frame.control.poll_final} "
+                    f"{len(data)}B")
 
         # Find connection: local=dst (frame addressed to us), remote=src
         conn = self.get_connection(0, dst, src)
-        if conn and conn.state == 'CONNECTED':
+        if not conn or conn.state != 'CONNECTED':
+            # No active connection — send DM so the remote knows to disconnect.
+            if frame.control.poll_final:
+                try:
+                    dm = _resp_frame(src, dst,
+                                     control=ax25.Control(ax25.FrameType.DM,
+                                                          poll_final=True))
+                    self._send_ax25(dm)
+                    logger.info(f"TX DM to {src} (no connection for I-frame)")
+                except Exception as e:
+                    logger.error(f"Failed to send DM: {e}")
+        elif conn.state == 'CONNECTED':
             # I-frames carry N(R) which implicitly ACKs our sent frames.
             self._ack_frames(conn, frame.control.recv_seqno)
 
@@ -876,18 +929,11 @@ class Bridge:
             if frame.control.send_seqno != expected_ns:
                 # Duplicate or out-of-order frame — discard data but still
                 # respond to a poll so the remote knows our current V(R).
-                logger.debug(f"Discarding duplicate I frame N(S)={frame.control.send_seqno}"
-                             f" (expected {expected_ns})")
+                logger.info(f"Discarding duplicate I frame N(S)={frame.control.send_seqno}"
+                            f" (expected {expected_ns})")
                 if frame.control.poll_final:
                     self._cancel_t2(conn)
-                    try:
-                        rr = _resp_frame(src, dst,
-                                         control=ax25.Control(ax25.FrameType.RR,
-                                                              poll_final=True,
-                                                              recv_seqno=conn.recv_seqno))
-                        self._send_ax25(rr)
-                    except Exception as e:
-                        logger.error(f"Failed to send RR for duplicate: {e}")
+                    self._send_rr_guarded(conn, src, dst, 'dup poll')
                 else:
                     # Re-send our V(R) so the remote learns the ACK it missed.
                     self._schedule_t2(conn, src, dst)
@@ -897,14 +943,7 @@ class Bridge:
                 if frame.control.poll_final:
                     # Poll requires immediate response
                     self._cancel_t2(conn)
-                    try:
-                        rr = _resp_frame(src, dst,
-                                         control=ax25.Control(ax25.FrameType.RR,
-                                                              poll_final=True,
-                                                              recv_seqno=conn.recv_seqno))
-                        self._send_ax25(rr)
-                    except Exception as e:
-                        logger.error(f"Failed to send RR: {e}")
+                    self._send_rr_guarded(conn, src, dst, 'I-frame poll')
                 else:
                     # Delay the RR to batch-acknowledge a burst of I-frames
                     self._schedule_t2(conn, src, dst)
@@ -1027,6 +1066,42 @@ class Bridge:
                     logger.error(f"Error sending 'd' for DISC: {e}")
             self.remove_connection(0, dst, src)
 
+    def _send_rr_guarded(self, conn, src, dst, tag):
+        """Send RR F=1 with conn.recv_seqno, suppressing duplicates within 1s.
+
+        Prevents flooding the KISS TX buffer with identical RR responses when
+        the remote sends rapid retransmit bursts on a half-duplex channel.
+        """
+        now = time.monotonic()
+        nr = conn.recv_seqno
+        if nr == conn._last_rr_nr and (now - conn._last_rr_time) < 3.0:
+            logger.debug(f"Suppressing duplicate RR(n(r)={nr}, f=1) to {src} [{tag}]")
+            return
+        conn._last_rr_time = now
+        conn._last_rr_nr = nr
+        logger.info(f"TX RR(n(r)={nr}, f=1) to {src} [{tag}]")
+        try:
+            rr = _resp_frame(src, dst,
+                             control=ax25.Control(ax25.FrameType.RR,
+                                                  poll_final=True,
+                                                  recv_seqno=nr))
+            self._send_ax25(rr)
+        except Exception as e:
+            logger.error(f"Failed to send RR F=1 to {src}: {e}")
+
+    def _send_poll_response(self, conn, src_str, dst_str):
+        """Deferred RR F=1 poll response — called via call_soon so that
+        I-frames queued before us on the event loop are processed first."""
+        if conn.state != 'CONNECTED':
+            return
+        self._send_rr_guarded(conn, src_str, dst_str, 'poll response')
+        # The remote is polling us — if we have unacked I-frames,
+        # retransmit from where the remote left off.
+        if conn.retransmit_buf:
+            logger.info(f"Retransmitting {len(conn.retransmit_buf)} I-frames "
+                        f"from seq {conn.last_acked}")
+            self._retransmit_from(conn, conn.last_acked)
+
     def _dispatch_s(self, frame, src, dst):
         """Handle received S (supervisory) frame: respond to polls, forward to monitors."""
         ft = frame.control.frame_type
@@ -1036,8 +1111,12 @@ class Bridge:
         except TypeError:
             r_seq = 0
 
-        # Update unacked count and purge retransmit buffer.
         conn = self.get_connection(0, dst, src)
+        logger.info(f"RX {ft_name} {src}->{dst} N(R)={r_seq} "
+                    f"P={frame.control.poll_final} "
+                    f"recv_seqno={conn.recv_seqno if conn else '?'}")
+
+        # Update unacked count and purge retransmit buffer.
         if conn and conn.state == 'CONNECTED':
             self._ack_frames(conn, r_seq)
 
@@ -1045,23 +1124,16 @@ class Bridge:
             if ft is ax25.FrameType.REJ:
                 self._retransmit_from(conn, r_seq)
 
-        # If the remote set P=1 (poll), we must respond with RR F=1 immediately.
-        # Without this the remote T1 timer fires, it retransmits, and eventually disconnects.
+        # If the remote set P=1 (poll), we must respond with RR F=1.
+        # Defer via call_soon so that any I-frames already queued on the
+        # event loop (from the same KISS burst) are processed first,
+        # advancing recv_seqno before we build the response.
         if frame.control.poll_final:
             conn = self.get_connection(0, dst, src)
             if conn and conn.state == 'CONNECTED':
-                try:
-                    rr = _resp_frame(src, dst,
-                                     control=ax25.Control(ax25.FrameType.RR,
-                                                          poll_final=True,
-                                                          recv_seqno=conn.recv_seqno))
-                    self._send_ax25(rr)
-                except Exception as e:
-                    logger.error(f"Failed to send RR F=1 response to poll: {e}")
-                # The remote is polling us — if we have unacked I-frames,
-                # retransmit from where the remote left off.
-                if conn.retransmit_buf:
-                    self._retransmit_from(conn, conn.last_acked)
+                loop = asyncio.get_running_loop()
+                loop.call_soon(self._send_poll_response, conn,
+                               str(src), str(dst))
 
         # Forward to monitoring clients as 'S'
         ts = datetime.now().strftime('%H:%M:%S')
