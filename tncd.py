@@ -486,13 +486,50 @@ class KISSClient:
 
         logger.info("KISS connection established")
 
+    def _install_serial_spy(self):
+        """Wrap serial read to log raw KISS frames before kiss3 unframing.
+
+        This helps diagnose whether a hardware TNC is sending frames that
+        kiss3 silently drops (e.g. first-frame-in-burst loss debugging).
+        """
+        try:
+            ser = self.connection.protocol.transport.serial
+        except AttributeError:
+            logger.debug("Serial spy: not a serial connection, skipping")
+            return
+
+        orig_read = ser.read
+        raw_buf = bytearray()
+        FEND = 0xC0
+
+        def spy_read(size=1):
+            data = orig_read(size)
+            if data:
+                for b in data:
+                    if b == FEND:
+                        if len(raw_buf) > 0:
+                            # Complete KISS frame (without delimiters)
+                            logger.info(
+                                f"KISS RAW frame: {len(raw_buf)}B "
+                                f"{bytes(raw_buf[:64]).hex()}"
+                                f"{'...' if len(raw_buf) > 64 else ''}")
+                        raw_buf.clear()
+                    else:
+                        raw_buf.append(b)
+            return data
+        ser.read = spy_read
+        logger.info("Serial spy installed for raw KISS frame logging")
+
     def start_receive(self, loop):
         """Start a background thread that reads frames from the KISS TNC.
 
         Each received AX.25 frame is dispatched to bridge.on_kiss_frame()
         on the asyncio event loop thread via call_soon_threadsafe.
         """
+        self._install_serial_spy()
+
         def _on_frame(frame_data):
+            logger.info(f"KISS RX: {len(frame_data)} bytes raw")
             loop.call_soon_threadsafe(self.bridge.on_kiss_frame, bytes(frame_data))
 
         def _read_loop():
@@ -922,13 +959,25 @@ class Bridge:
 
         # Find connection: local=dst (frame addressed to us), remote=src
         conn = self.get_connection(0, dst, src)
+
+        # I-frame while CONNECTING: the UA was lost OTA but the remote
+        # clearly accepted our SABM.  Promote to CONNECTED so the
+        # I-frame is processed normally below.
+        if conn and conn.state == 'CONNECTING':
+            conn.state = 'CONNECTED'
+            conn.send_seqno = 0
+            conn.recv_seqno = 0
+            logger.info(f"CONNECTED   {dst} <-> {src}  (implicit, UA lost)")
+            msg = f'*** CONNECTED With {src}\r'.encode()
+            if conn.owner:
+                try:
+                    conn.owner.send_frame(0, ord('C'), src.encode(), dst.encode(), msg)
+                except Exception as e:
+                    logger.error(f"Error sending 'C' to owner: {e}")
+
         if not conn or conn.state != 'CONNECTED':
             # No active connection — send DM so the remote knows to disconnect.
-            # But NOT if we're in SABM_SENT state: our SABM will reset the
-            # remote, and a premature DM would kill the handshake.
-            if conn and conn.state == 'SABM_SENT':
-                logger.info(f"Ignoring I-frame from {src} (SABM_SENT, waiting for UA)")
-            elif frame.control.poll_final:
+            if frame.control.poll_final:
                 try:
                     dm = _resp_frame(src, dst,
                                      control=ax25.Control(ax25.FrameType.DM,
@@ -937,7 +986,7 @@ class Bridge:
                     logger.info(f"TX DM to {src} (no connection for I-frame)")
                 except Exception as e:
                     logger.error(f"Failed to send DM: {e}")
-        elif conn.state == 'CONNECTED':
+        else:
             # I-frames carry N(R) which implicitly ACKs our sent frames.
             self._ack_frames(conn, frame.control.recv_seqno)
 
