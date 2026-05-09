@@ -10,7 +10,7 @@ from unittest.mock import Mock, MagicMock, patch
 from tncd import (
     AGWPEServerProtocol, Bridge, Connection, KISSClient,
     AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, DEFAULT_MAX_WINDOW,
-    load_config,
+    DEFAULT_N2_RETRY, load_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -1122,6 +1122,199 @@ class TestConnectedModeReceivePath:
         bridge.on_kiss_frame(b'\x00' + bytes(sabm))
         msg = client.send_frame.call_args[0][4]
         assert b'CONNECTED To' in msg
+
+
+class TestRNRHandling:
+    """AX.25 6.4.9: Receive Not Ready (RNR) flow control."""
+
+    def test_rnr_stops_iframe_sending(self):
+        """RNR from remote must set remote_busy and prevent I-frame sending."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        assert not conn.remote_busy
+
+        # Receive RNR from remote
+        rnr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                         control=ax25.Control(ax25.FrameType.RNR, recv_seqno=0))
+        bridge.on_kiss_frame(b'\x00' + bytes(rnr))
+        assert conn.remote_busy
+
+        # Queue data — should NOT be sent while remote is busy
+        bridge.kiss_client.send.reset_mock()
+        protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'hello'))
+        # The data is queued but _drain_outbound returns early due to remote_busy
+        assert len(conn.outbound_queue) > 0 or conn.unacked == 0
+        # No I-frame should have been sent (only the RR poll response may have been sent)
+        for call in bridge.kiss_client.send.call_args_list:
+            frame = ax25.Frame.unpack(call[0][0])
+            assert frame.control.frame_type is not ax25.FrameType.I
+
+    def test_rr_clears_remote_busy(self):
+        """RR from remote must clear remote_busy and drain queued frames."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+
+        # Set remote_busy
+        conn.remote_busy = True
+        # Queue some data
+        conn.outbound_queue.append((b'hello', 0xF0))
+
+        # Receive RR from remote (clears busy)
+        rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                        control=ax25.Control(ax25.FrameType.RR, recv_seqno=0))
+        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        assert not conn.remote_busy
+        # Queued frame should have been drained
+        assert len(conn.outbound_queue) == 0
+
+    def test_rej_clears_remote_busy(self):
+        """REJ must clear remote_busy (AX.25 6.4.9)."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        conn.remote_busy = True
+
+        rej = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                         control=ax25.Control(ax25.FrameType.REJ, recv_seqno=0))
+        bridge.on_kiss_frame(b'\x00' + bytes(rej))
+        assert not conn.remote_busy
+
+
+class TestN2RetryLimit:
+    """AX.25 6.3.2: N2 retry limit — disconnect after too many unanswered polls."""
+
+    async def test_n2_disconnect_after_exceeded(self):
+        """After N2+1 T1 expiries, connection must be torn down."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        # Put a valid AX.25 I-frame in retransmit buffer
+        iframe = ax25.Frame(dst=ax25.Address('W2DEF'), src=ax25.Address('W1ABC'),
+                            control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                                 recv_seqno=0),
+                            data=b'test')
+        conn.retransmit_buf[0] = bytes(iframe)
+
+        # Set t1_polls so after _t1_expired increments it, it exceeds n2_retry
+        conn.t1_polls = bridge.n2_retry
+        bridge._t1_expired(conn)
+
+        # Connection should be removed
+        assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
+
+    async def test_n2_does_not_disconnect_before_limit(self):
+        """At exactly N2 polls, connection must still be alive."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        iframe = ax25.Frame(dst=ax25.Address('W2DEF'), src=ax25.Address('W1ABC'),
+                            control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                                 recv_seqno=0),
+                            data=b'test')
+        conn.retransmit_buf[0] = bytes(iframe)
+
+        # _t1_expired increments t1_polls before checking, so set to n2_retry - 1
+        # so after increment it will be exactly n2_retry (not exceeding)
+        conn.t1_polls = bridge.n2_retry - 1
+        bridge._t1_expired(conn)
+
+        # Should still exist (n2_retry == n2_retry is not >)
+        assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is not None
+        assert conn.state == 'CONNECTED'
+
+    async def test_n2_sends_disconnect_notification(self):
+        """N2 exceeded must send 'd' disconnect notification to AGWPE client."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        protocol.send_frame = Mock()
+        iframe = ax25.Frame(dst=ax25.Address('W2DEF'), src=ax25.Address('W1ABC'),
+                            control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                                 recv_seqno=0),
+                            data=b'test')
+        conn.retransmit_buf[0] = bytes(iframe)
+        conn.t1_polls = bridge.n2_retry
+
+        bridge._t1_expired(conn)
+
+        # Should have sent a 'd' frame with disconnect message
+        protocol.send_frame.assert_called()
+        args = protocol.send_frame.call_args[0]
+        assert args[1] == ord('d')
+        assert b'DISCONNECTED' in args[4]
+
+    def test_n2_default_value(self):
+        """DEFAULT_N2_RETRY must be 10 per AX.25 recommended default."""
+        assert DEFAULT_N2_RETRY == 10
+
+
+class TestFRMRHandling:
+    """AX.25 2.4.5: Frame Reject (FRMR) — unrecoverable protocol error."""
+
+    def test_frmr_resets_connection(self):
+        """FRMR must reset connection state and send SABM."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        conn.send_seqno = 5
+        conn.recv_seqno = 3
+        conn.unacked = 2
+        conn.retransmit_buf = {3: b'x', 4: b'y'}
+        conn.outbound_queue.append((b'data', 0xF0))
+
+        frmr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.FRMR))
+        bridge.on_kiss_frame(b'\x00' + bytes(frmr))
+
+        # Connection should be reset to CONNECTING
+        conn = bridge.get_connection(0, 'W1ABC', 'W2DEF')
+        assert conn.state == 'CONNECTING'
+        assert conn.send_seqno == 0
+        assert conn.recv_seqno == 0
+        assert conn.unacked == 0
+        assert len(conn.retransmit_buf) == 0
+        assert len(conn.outbound_queue) == 0
+
+    def test_frmr_sends_sabm(self):
+        """FRMR must trigger a SABM to re-establish the link."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+
+        bridge.kiss_client.send.reset_mock()
+        frmr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.FRMR))
+        bridge.on_kiss_frame(b'\x00' + bytes(frmr))
+
+        bridge.kiss_client.send.assert_called()
+        sent = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert sent.control.frame_type is ax25.FrameType.SABM
+
+    def test_frmr_ignored_when_not_connected(self):
+        """FRMR on a non-CONNECTED session must be ignored."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTING'
+
+        bridge.kiss_client.send.reset_mock()
+        frmr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.FRMR))
+        bridge.on_kiss_frame(b'\x00' + bytes(frmr))
+
+        # Should not send SABM since not in CONNECTED state
+        for call in bridge.kiss_client.send.call_args_list:
+            frame = ax25.Frame.unpack(call[0][0])
+            assert frame.control.frame_type is not ax25.FrameType.SABM
 
 
 if __name__ == '__main__':

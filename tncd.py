@@ -67,6 +67,7 @@ AGWPE_HEADER_SIZE = 36
 
 
 DEFAULT_MAX_WINDOW = 3   # mod-8 AX.25: max outstanding I-frames (max 7)
+DEFAULT_N2_RETRY = 10    # max T1 retransmissions before disconnect (AX.25 6.3.2)
 AX25_OVERHEAD = 20       # AX.25 header + KISS framing bytes per frame
 T2_MULTIPLIER = 1.2      # T2 = multiplier * frame_time (wait for burst to end)
 
@@ -90,6 +91,7 @@ class Connection:
         self.t1_polls = 0        # consecutive T1 polls with no ack response
         self.t2_handle = None    # asyncio TimerHandle for T2 delayed ACK timer
         self.t2_pending = False  # True when we owe the remote an RR
+        self.remote_busy = False   # True when remote sent RNR (stop sending I-frames)
         self._last_rr_time = 0.0   # monotonic time of last RR F=1 sent
         self._last_rr_nr = -1      # N(R) of last RR F=1 sent
 
@@ -486,50 +488,13 @@ class KISSClient:
 
         logger.info("KISS connection established")
 
-    def _install_serial_spy(self):
-        """Wrap serial read to log raw KISS frames before kiss3 unframing.
-
-        This helps diagnose whether a hardware TNC is sending frames that
-        kiss3 silently drops (e.g. first-frame-in-burst loss debugging).
-        """
-        try:
-            ser = self.connection.protocol.transport.serial
-        except AttributeError:
-            logger.debug("Serial spy: not a serial connection, skipping")
-            return
-
-        orig_read = ser.read
-        raw_buf = bytearray()
-        FEND = 0xC0
-
-        def spy_read(size=1):
-            data = orig_read(size)
-            if data:
-                for b in data:
-                    if b == FEND:
-                        if len(raw_buf) > 0:
-                            # Complete KISS frame (without delimiters)
-                            logger.info(
-                                f"KISS RAW frame: {len(raw_buf)}B "
-                                f"{bytes(raw_buf[:64]).hex()}"
-                                f"{'...' if len(raw_buf) > 64 else ''}")
-                        raw_buf.clear()
-                    else:
-                        raw_buf.append(b)
-            return data
-        ser.read = spy_read
-        logger.info("Serial spy installed for raw KISS frame logging")
-
     def start_receive(self, loop):
         """Start a background thread that reads frames from the KISS TNC.
 
         Each received AX.25 frame is dispatched to bridge.on_kiss_frame()
         on the asyncio event loop thread via call_soon_threadsafe.
         """
-        self._install_serial_spy()
-
         def _on_frame(frame_data):
-            logger.info(f"KISS RX: {len(frame_data)} bytes raw")
             loop.call_soon_threadsafe(self.bridge.on_kiss_frame, bytes(frame_data))
 
         def _read_loop():
@@ -570,9 +535,10 @@ class Bridge:
         # back via KISS. Track recently-sent raw bytes to discard them.
         self._sent_frames = collections.deque(maxlen=20)
 
-        # Window size and T1 timer calculation
+        # Window size, retry limit, and T1 timer calculation
         self.max_window = config.getint('ax25', 'max_window', fallback=DEFAULT_MAX_WINDOW)
         self.max_window = max(1, min(7, self.max_window))  # clamp to 1-7
+        self.n2_retry = config.getint('ax25', 'n2_retry', fallback=DEFAULT_N2_RETRY)
 
         # Calculate T1 and T2 from OTA baud rate
         ota_baudrate = config.getint('client', 'ota_baudrate', fallback=1200)
@@ -697,6 +663,8 @@ class Bridge:
         """
         sent_any = False
         sent_count = 0
+        if conn.remote_busy:
+            return
         while conn.outbound_queue and conn.unacked < self.max_window:
             chunk, pid = conn.outbound_queue.popleft()
             # Coalesce adjacent entries with the same PID up to 256 bytes.
@@ -794,14 +762,31 @@ class Bridge:
         respond without flooding slow TNC buffers (e.g. Bluetooth).
         Second consecutive expiry (no ack received) also retransmits
         unacked I-frames, since the originals were likely lost OTA.
+        After N2 consecutive retransmissions, disconnect (AX.25 6.3.2).
         """
         conn.t1_handle = None
         if conn.state != 'CONNECTED' or not conn.retransmit_buf:
             return
         conn.t1_polls += 1
+
+        # N2 retry limit: disconnect after too many unanswered polls.
+        if conn.t1_polls > self.n2_retry:
+            logger.warning(f"N2 retry limit ({self.n2_retry}) exceeded for "
+                           f"{conn.local}<->{conn.remote}, disconnecting")
+            conn.state = 'DISCONNECTED'
+            msg = f'*** DISCONNECTED From {conn.remote}\r'.encode()
+            if conn.owner:
+                try:
+                    conn.owner.send_frame(0, ord('d'),
+                                          conn.remote.encode(), conn.local.encode(), msg)
+                except Exception as e:
+                    logger.error(f"Error sending 'd' for N2 timeout: {e}")
+            self.remove_connection(conn.port, conn.local, conn.remote)
+            return
+
         retransmit = conn.t1_polls > 1
         logger.debug(f"T1 expired for {conn.local}<->{conn.remote}, "
-                     f"{conn.unacked} unacked, poll #{conn.t1_polls}"
+                     f"{conn.unacked} unacked, poll #{conn.t1_polls}/{self.n2_retry}"
                      f"{' + retransmit' if retransmit else ''}")
         try:
             rr = _cmd_frame(conn.remote, conn.local,
@@ -924,6 +909,8 @@ class Bridge:
             self._dispatch_dm(frame, src, dst)
         elif ft is ax25.FrameType.DISC:
             self._dispatch_disc(frame, src, dst)
+        elif ft is ax25.FrameType.FRMR:
+            self._dispatch_frmr(frame, src, dst)
         else:
             logger.debug(f"Received AX.25 {ft.name} frame, not forwarded")
 
@@ -1131,6 +1118,31 @@ class Bridge:
                     logger.error(f"Error sending 'd' for DISC: {e}")
             self.remove_connection(0, dst, src)
 
+    def _dispatch_frmr(self, frame, src, dst):
+        """Handle incoming FRMR: reset the connection (AX.25 2.4.5).
+
+        FRMR indicates a protocol error that cannot be recovered by
+        retransmission.  Re-establish the link by sending SABM.
+        """
+        logger.warning(f"FRMR from {src} -> {dst}, resetting connection")
+        conn = self.get_connection(0, dst, src)
+        if conn and conn.state == 'CONNECTED':
+            conn.state = 'CONNECTING'
+            conn.send_seqno = 0
+            conn.recv_seqno = 0
+            conn.unacked = 0
+            conn.last_acked = 0
+            conn.retransmit_buf.clear()
+            conn.outbound_queue.clear()
+            self._cancel_t1(conn)
+            self._cancel_t2(conn)
+            try:
+                frame = _cmd_frame(src, dst,
+                                   control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+                self._send_ax25(frame)
+            except Exception as e:
+                logger.error(f"Failed to send SABM after FRMR: {e}")
+
     def _send_rr_guarded(self, conn, src, dst, tag):
         """Send RR F=1 with conn.recv_seqno, suppressing duplicates within 1s.
 
@@ -1185,8 +1197,20 @@ class Bridge:
         if conn and conn.state == 'CONNECTED':
             self._ack_frames(conn, r_seq)
 
+            # RNR: remote is busy, stop sending I-frames (AX.25 6.4.9).
+            if ft is ax25.FrameType.RNR:
+                if not conn.remote_busy:
+                    logger.info(f"Remote {src} busy (RNR)")
+                conn.remote_busy = True
+            elif ft is ax25.FrameType.RR:
+                if conn.remote_busy:
+                    logger.info(f"Remote {src} no longer busy (RR)")
+                    conn.remote_busy = False
+                    self._drain_outbound(conn)
+
             # REJ: retransmit from the requested sequence number.
             if ft is ax25.FrameType.REJ:
+                conn.remote_busy = False
                 self._retransmit_from(conn, r_seq)
 
         # If the remote set P=1 (poll), we must respond with RR F=1.
