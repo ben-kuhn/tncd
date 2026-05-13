@@ -304,7 +304,8 @@ When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
 
 ### Software TNCs
 
-- [x] Dire Wolf — KISS over TCP and PTY serial, OTA-verified at 1200 baud
+- [x] Dire Wolf — KISS over TCP and PTY serial, OTA-verified at 1200 baud.  Direwolf has a native AGWPE interface so this test is only for validation and debugging puposes.  Please use the native interface in production.
+- [ ] QTSoundModem - Supports KISS over TCP (Also supports AGWPE so use that directly instead :-) )
 
 ### Hardware TNCs
 These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
