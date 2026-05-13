@@ -298,7 +298,7 @@ When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
 ### Clients
 
 - [x] PAT (Winlink) — connected mode and UI frames, OTA-verified
-- [x] Paracon
+- [x] Paracon - connected mode verified OTA
 - [ ] QTTermTCP
 - [ ] Xastir
 
@@ -307,13 +307,14 @@ When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
 - [x] Dire Wolf — KISS over TCP and PTY serial, OTA-verified at 1200 baud
 
 ### Hardware TNCs
+These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
 
-- [x] BTECH UV-Pro (Bluetooth)
-- [ ] Mobilinkd TNC4 (Bluetooth)
-- [ ] Mobilinkd TNC3 (Bluetooth)
-- [ ] Mobilinkd TNC2 (Bluetooth)
+- [x] BTECH UV-Pro/Radioddity GA-5WB/Vero NR N76 (Bluetooth)
+- [x] Mobilinkd TNC4 (Testing done over USB.  Bluetooth still needs testing.)
+- [x] Mobilinkd TNC3 (Testing done over USB.  Bluetooth still needs testing.)
+- [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [ ] Kenwood TH-D7
-- [x] Kenwood TS-2000 — via Dire Wolf PTY, OTA-verified at 1200 baud
+- [ ] Kenwood TS-2000
 - [ ] AEA PK-232
 - [ ] AEA DSP-2232
 
