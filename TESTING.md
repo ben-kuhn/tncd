@@ -46,11 +46,12 @@ Upload a 10KB message to CMS, wait, then download pending messages. Validates th
 - **Result:** Full CMS round-trip completed. 5 outbound messages sent, 16 inbound messages received (including messages up to 65KB). Multiple B2F proposal rounds handled cleanly. A few RR poll retransmissions (normal for 1200 baud OTA), all recovered successfully.
 - **Note:** KISS mode must be entered manually via serial console before starting tncd. Hardware flow control must be disabled (triggers PTT on this rig). The `init_string` feature for programmatic KISS mode entry requires further work — HUPCL disable via termios prevents DTR reset on port close, but the TS-2000 still does not reliably enter KISS mode via programmatic serial writes.
 
-### Kenwood TH-D7A (Built-in TNC, Serial KISS) — UNTESTED
+### Kenwood TH-D7A (Built-in TNC, Serial KISS) — PASS
 
-- **Connection:** Serial KISS via `/dev/ttyUSB0` (CP2102N USB-UART)
-- **Known concern:** Buffering issues reported with larger transfers in other setups.
-- **Status:** Available for testing. The TH-D7A has a built-in TNC that can be put in KISS mode.
+- **Connection:** Serial KISS via `/dev/ttyUSB1` (CP2102N USB-UART), 9600 baud
+- **Radio:** Kenwood TH-D7A, built-in TNC in KISS mode (programmatic init via `kiss on` + `restart`)
+- **Result:** Full CMS round-trip completed. 2 outbound messages sent, 1 inbound message received. Clean B2F exchange and disconnect.
+- **Note:** Squelch must be set appropriately — the TH-D7A uses squelch for DCD. With squelch off (as used for external TNC tests), the built-in TNC cannot detect carrier and fails to transmit. The `init_string` probe and KISS mode entry work identically to the TS-2000 (`cmd:` response detected).
 
 ## Fixes Applied During Testing
 

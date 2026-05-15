@@ -474,8 +474,9 @@ class KISSClient:
             """
             ser.reset_input_buffer()
             ser.write(b'\r')
-            time.sleep(0.5)
+            time.sleep(1.0)
             resp = ser.read(ser.in_waiting or 0)
+            logger.debug(f"TNC probe raw response: {resp!r}")
             if resp:
                 # Strip KISS FENDs / NULs — a TNC in KISS mode may echo
                 # framing bytes but not printable ASCII.
@@ -492,13 +493,26 @@ class KISSClient:
                 # then send init commands through the SAME serial port so
                 # there is no close/reopen cycle that could reset the TNC.
                 self.connection.start_no_config()
-                ser = self.connection.protocol.transport.serial
-                if _tnc_in_command_mode(ser):
-                    for line in init_str.split('\\n'):
-                        cmd = line.replace('\\r', '\r').replace('\\n', '\n').encode()
-                        logger.info(f"TNC init: {line!r}")
-                        ser.write(cmd)
-                        time.sleep(init_delay)
+                transport = self.connection.protocol.transport
+                ser = transport.serial
+                # Pause asyncio reader so it doesn't steal probe bytes
+                transport.pause_reading()
+                try:
+                    if _tnc_in_command_mode(ser):
+                        for line in init_str.split('\\n'):
+                            cmd = line.replace('\\r', '\r').replace('\\n', '\n').encode()
+                            logger.info(f"TNC init: {line!r}")
+                            ser.write(cmd)
+                            time.sleep(init_delay)
+                        # Verify the TNC actually entered KISS mode
+                        if _tnc_in_command_mode(ser):
+                            raise RuntimeError(
+                                "TNC still in command mode after init_string — "
+                                "check that the init commands are correct for this TNC"
+                            )
+                        logger.info("TNC confirmed in KISS mode after init")
+                finally:
+                    transport.resume_reading()
                 self.connection._write_defaults(**kiss_params)
             else:
                 self.connection.start(**kiss_params)
