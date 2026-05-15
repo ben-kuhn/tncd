@@ -92,11 +92,14 @@ Direct serial connection to a TNC via USB or RS-232.
 
 Connects to a KISS-over-TCP server (e.g. Dire Wolf, QtSoundModem).
 
-### Bluetooth TNC (RFCOMM)
+### Bluetooth TNC
 
-Use `tncd-rfcomm` to manage the Bluetooth connection. It disconnects any active
-audio profile before connecting so the serial channel is available, and releases
-the rfcomm binding on exit. Point the bridge at the resulting `/dev/rfcomm0` device.
+On Linux, tncd connects to Bluetooth TNCs natively using the BlueZ D-Bus
+Profile API. Set `type = bluetooth` in the config — no external tools needed.
+
+On macOS and Windows, the OS exposes paired Bluetooth SPP devices as serial
+ports (`/dev/tty.*` on macOS, `COMx` on Windows). Use `type = serial` with
+the device path.
 
 ## Installation
 
@@ -175,22 +178,45 @@ ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
 # full_duplex = 0
 ```
 
-### Bluetooth TNC
+### Bluetooth TNC (Linux)
+
+First, pair and trust your TNC using `bluetoothctl`:
+
+```bash
+bluetoothctl
+scan on                        # find your TNC
+pair AA:BB:CC:DD:EE:FF         # pair with the TNC
+trust AA:BB:CC:DD:EE:FF        # trust for auto-reconnect
+exit
+```
+
+Then configure tncd:
+
+```ini
+[client]
+type = bluetooth
+bdaddr = AA:BB:CC:DD:EE:FF
+ota_baudrate = 1200
+# channel = 6             # optional, auto-detected via SDP
+# reconnect = true        # auto-reconnect on drop (default)
+# reconnect_delay = 5     # initial delay seconds (default)
+# reconnect_max_delay = 60  # max delay seconds (default)
+```
+
+Requires `dbus-python` and `PyGObject` (included in packaged installs).
+
+### Bluetooth TNC (macOS / Windows)
+
+After pairing in system Bluetooth settings, the OS creates a virtual serial
+port. Use `type = serial` with the device path:
 
 ```ini
 [client]
 type = serial
-device = /dev/rfcomm0
+device = /dev/tty.BluetoothTNC    # macOS
+# device = COM5                    # Windows
 serial_baudrate = 9600
 ota_baudrate = 1200
-
-[bluetooth]
-enabled = true
-bind_dev = /dev/rfcomm0
-bdaddr = AA:BB:CC:DD:EE:FF
-channel = 1
-mode = watch        # auto-reconnect on drop
-retry_delay = 5
 ```
 
 ## Usage
@@ -207,8 +233,7 @@ tncd -c /etc/tncd.ini -v    # frame types
 tncd -c /etc/tncd.ini -vv   # + data content
 tncd -c /etc/tncd.ini -vvv  # + AGWPE internals
 
-# Bluetooth TNC — run rfcomm manager first (in a separate terminal or as a service)
-sudo tncd-rfcomm -c /etc/tncd.ini   # stays running, auto-reconnects
+# Bluetooth TNC (Linux) — automatic, no separate tool needed
 tncd -c /etc/tncd.ini
 ```
 
@@ -276,11 +301,9 @@ $EDITOR /etc/tncd.ini
 sudo systemctl enable --now tncd
 ```
 
-For Bluetooth, also enable the rfcomm manager:
-
-```bash
-sudo systemctl enable --now tncd-rfcomm
-```
+For Bluetooth TNCs, ensure the BlueZ service is running and the TNC is
+paired/trusted. tncd handles the Bluetooth connection directly — no
+separate service needed.
 
 ### Manual / source install
 

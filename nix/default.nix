@@ -1,5 +1,6 @@
 { lib
 , python3
+, bluetoothSupport ? false
 }:
 
 python3.pkgs.buildPythonApplication rec {
@@ -16,7 +17,10 @@ python3.pkgs.buildPythonApplication rec {
     pyserial
     # kiss3 and pyham-ax25 must be provided as custom derivations
     # if not yet available in the nixpkgs channel being used.
-  ];
+  ] ++ lib.optionals bluetoothSupport (with python3.pkgs; [
+    dbus-python
+    pygobject3
+  ]);
 
   installPhase = ''
     install -Dm755 tncd.py      $out/bin/tncd

@@ -2,6 +2,10 @@
 """
 AGWPE-to-KISS Bridge: rfcomm connection manager
 
+DEPRECATED: This tool is deprecated and will be removed in a future release.
+Use type = bluetooth in tncd.ini instead -- tncd now connects to Bluetooth
+TNCs directly via the BlueZ D-Bus Profile API without external tools.
+
 Disconnects any active Bluetooth audio profile, then connects via rfcomm.
 With -m watch, automatically reconnects if the connection drops.
 
