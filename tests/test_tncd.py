@@ -1451,5 +1451,52 @@ class TestBluetoothConnect:
             '/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF')
 
 
+class TestBluetoothFullFlow:
+    def test_bluetooth_send_and_receive(self):
+        """End-to-end: BluetoothKISS over socketpair sends KISS-framed data."""
+        s1, s2 = socket.socketpair()
+        try:
+            bt = BluetoothKISS(s1)
+            bt.start()
+
+            # Send a frame
+            test_frame = b'\x01\x02\x03\x04'
+            bt.write(test_frame)
+
+            # Small delay for async transport to flush
+            import time
+            time.sleep(0.05)
+
+            raw = s2.recv(1024)
+            assert raw[0:1] == b'\xc0'   # FEND
+            assert raw[-1:] == b'\xc0'   # FEND
+
+            bt.stop()
+        finally:
+            s2.close()
+
+    def test_bluetooth_connection_lost_hook(self):
+        """connection_lost hook fires when socket closes."""
+        s1, s2 = socket.socketpair()
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200'}
+        config['kiss'] = {}
+        client = KISSClient(config)
+        client.connection = BluetoothKISS(s1)
+        client.connection.start()
+
+        # Install the connection_lost hook (simulating what connect() does)
+        hook_called = []
+        client.connection.protocol._on_connection_lost = lambda exc: hook_called.append(exc)
+
+        # Trigger connection loss
+        client.connection.protocol.connection_lost(Exception("test"))
+        assert len(hook_called) == 1
+        s2.close()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

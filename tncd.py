@@ -554,7 +554,7 @@ class KISSClient:
                 self.connection._write_defaults(**kiss_params)
             else:
                 self.connection.start(**kiss_params)
-            if conn_type != 'tcp' and (parity != 'N' or stopbits != 1 or rtscts):
+            if conn_type == 'serial' and (parity != 'N' or stopbits != 1 or rtscts):
                 logger.info(f"Reconfiguring serial port: parity={parity}, stopbits={stopbits}, rtscts={rtscts}")
                 ser = self.connection.protocol.transport.serial
                 ser.parity   = parity
@@ -565,6 +565,13 @@ class KISSClient:
             await loop.run_in_executor(executor, blocking_start)
 
         logger.info("KISS connection established")
+
+        # Hook connection_lost for bluetooth reconnection
+        if conn_type == 'bluetooth':
+            def _on_connection_lost(exc):
+                if hasattr(self, '_on_bt_connection_lost'):
+                    self._on_bt_connection_lost(exc)
+            self.connection.protocol._on_connection_lost = _on_connection_lost
 
     async def _bluetooth_connect(self, dbus_mod, GLib, bdaddr, channel, loop):
         """Connect to a Bluetooth SPP device via D-Bus Profile API.
@@ -675,6 +682,17 @@ def _make_spp_profile(dbus_mod, fd_future, loop):
     return SPPProfile
 
 
+class _BluetoothKISSProtocol(kiss.kiss.KISSProtocol):
+    """KISSProtocol subclass that supports a connection_lost callback."""
+
+    _on_connection_lost = None
+
+    def connection_lost(self, exc):
+        super().connection_lost(exc)
+        if self._on_connection_lost is not None:
+            self._on_connection_lost(exc)
+
+
 class BluetoothKISS(kiss.classes.KISS):
     """KISS connection over a pre-connected socket (e.g. Bluetooth SPP fd)."""
 
@@ -685,7 +703,7 @@ class BluetoothKISS(kiss.classes.KISS):
     def start(self, **kwargs):
         _, self.protocol = self.loop.run_until_complete(
             self.loop.create_connection(
-                functools.partial(kiss.kiss.KISSProtocol, decoder=self.decoder),
+                functools.partial(_BluetoothKISSProtocol, decoder=self.decoder),
                 sock=self._sock,
             )
         )
