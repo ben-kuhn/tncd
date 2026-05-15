@@ -8,7 +8,7 @@ url="https://github.com/ben-kuhn/tncd"
 license=('GPL-3.0-only')
 depends=('python' 'python-pyserial' 'python-kiss3' 'python-pyham-ax25' 'bluez-utils')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('f263cc7befbb094cb16b18d611f79f741d4a9028a347a1f96d44768623994077')
 
 package() {
     cd "$pkgname-$pkgver"
