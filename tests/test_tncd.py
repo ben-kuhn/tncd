@@ -1498,5 +1498,90 @@ class TestBluetoothFullFlow:
         s2.close()
 
 
+class TestBluetoothReconnect:
+    async def test_connection_lost_triggers_reconnect(self):
+        """When bluetooth socket closes and reconnect=true, reconnect loop starts."""
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200', 'reconnect': 'true',
+                            'reconnect_delay': '0.1', 'reconnect_max_delay': '0.2'}
+        config['kiss'] = {}
+        client = KISSClient(config)
+        client._bt_reconnect = True
+        client._bt_reconnect_delay = 0.1
+        client._bt_reconnect_max_delay = 0.2
+
+        reconnect_called = asyncio.Event()
+
+        async def mock_reconnect():
+            reconnect_called.set()
+
+        client._bt_reconnect_loop = mock_reconnect
+        client._on_bt_connection_lost(Exception("connection lost"))
+
+        await asyncio.wait_for(reconnect_called.wait(), timeout=1.0)
+        assert reconnect_called.is_set()
+
+    async def test_reconnect_disabled_does_not_reconnect(self):
+        """When reconnect=false, connection loss does not trigger reconnect."""
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200', 'reconnect': 'false'}
+        config['kiss'] = {}
+        client = KISSClient(config)
+        client._bt_reconnect = False
+
+        reconnect_called = False
+
+        async def mock_reconnect():
+            nonlocal reconnect_called
+            reconnect_called = True
+
+        client._bt_reconnect_loop = mock_reconnect
+        client._on_bt_connection_lost(Exception("connection lost"))
+        await asyncio.sleep(0.2)
+        assert not reconnect_called
+
+    async def test_reconnect_loop_exponential_backoff(self):
+        """Reconnect delay doubles on each failure up to max."""
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200'}
+        config['kiss'] = {}
+        client = KISSClient(config)
+        client._bt_reconnect = True
+        client._bt_reconnect_delay = 0.05
+        client._bt_reconnect_max_delay = 0.15
+        client._bt_dbus = MagicMock()
+        client._bt_glib = MagicMock()
+        client._bt_bdaddr = 'AA:BB:CC:DD:EE:FF'
+        client._bt_channel = None
+
+        attempts = []
+
+        async def mock_bt_connect(dbus_mod, GLib, bdaddr, channel, loop):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise ConnectionError("not ready")
+            # On 3rd attempt, return a real socket
+            s1, s2 = socket.socketpair()
+            client._test_s2 = s2  # keep reference to close later
+            return s1
+
+        client._bluetooth_connect = mock_bt_connect
+        client.start_receive = MagicMock()  # don't actually start RX thread
+
+        await asyncio.wait_for(client._bt_reconnect_loop(), timeout=2.0)
+        assert len(attempts) == 3
+        client.connection.stop()
+        client._test_s2.close()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

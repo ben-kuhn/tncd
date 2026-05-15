@@ -573,6 +573,53 @@ class KISSClient:
                     self._on_bt_connection_lost(exc)
             self.connection.protocol._on_connection_lost = _on_connection_lost
 
+    def _on_bt_connection_lost(self, exc):
+        """Called when the Bluetooth connection drops."""
+        logger.warning(f"Bluetooth connection lost: {exc}")
+        if getattr(self, '_bt_reconnect', False):
+            logger.info("Scheduling Bluetooth reconnection...")
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+            asyncio.ensure_future(self._bt_reconnect_loop(), loop=loop)
+        else:
+            logger.info("Bluetooth reconnect disabled, not reconnecting")
+
+    async def _bt_reconnect_loop(self):
+        """Reconnect to Bluetooth TNC with exponential backoff."""
+        delay = self._bt_reconnect_delay
+        max_delay = self._bt_reconnect_max_delay
+        loop = asyncio.get_running_loop()
+        kiss_params = self._get_kiss_params()
+
+        while True:
+            logger.info(f"Bluetooth reconnect in {delay:.1f}s...")
+            await asyncio.sleep(delay)
+            try:
+                sock = await self._bluetooth_connect(
+                    self._bt_dbus, self._bt_glib,
+                    self._bt_bdaddr, self._bt_channel, loop)
+                conn = BluetoothKISS(sock)
+                # start() uses run_until_complete, so run in executor
+                with ThreadPoolExecutor() as executor:
+                    await loop.run_in_executor(
+                        executor, functools.partial(conn.start, **kiss_params))
+                self.connection = conn
+
+                # Re-hook connection_lost
+                def _on_connection_lost(exc):
+                    if hasattr(self, '_on_bt_connection_lost'):
+                        self._on_bt_connection_lost(exc)
+                self.connection.protocol._on_connection_lost = _on_connection_lost
+
+                self.start_receive(loop)
+                logger.info("Bluetooth reconnected successfully")
+                return
+            except Exception as e:
+                logger.warning(f"Bluetooth reconnect failed: {e}")
+                delay = min(delay * 2, max_delay)
+
     async def _bluetooth_connect(self, dbus_mod, GLib, bdaddr, channel, loop):
         """Connect to a Bluetooth SPP device via D-Bus Profile API.
 
