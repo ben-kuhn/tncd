@@ -13,7 +13,9 @@ import argparse
 import asyncio
 import collections
 import configparser
+import functools
 import logging
+import socket as socket_mod
 import struct
 import sys
 import threading
@@ -560,6 +562,28 @@ class KISSClient:
         if self.connection:
             self.connection.stop()
             self.connection = None
+
+
+class BluetoothKISS(kiss.classes.KISS):
+    """KISS connection over a pre-connected socket (e.g. Bluetooth SPP fd)."""
+
+    def __init__(self, sock, strip_df_start=False):
+        super().__init__(strip_df_start)
+        self._sock = sock
+
+    def start(self, **kwargs):
+        _, self.protocol = self.loop.run_until_complete(
+            self.loop.create_connection(
+                functools.partial(kiss.kiss.KISSProtocol, decoder=self.decoder),
+                sock=self._sock,
+            )
+        )
+        self.loop.run_until_complete(self.protocol.connection_future)
+        self._write_defaults(**kwargs)
+
+    def stop(self):
+        if self.protocol and self.protocol.transport:
+            self.protocol.transport.close()
 
 
 class Bridge:

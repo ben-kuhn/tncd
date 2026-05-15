@@ -4,11 +4,12 @@ import argparse
 import ax25
 import configparser
 import re
+import socket
 import struct
 from unittest.mock import Mock, MagicMock, patch
 
 from tncd import (
-    AGWPEServerProtocol, Bridge, Connection, KISSClient,
+    AGWPEServerProtocol, BluetoothKISS, Bridge, Connection, KISSClient,
     AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, DEFAULT_MAX_WINDOW,
     DEFAULT_N2_RETRY, load_config,
 )
@@ -1315,6 +1316,49 @@ class TestFRMRHandling:
         for call in bridge.kiss_client.send.call_args_list:
             frame = ax25.Frame.unpack(call[0][0])
             assert frame.control.frame_type is not ax25.FrameType.SABM
+
+
+class TestBluetoothKISS:
+    """Test BluetoothKISS over a socketpair (no real Bluetooth needed)."""
+
+    def test_start_creates_protocol(self):
+        s1, s2 = socket.socketpair()
+        try:
+            bt = BluetoothKISS(s1)
+            bt.start()
+            assert bt.protocol is not None
+            assert bt.protocol.transport is not None
+            bt.stop()
+        finally:
+            s2.close()
+
+    def test_write_sends_kiss_framed_data(self):
+        s1, s2 = socket.socketpair()
+        try:
+            bt = BluetoothKISS(s1)
+            bt.start()
+            test_data = b'\x01\x02\x03'
+            bt.write(test_data)
+            # Give the event loop a chance to flush the write
+            import time
+            time.sleep(0.05)
+            received = s2.recv(1024)
+            assert received[0:1] == b'\xc0'   # FEND
+            assert received[-1:] == b'\xc0'    # FEND
+            bt.stop()
+        finally:
+            s2.close()
+
+    def test_stop_closes_transport(self):
+        s1, s2 = socket.socketpair()
+        try:
+            bt = BluetoothKISS(s1)
+            bt.start()
+            transport = bt.protocol.transport
+            bt.stop()
+            assert transport.is_closing()
+        finally:
+            s2.close()
 
 
 if __name__ == '__main__':
