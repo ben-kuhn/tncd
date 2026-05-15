@@ -39,6 +39,13 @@ Upload a 10KB message to CMS, wait, then download pending messages. Validates th
   2. **TX loss:** Gateway never acknowledges our frames (N(R) stays at 0). Our RR/I-frames are transmitted but the gateway's Direwolf cannot decode them.
 - **Analysis:** The serial spy rules out a kiss3 library issue — frames are lost before reaching the host. Increasing the gateway's TXDELAY from 350ms to 500ms did not help. Likely a hardware issue with the HD1's accessory jack audio path (RX settling time or TX deviation).
 
+### Kenwood TS-2000 (Built-in TNC, Serial KISS) — PASS
+
+- **Connection:** Serial KISS via `/dev/ttyUSB0` (CP2102N USB-UART), 57600 baud
+- **Radio:** Kenwood TS-2000, built-in TNC in KISS mode (`kiss on` + `restart` via serial console)
+- **Result:** Full CMS round-trip completed. 5 outbound messages sent, 16 inbound messages received (including messages up to 65KB). Multiple B2F proposal rounds handled cleanly. A few RR poll retransmissions (normal for 1200 baud OTA), all recovered successfully.
+- **Note:** KISS mode must be entered manually via serial console before starting tncd. Hardware flow control must be disabled (triggers PTT on this rig). The `init_string` feature for programmatic KISS mode entry requires further work — HUPCL disable via termios prevents DTR reset on port close, but the TS-2000 still does not reliably enter KISS mode via programmatic serial writes.
+
 ### Kenwood TH-D7A (Built-in TNC, Serial KISS) — UNTESTED
 
 - **Connection:** Serial KISS via `/dev/ttyUSB0` (CP2102N USB-UART)

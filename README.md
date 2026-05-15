@@ -311,11 +311,11 @@ When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
 These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
 
 - [x] BTECH UV-Pro/Radioddity GA-5WB/Vero NR N76 (Bluetooth)
-- [x] Mobilinkd TNC4 (Testing done over USB.  Bluetooth still needs testing.)
-- [x] Mobilinkd TNC3 (Testing done over USB.  Bluetooth still needs testing.)
+- [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A. Bluetooth still needs testing.
+- [x] Mobilinkd TNC3 (USB). Bluetooth still needs testing.
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
-- [ ] Kenwood TH-D7
-- [ ] Kenwood TS-2000
+- [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
+- [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
 - [ ] AEA PK-232
 - [ ] AEA DSP-2232
 

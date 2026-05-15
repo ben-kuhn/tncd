@@ -447,6 +447,9 @@ class KISSClient:
 
         loop = asyncio.get_running_loop()
 
+        init_str = self.config.get('client', 'init_string', fallback=None)
+        init_delay = self.config.getfloat('client', 'init_delay', fallback=1.0)
+
         if conn_type == 'tcp':
             host = self.config.get('client', 'host', fallback='localhost')
             port = self.config.getint('client', 'port', fallback=8001)
@@ -460,21 +463,26 @@ class KISSClient:
             stopbits = self.config.getfloat('client', 'stopbits', fallback=1)
             rtscts   = self.config.getboolean('client', 'rtscts', fallback=False)
             logger.info(f"Connecting to KISS serial device at {device}, {baudrate} baud")
-
-            init_str = self.config.get('client', 'init_string', fallback=None)
-            if init_str:
-                import serial as _serial
-                init_delay = self.config.getfloat('client', 'init_delay', fallback=1.0)
-                init_bytes = init_str.replace('\\r', '\r').replace('\\n', '\n').encode()
-                logger.info(f"Sending TNC init string: {init_str!r}")
-                with _serial.Serial(device, baudrate, parity=parity, stopbits=stopbits,
-                                    rtscts=rtscts, timeout=1) as ser:
-                    ser.write(init_bytes)
-                time.sleep(init_delay)
-
             self.connection = kiss.SerialKISS(port=device, speed=baudrate)
 
         def blocking_start():
+            # Send init string before kiss3 start() so TNC enters KISS mode
+            # before receiving KISS parameter frames.  Disable HUPCL so
+            # closing the port doesn't drop DTR (which resets the TNC).
+            if init_str and conn_type != 'tcp':
+                import serial as _serial
+                import termios
+                ser = _serial.Serial(device, baudrate, timeout=1)
+                # Disable hang-up-on-close so DTR stays asserted
+                attrs = termios.tcgetattr(ser.fd)
+                attrs[2] &= ~termios.HUPCL  # cflag
+                termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
+                for line in init_str.split('\\n'):
+                    cmd = line.replace('\\r', '\r').replace('\\n', '\n').encode()
+                    logger.info(f"TNC init: {line!r}")
+                    ser.write(cmd)
+                    time.sleep(init_delay)
+                ser.close()
             self.connection.start(**kiss_params)
             if conn_type != 'tcp' and (parity != 'N' or stopbits != 1 or rtscts):
                 logger.info(f"Reconfiguring serial port: parity={parity}, stopbits={stopbits}, rtscts={rtscts}")
