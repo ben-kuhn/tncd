@@ -465,25 +465,43 @@ class KISSClient:
             logger.info(f"Connecting to KISS serial device at {device}, {baudrate} baud")
             self.connection = kiss.SerialKISS(port=device, speed=baudrate)
 
+        def _tnc_in_command_mode(ser):
+            """Probe whether the TNC is in command mode by sending CR.
+
+            Most TNCs respond with a text prompt or error (e.g. 'Eh?', '?',
+            'cmd:') when they receive a bare CR in command mode.  A TNC
+            already in KISS mode will not send any printable text back.
+            """
+            ser.reset_input_buffer()
+            ser.write(b'\r')
+            time.sleep(0.5)
+            resp = ser.read(ser.in_waiting or 0)
+            if resp:
+                # Strip KISS FENDs / NULs — a TNC in KISS mode may echo
+                # framing bytes but not printable ASCII.
+                text = resp.replace(b'\xc0', b'').replace(b'\x00', b'').strip()
+                if text and all(0x20 <= b < 0x7f or b in (0x0a, 0x0d) for b in text):
+                    logger.info(f"TNC probe: command-mode response {text!r}")
+                    return True
+            logger.info("TNC probe: no command-mode response, assuming KISS mode")
+            return False
+
         def blocking_start():
-            # Send init string before kiss3 start() so TNC enters KISS mode
-            # before receiving KISS parameter frames.  Disable HUPCL so
-            # closing the port doesn't drop DTR (which resets the TNC).
             if init_str and conn_type != 'tcp':
-                import serial as _serial
-                import termios
-                ser = _serial.Serial(device, baudrate, timeout=1)
-                # Disable hang-up-on-close so DTR stays asserted
-                attrs = termios.tcgetattr(ser.fd)
-                attrs[2] &= ~termios.HUPCL  # cflag
-                termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
-                for line in init_str.split('\\n'):
-                    cmd = line.replace('\\r', '\r').replace('\\n', '\n').encode()
-                    logger.info(f"TNC init: {line!r}")
-                    ser.write(cmd)
-                    time.sleep(init_delay)
-                ser.close()
-            self.connection.start(**kiss_params)
+                # Open serial via kiss3 without sending KISS config yet,
+                # then send init commands through the SAME serial port so
+                # there is no close/reopen cycle that could reset the TNC.
+                self.connection.start_no_config()
+                ser = self.connection.protocol.transport.serial
+                if _tnc_in_command_mode(ser):
+                    for line in init_str.split('\\n'):
+                        cmd = line.replace('\\r', '\r').replace('\\n', '\n').encode()
+                        logger.info(f"TNC init: {line!r}")
+                        ser.write(cmd)
+                        time.sleep(init_delay)
+                self.connection._write_defaults(**kiss_params)
+            else:
+                self.connection.start(**kiss_params)
             if conn_type != 'tcp' and (parity != 'N' or stopbits != 1 or rtscts):
                 logger.info(f"Reconfiguring serial port: parity={parity}, stopbits={stopbits}, rtscts={rtscts}")
                 ser = self.connection.protocol.transport.serial
