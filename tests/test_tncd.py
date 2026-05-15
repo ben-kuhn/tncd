@@ -1361,5 +1361,53 @@ class TestBluetoothKISS:
             s2.close()
 
 
+class TestBluetoothConfig:
+    """Test Bluetooth config parsing in KISSClient.connect()."""
+
+    async def test_bluetooth_missing_bdaddr_raises(self):
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'ota_baudrate': '1200'}
+        config['kiss'] = {}
+        client = KISSClient(config)
+        with pytest.raises(Exception):
+            await client.connect()
+
+    async def test_bluetooth_missing_dbus_raises_runtime_error(self):
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200'}
+        config['kiss'] = {}
+        client = KISSClient(config)
+        with patch.dict('sys.modules', {'dbus': None, 'dbus.service': None,
+                                         'dbus.mainloop': None,
+                                         'dbus.mainloop.glib': None}):
+            with pytest.raises(RuntimeError, match='Bluetooth support requires'):
+                await client.connect()
+
+    async def test_bluetooth_channel_optional_defaults_none(self):
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200'}
+        config['kiss'] = {}
+        assert config.get('client', 'channel', fallback=None) is None
+
+    async def test_bluetooth_reconnect_defaults(self):
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200'}
+        config['kiss'] = {}
+        assert config.getboolean('client', 'reconnect', fallback=True) is True
+        assert config.getfloat('client', 'reconnect_delay', fallback=5.0) == 5.0
+        assert config.getfloat('client', 'reconnect_max_delay', fallback=60.0) == 60.0
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -457,6 +457,41 @@ class KISSClient:
             port = self.config.getint('client', 'port', fallback=8001)
             logger.info(f"Connecting to KISS TCP server at {host}:{port}")
             self.connection = kiss.TCPKISS(host=host, port=port)
+        elif conn_type == 'bluetooth':
+            try:
+                import dbus
+                import dbus.service
+                import dbus.mainloop.glib
+                from gi.repository import GLib
+            except ImportError:
+                raise RuntimeError(
+                    "Bluetooth support requires dbus-python and PyGObject: "
+                    "pip install dbus-python PyGObject"
+                )
+
+            bdaddr = self.config.get('client', 'bdaddr', fallback=None)
+            if not bdaddr:
+                raise ValueError("Bluetooth connection requires 'bdaddr' in [client] config")
+
+            channel = self.config.get('client', 'channel', fallback=None)
+            reconnect = self.config.getboolean('client', 'reconnect', fallback=True)
+            reconnect_delay = self.config.getfloat('client', 'reconnect_delay', fallback=5.0)
+            reconnect_max_delay = self.config.getfloat('client', 'reconnect_max_delay', fallback=60.0)
+
+            logger.info(f"Connecting to Bluetooth TNC at {bdaddr}"
+                        f"{f' channel {channel}' if channel else ' (SDP auto-detect)'}")
+
+            sock = await self._bluetooth_connect(
+                dbus, GLib, bdaddr, channel, loop)
+            self.connection = BluetoothKISS(sock)
+
+            self._bt_dbus = dbus
+            self._bt_glib = GLib
+            self._bt_bdaddr = bdaddr
+            self._bt_channel = channel
+            self._bt_reconnect = reconnect
+            self._bt_reconnect_delay = reconnect_delay
+            self._bt_reconnect_max_delay = reconnect_max_delay
         else:
             device   = self.config.get('client', 'device', fallback='/dev/ttyUSB0')
             baudrate = self.config.getint('client', 'serial_baudrate',
@@ -529,6 +564,10 @@ class KISSClient:
             await loop.run_in_executor(executor, blocking_start)
 
         logger.info("KISS connection established")
+
+    async def _bluetooth_connect(self, dbus_mod, GLib, bdaddr, channel, loop):
+        """Connect to a Bluetooth SPP device via D-Bus. Returns a connected socket."""
+        raise NotImplementedError("Bluetooth D-Bus connection not yet implemented")
 
     def start_receive(self, loop):
         """Start a background thread that reads frames from the KISS TNC.
