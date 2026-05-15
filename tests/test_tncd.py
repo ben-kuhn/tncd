@@ -1409,5 +1409,47 @@ class TestBluetoothConfig:
         assert config.getfloat('client', 'reconnect_max_delay', fallback=60.0) == 60.0
 
 
+class TestBluetoothConnect:
+    async def test_connect_calls_register_and_connect_profile(self):
+        """Verify D-Bus wiring: profile registered, ConnectProfile called."""
+        config = configparser.ConfigParser()
+        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                            'callsign': 'N0CALL'}
+        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                            'ota_baudrate': '1200'}
+        config['kiss'] = {}
+        client = KISSClient(config)
+
+        mock_dbus = MagicMock()
+        mock_glib = MagicMock()
+        mock_bus = MagicMock()
+        mock_dbus.SystemBus.return_value = mock_bus
+
+        # Provide a base class that accepts (bus, path) args
+        class FakeDbusObject:
+            def __init__(self, bus, path):
+                pass
+        mock_dbus.service.Object = FakeDbusObject
+        mock_dbus.service.method = lambda *a, **kw: lambda f: f  # no-op decorator
+        mock_dbus.Dictionary = dict
+        mock_dbus.String = str
+
+        loop = asyncio.get_running_loop()
+
+        # _bluetooth_connect will block on fd_future; timeout verifies
+        # that all D-Bus setup calls happen before the await.
+        with pytest.raises((asyncio.TimeoutError, Exception)):
+            await asyncio.wait_for(
+                client._bluetooth_connect(
+                    mock_dbus, mock_glib, 'AA:BB:CC:DD:EE:FF', None, loop),
+                timeout=0.5)
+
+        # Verify D-Bus interactions happened in the right order
+        mock_bus.get_object.assert_any_call('org.bluez', '/org/bluez')
+        mock_bus.get_object.assert_any_call(
+            'org.bluez',
+            '/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF')
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

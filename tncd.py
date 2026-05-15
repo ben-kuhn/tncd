@@ -15,6 +15,7 @@ import collections
 import configparser
 import functools
 import logging
+import os
 import socket as socket_mod
 import struct
 import sys
@@ -566,8 +567,49 @@ class KISSClient:
         logger.info("KISS connection established")
 
     async def _bluetooth_connect(self, dbus_mod, GLib, bdaddr, channel, loop):
-        """Connect to a Bluetooth SPP device via D-Bus. Returns a connected socket."""
-        raise NotImplementedError("Bluetooth D-Bus connection not yet implemented")
+        """Connect to a Bluetooth SPP device via D-Bus Profile API.
+
+        Registers an SPP profile, calls ConnectProfile on the target device,
+        and waits for BlueZ to deliver a connected fd via NewConnection.
+        Returns a socket wrapping the fd.
+        """
+        dbus_mod.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        bus = dbus_mod.SystemBus()
+
+        fd_future = loop.create_future()
+        ProfileClass = _make_spp_profile(dbus_mod, fd_future, loop)
+        profile_path = '/org/tncd/spp'
+        profile = ProfileClass(bus, profile_path)
+
+        manager = dbus_mod.Interface(
+            bus.get_object('org.bluez', '/org/bluez'),
+            'org.bluez.ProfileManager1')
+        opts = dbus_mod.Dictionary({
+            'Role': dbus_mod.String('client'),
+        }, signature='sv')
+        if channel:
+            opts['Channel'] = dbus_mod.UInt16(int(channel))
+        manager.RegisterProfile(profile_path, SPP_UUID, opts)
+        logger.info("Bluetooth SPP profile registered")
+
+        glib_loop = GLib.MainLoop()
+        glib_thread = threading.Thread(target=glib_loop.run, daemon=True,
+                                       name='glib-mainloop')
+        glib_thread.start()
+        self._glib_loop = glib_loop
+
+        device_path = f'/org/bluez/hci0/dev_{bdaddr.upper().replace(":", "_")}'
+        device = dbus_mod.Interface(
+            bus.get_object('org.bluez', device_path),
+            'org.bluez.Device1')
+        logger.info(f"Calling ConnectProfile on {device_path}")
+        device.ConnectProfile(SPP_UUID)
+
+        fd = await fd_future
+        sock = socket_mod.fromfd(fd, socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        os.close(fd)
+        logger.info(f"Bluetooth SPP socket ready (fd={sock.fileno()})")
+        return sock
 
     def start_receive(self, loop):
         """Start a background thread that reads frames from the KISS TNC.
@@ -601,6 +643,36 @@ class KISSClient:
         if self.connection:
             self.connection.stop()
             self.connection = None
+
+
+SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb'
+
+
+def _make_spp_profile(dbus_mod, fd_future, loop):
+    """Create an SPP Profile1 D-Bus service object class.
+
+    BlueZ calls NewConnection() with a connected fd when the remote
+    device's SPP channel is established.
+    """
+    class SPPProfile(dbus_mod.service.Object):
+        @dbus_mod.service.method("org.bluez.Profile1",
+                                 in_signature="oha{sv}", out_signature="")
+        def NewConnection(self, path, fd, properties):
+            fd_val = fd.take()
+            logger.info(f"Bluetooth SPP connected: path={path}, fd={fd_val}")
+            loop.call_soon_threadsafe(fd_future.set_result, fd_val)
+
+        @dbus_mod.service.method("org.bluez.Profile1",
+                                 in_signature="o", out_signature="")
+        def RequestDisconnection(self, path):
+            logger.info(f"Bluetooth SPP disconnection requested: {path}")
+
+        @dbus_mod.service.method("org.bluez.Profile1",
+                                 in_signature="", out_signature="")
+        def Release(self):
+            logger.info("Bluetooth SPP profile released")
+
+    return SPPProfile
 
 
 class BluetoothKISS(kiss.classes.KISS):
