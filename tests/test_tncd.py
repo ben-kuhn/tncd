@@ -1449,6 +1449,10 @@ class TestBluetoothConnect:
         mock_bus.get_object.assert_any_call(
             'org.bluez',
             '/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF')
+        # Properties.Get should have been called to check Connected status
+        mock_dbus.Interface.assert_any_call(
+            mock_bus.get_object.return_value,
+            'org.freedesktop.DBus.Properties')
 
 
 class TestBluetoothFullFlow:

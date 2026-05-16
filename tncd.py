@@ -235,10 +235,12 @@ class AGWPEServerProtocol(asyncio.Protocol):
             conn.state = 'CONNECTING'
             conn.send_seqno = 0
             conn.recv_seqno = 0
+            conn.t1_polls = 0
             try:
                 frame = _cmd_frame(to_str, from_str,
                                    control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
                 self.bridge._send_ax25(frame)
+                self.bridge._start_t1(conn)
             except Exception as e:
                 logger.error(f"Failed to build SABM: {e}")
 
@@ -250,10 +252,12 @@ class AGWPEServerProtocol(asyncio.Protocol):
             conn.state = 'CONNECTING'
             conn.send_seqno = 0
             conn.recv_seqno = 0
+            conn.t1_polls = 0
             try:
                 frame = _cmd_frame(to_str, from_str,
                                    control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
                 self.bridge._send_ax25(frame)
+                self.bridge._start_t1(conn)
             except Exception as e:
                 logger.error(f"Failed to build SABM: {e}")
 
@@ -273,6 +277,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
             conn.state = 'CONNECTING'
             conn.send_seqno = 0
             conn.recv_seqno = 0
+            conn.t1_polls = 0
             try:
                 dst = ax25.Address(to_str)
                 dst.command_response = True
@@ -283,6 +288,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
                     control=ax25.Control(ax25.FrameType.SABM, poll_final=True),
                 )
                 self.bridge._send_ax25(frame)
+                self.bridge._start_t1(conn)
             except Exception as e:
                 logger.error(f"Failed to build SABM via: {e}")
 
@@ -656,8 +662,34 @@ class KISSClient:
         device = dbus_mod.Interface(
             bus.get_object('org.bluez', device_path),
             'org.bluez.Device1')
+
+        # Disconnect any existing connection (e.g. auto-connected BLE) so that
+        # ConnectProfile can establish a fresh BR/EDR link for SPP.
+        # We must call ConnectProfile immediately after disconnect — if the
+        # device is trusted, BlueZ will auto-reconnect via BLE within ~1s,
+        # which blocks BR/EDR paging.
+        props = dbus_mod.Interface(
+            bus.get_object('org.bluez', device_path),
+            'org.freedesktop.DBus.Properties')
+        connected = props.Get('org.bluez.Device1', 'Connected')
+        if connected:
+            logger.info(f"Disconnecting existing connection to {bdaddr}")
+            device.Disconnect()
+
         logger.info(f"Calling ConnectProfile on {device_path}")
-        device.ConnectProfile(SPP_UUID)
+
+        def _connect_profile():
+            try:
+                device.ConnectProfile(SPP_UUID)
+            except dbus_mod.exceptions.DBusException as e:
+                # NoReply is expected — BlueZ delivers the fd via our profile's
+                # NewConnection callback instead of replying to ConnectProfile.
+                if 'NoReply' not in str(e) and 'Did not receive a reply' not in str(e):
+                    if not fd_future.done():
+                        loop.call_soon_threadsafe(fd_future.set_exception, e)
+
+        threading.Thread(target=_connect_profile, daemon=True,
+                         name='bt-connect').start()
 
         fd = await fd_future
         sock = socket_mod.fromfd(fd, socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
@@ -1005,6 +1037,34 @@ class Bridge:
         After N2 consecutive retransmissions, disconnect (AX.25 6.3.2).
         """
         conn.t1_handle = None
+
+        # SABM retransmission while waiting for UA (AX.25 6.3.1)
+        if conn.state == 'CONNECTING':
+            conn.t1_polls += 1
+            if conn.t1_polls > self.n2_retry:
+                logger.warning(f"N2 retry limit ({self.n2_retry}) exceeded for "
+                               f"SABM to {conn.remote}, giving up")
+                conn.state = 'DISCONNECTED'
+                msg = f'*** BUSY From {conn.remote}\r'.encode()
+                if conn.owner:
+                    try:
+                        conn.owner.send_frame(0, ord('d'),
+                                              conn.remote.encode(), conn.local.encode(), msg)
+                    except Exception as e:
+                        logger.error(f"Error sending 'd' for SABM timeout: {e}")
+                self.remove_connection(conn.port, conn.local, conn.remote)
+                return
+            logger.info(f"T1 expired, retransmitting SABM to {conn.remote} "
+                        f"(attempt {conn.t1_polls}/{self.n2_retry})")
+            try:
+                frame = _cmd_frame(conn.remote, conn.local,
+                                   control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+                self._send_ax25(frame)
+            except Exception as e:
+                logger.error(f"Failed to retransmit SABM: {e}")
+            self._start_t1(conn)
+            return
+
         if conn.state != 'CONNECTED' or not conn.retransmit_buf:
             return
         conn.t1_polls += 1
@@ -1300,9 +1360,11 @@ class Bridge:
             return
 
         if conn.state == 'CONNECTING':
+            self._cancel_t1(conn)
             conn.state = 'CONNECTED'
             conn.send_seqno = 0
             conn.recv_seqno = 0
+            conn.t1_polls = 0
             logger.info(f"CONNECTED   {dst} <-> {src}")
             msg = f'*** CONNECTED With {src}\r'.encode()
             if conn.owner:
