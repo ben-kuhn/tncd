@@ -432,8 +432,13 @@ class AGWPEServerProtocol(asyncio.Protocol):
 
 
 class KISSClient:
-    def __init__(self, config, traffic_debug=0):
-        self.config = config
+    def __init__(self, port_num, port_section, kiss_section, raw_config, traffic_debug=0):
+        self.port_num = port_num
+        self.port_section = port_section
+        self.kiss_section = kiss_section
+        self.config = raw_config   # raw ConfigParser
+        self.online = False
+        self.name = raw_config.get(port_section, 'name', fallback=f'Port {port_num}')
         self.connection = None
         self.bridge = None
         self.traffic_debug = traffic_debug
@@ -444,24 +449,26 @@ class KISSClient:
 
     def _get_kiss_params(self):
         params = {}
-        if 'kiss' in self.config:
+        section = self.kiss_section
+        if section and self.config.has_section(section):
             for key in ['TX_DELAY', 'PERSISTENCE', 'SLOT_TIME', 'TX_TAIL', 'FULL_DUPLEX']:
-                if self.config.has_option('kiss', key.lower()):
-                    params[key] = self.config.getint('kiss', key.lower())
+                if self.config.has_option(section, key.lower()):
+                    params[key] = self.config.getint(section, key.lower())
         return params
 
     async def connect(self):
-        conn_type  = self.config.get('client', 'type', fallback='serial')
+        ps = self.port_section
+        conn_type  = self.config.get(ps, 'type', fallback='serial')
         kiss_params = self._get_kiss_params()
 
         loop = asyncio.get_running_loop()
 
-        init_str = self.config.get('client', 'init_string', fallback=None)
-        init_delay = self.config.getfloat('client', 'init_delay', fallback=1.0)
+        init_str = self.config.get(ps, 'init_string', fallback=None)
+        init_delay = self.config.getfloat(ps, 'init_delay', fallback=1.0)
 
         if conn_type == 'tcp':
-            host = self.config.get('client', 'host', fallback='localhost')
-            port = self.config.getint('client', 'port', fallback=8001)
+            host = self.config.get(ps, 'host', fallback='localhost')
+            port = self.config.getint(ps, 'port', fallback=8001)
             logger.info(f"Connecting to KISS TCP server at {host}:{port}")
             self.connection = kiss.TCPKISS(host=host, port=port)
         elif conn_type == 'bluetooth':
@@ -476,14 +483,14 @@ class KISSClient:
                     "pip install dbus-python PyGObject"
                 )
 
-            bdaddr = self.config.get('client', 'bdaddr', fallback=None)
+            bdaddr = self.config.get(ps, 'bdaddr', fallback=None)
             if not bdaddr:
                 raise ValueError("Bluetooth connection requires 'bdaddr' in [client] config")
 
-            channel = self.config.get('client', 'channel', fallback=None)
-            reconnect = self.config.getboolean('client', 'reconnect', fallback=True)
-            reconnect_delay = self.config.getfloat('client', 'reconnect_delay', fallback=5.0)
-            reconnect_max_delay = self.config.getfloat('client', 'reconnect_max_delay', fallback=60.0)
+            channel = self.config.get(ps, 'channel', fallback=None)
+            reconnect = self.config.getboolean(ps, 'reconnect', fallback=True)
+            reconnect_delay = self.config.getfloat(ps, 'reconnect_delay', fallback=5.0)
+            reconnect_max_delay = self.config.getfloat(ps, 'reconnect_max_delay', fallback=60.0)
 
             logger.info(f"Connecting to Bluetooth TNC at {bdaddr}"
                         f"{f' channel {channel}' if channel else ' (SDP auto-detect)'}")
@@ -500,12 +507,12 @@ class KISSClient:
             self._bt_reconnect_delay = reconnect_delay
             self._bt_reconnect_max_delay = reconnect_max_delay
         else:
-            device   = self.config.get('client', 'device', fallback='/dev/ttyUSB0')
-            baudrate = self.config.getint('client', 'serial_baudrate',
-                                          fallback=self.config.getint('client', 'baudrate', fallback=9600))
-            parity   = self.config.get('client', 'parity', fallback='N').upper()
-            stopbits = self.config.getfloat('client', 'stopbits', fallback=1)
-            rtscts   = self.config.getboolean('client', 'rtscts', fallback=False)
+            device   = self.config.get(ps, 'device', fallback='/dev/ttyUSB0')
+            baudrate = self.config.getint(ps, 'serial_baudrate',
+                                          fallback=self.config.getint(ps, 'baudrate', fallback=9600))
+            parity   = self.config.get(ps, 'parity', fallback='N').upper()
+            stopbits = self.config.getfloat(ps, 'stopbits', fallback=1)
+            rtscts   = self.config.getboolean(ps, 'rtscts', fallback=False)
             logger.info(f"Connecting to KISS serial device at {device}, {baudrate} baud")
             self.connection = kiss.SerialKISS(port=device, speed=baudrate)
 
@@ -797,7 +804,13 @@ class BluetoothKISS(kiss.classes.KISS):
 class Bridge:
     def __init__(self, config, traffic_debug=0, verbose=0):
         self.config = config
-        self.kiss_client = KISSClient(config, traffic_debug)
+        self.kiss_client = KISSClient(
+            port_num=0,
+            port_section=config._ports[0],
+            kiss_section=config._kiss.get(0),
+            raw_config=config._raw,
+            traffic_debug=traffic_debug,
+        )
         self.clients = []
         self.connections = {}   # (port, local, remote) -> Connection
         self.callsign = config.get('server', 'callsign', fallback='AGWPE')
@@ -1547,24 +1560,35 @@ class PortConfig:
     to port 0's section so existing Bridge/KISSClient code continues to work.
     """
 
-    def __init__(self, raw):
+    def __init__(self, raw, ports=None, kiss=None):
         self._raw = raw
         # Ordered list of section names for each port index (e.g. 'client.0')
-        self._ports = {}   # int -> section name
-        self._kiss  = {}   # int -> section name (may be absent for some ports)
-        for section in raw.sections():
-            if section.startswith('client.'):
-                try:
-                    idx = int(section[len('client.'):])
-                    self._ports[idx] = section
-                except ValueError:
-                    pass
-            elif section.startswith('kiss.'):
-                try:
-                    idx = int(section[len('kiss.'):])
-                    self._kiss[idx] = section
-                except ValueError:
-                    pass
+        # If ports/kiss are provided explicitly they take precedence over scanning.
+        if ports is not None:
+            # ports is a list like ['client.0', 'client.1']
+            self._ports = {i: s for i, s in enumerate(ports)}
+        else:
+            self._ports = {}
+        if kiss is not None:
+            # kiss is a dict like {0: 'kiss.0', 1: 'kiss.1'}
+            self._kiss = dict(kiss)
+        else:
+            self._kiss = {}
+
+        if ports is None or kiss is None:
+            for section in raw.sections():
+                if ports is None and section.startswith('client.'):
+                    try:
+                        idx = int(section[len('client.'):])
+                        self._ports[idx] = section
+                    except ValueError:
+                        pass
+                elif kiss is None and section.startswith('kiss.'):
+                    try:
+                        idx = int(section[len('kiss.'):])
+                        self._kiss[idx] = section
+                    except ValueError:
+                        pass
 
     # ------------------------------------------------------------------
     # Multi-port API

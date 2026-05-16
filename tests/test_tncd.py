@@ -53,10 +53,11 @@ def parse_frame(raw):
 
 def make_protocol():
     """Return (protocol, transport_mock, bridge_mock) ready for use."""
-    config = configparser.ConfigParser()
-    config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
-    config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-    config['kiss']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    raw = configparser.ConfigParser()
+    raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+    raw['client.0'] = {'type': 'serial', 'device': '/dev/null', 'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+    raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
 
     bridge = Mock()
     bridge.config = config
@@ -402,12 +403,14 @@ class TestKISSReceivePath:
     """Verify frames received from KISS are forwarded to monitoring clients."""
 
     def _make_bridge_with_client(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                             'callsign': 'N0CALL'}
-        config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-        config['kiss']   = {'tx_delay': '40', 'persistence': '63',
-                             'slot_time': '20', 'tx_tail': '30'}
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                           'callsign': 'N0CALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63',
+                           'slot_time': '20', 'tx_tail': '30'}
+        config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
         bridge = Bridge(config)
         # Mock out the kiss_client so we don't actually connect
         bridge.kiss_client = Mock()
@@ -524,74 +527,80 @@ class TestBufferingAndReassembly:
 # KISSClient
 # ---------------------------------------------------------------------------
 
+def _make_kiss_client(port_section_dict, kiss_section_dict=None):
+    """Helper: build a KISSClient with numbered sections."""
+    raw = configparser.ConfigParser()
+    raw['client.0'] = port_section_dict
+    if kiss_section_dict is not None:
+        raw['kiss.0'] = kiss_section_dict
+    return KISSClient(
+        port_num=0,
+        port_section='client.0',
+        kiss_section='kiss.0' if kiss_section_dict is not None else None,
+        raw_config=raw,
+    )
+
+
 class TestKISSClient:
     @pytest.mark.asyncio
     async def test_connect_serial(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
         with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
             await client.connect()
             mock_kiss.assert_called_once_with(port='/dev/ttyUSB0', speed=9600)
             mock_instance.start.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_connect_tcp(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'tcp', 'host': 'kiss.example.com', 'port': '8001'}
         with patch('tncd.kiss.TCPKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'tcp', 'host': 'kiss.example.com', 'port': '8001'})
             await client.connect()
             mock_kiss.assert_called_once_with(host='kiss.example.com', port=8001)
             mock_instance.start.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_send_data(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
         with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
             await client.connect()
             client.send(b'\x00\x01\x02')
             mock_instance.write.assert_called_once_with(b'\x00\x01\x02')
 
     @pytest.mark.asyncio
     async def test_close(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
         with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
             await client.connect()
             client.close()
             mock_instance.stop.assert_called_once()
             assert client.connection is None
 
     def test_send_no_connection_is_noop(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
         client.send(b'\x00\x01\x02')  # must not raise
 
     def test_kiss_params_extracted(self):
-        config = configparser.ConfigParser()
-        config.read_string('[kiss]\ntx_delay = 50\npersistence = 64\n')
-        client = KISSClient(config)
+        client = _make_kiss_client(
+            {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'},
+            {'tx_delay': '50', 'persistence': '64'},
+        )
         params = client._get_kiss_params()
         assert params['TX_DELAY'] == 50
         assert params['PERSISTENCE'] == 64
 
     def test_kiss_params_empty_section(self):
-        config = configparser.ConfigParser()
-        config.add_section('kiss')
-        client = KISSClient(config)
+        client = _make_kiss_client(
+            {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'},
+            {},
+        )
         assert client._get_kiss_params() == {}
 
 
@@ -601,9 +610,11 @@ class TestKISSClient:
 
 class TestBridge:
     def _make_bridge(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'MYCALL'}
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'MYCALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/ttyUSB0',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
         return Bridge(config)
 
     def test_init(self):
@@ -643,10 +654,11 @@ class TestBridge:
 
 def make_real_protocol():
     """Return (protocol, transport, bridge) with a real Bridge and mocked KISS."""
-    config = configparser.ConfigParser()
-    config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
-    config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-    config['kiss']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    raw = configparser.ConfigParser()
+    raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+    raw['client.0'] = {'type': 'serial', 'device': '/dev/null', 'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+    raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
     bridge = Bridge(config)
     bridge.kiss_client = Mock()
     protocol = AGWPEServerProtocol(bridge)
@@ -897,10 +909,12 @@ class TestConnectedMode:
 class TestConnectedModeReceivePath:
 
     def _make_bridge(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
-        config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-        config['kiss']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+        config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
         bridge = Bridge(config)
         bridge.kiss_client = Mock()
         return bridge
@@ -1368,23 +1382,13 @@ class TestBluetoothConfig:
     """Test Bluetooth config parsing in KISSClient.connect()."""
 
     async def test_bluetooth_missing_bdaddr_raises(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'ota_baudrate': '1200'})
         with pytest.raises(Exception):
             await client.connect()
 
     async def test_bluetooth_missing_dbus_raises_runtime_error(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
         with patch.dict('sys.modules', {'dbus': None, 'dbus.service': None,
                                          'dbus.mainloop': None,
                                          'dbus.mainloop.glib': None}):
@@ -1392,36 +1396,23 @@ class TestBluetoothConfig:
                 await client.connect()
 
     async def test_bluetooth_channel_optional_defaults_none(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        assert config.get('client', 'channel', fallback=None) is None
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
+        assert client.config.get('client.0', 'channel', fallback=None) is None
 
     async def test_bluetooth_reconnect_defaults(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        assert config.getboolean('client', 'reconnect', fallback=True) is True
-        assert config.getfloat('client', 'reconnect_delay', fallback=5.0) == 5.0
-        assert config.getfloat('client', 'reconnect_max_delay', fallback=60.0) == 60.0
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
+        assert client.config.getboolean('client.0', 'reconnect', fallback=True) is True
+        assert client.config.getfloat('client.0', 'reconnect_delay', fallback=5.0) == 5.0
+        assert client.config.getfloat('client.0', 'reconnect_max_delay', fallback=60.0) == 60.0
 
 
 class TestBluetoothConnect:
     async def test_connect_calls_register_and_connect_profile(self):
         """Verify D-Bus wiring: profile registered, ConnectProfile called."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
 
         mock_dbus = MagicMock()
         mock_glib = MagicMock()
@@ -1485,13 +1476,8 @@ class TestBluetoothFullFlow:
     def test_bluetooth_connection_lost_hook(self):
         """connection_lost hook fires when socket closes."""
         s1, s2 = socket.socketpair()
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
         client.connection = BluetoothKISS(s1)
         client.connection.start()
 
@@ -1508,14 +1494,9 @@ class TestBluetoothFullFlow:
 class TestBluetoothReconnect:
     async def test_connection_lost_triggers_reconnect(self):
         """When bluetooth socket closes and reconnect=true, reconnect loop starts."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200', 'reconnect': 'true',
-                            'reconnect_delay': '0.1', 'reconnect_max_delay': '0.2'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200', 'reconnect': 'true',
+                                    'reconnect_delay': '0.1', 'reconnect_max_delay': '0.2'})
         client._bt_reconnect = True
         client._bt_reconnect_delay = 0.1
         client._bt_reconnect_max_delay = 0.2
@@ -1533,13 +1514,8 @@ class TestBluetoothReconnect:
 
     async def test_reconnect_disabled_does_not_reconnect(self):
         """When reconnect=false, connection loss does not trigger reconnect."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200', 'reconnect': 'false'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200', 'reconnect': 'false'})
         client._bt_reconnect = False
 
         reconnect_called = False
@@ -1555,13 +1531,8 @@ class TestBluetoothReconnect:
 
     async def test_reconnect_loop_exponential_backoff(self):
         """Reconnect delay doubles on each failure up to max."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
         client._bt_reconnect = True
         client._bt_reconnect_delay = 0.05
         client._bt_reconnect_max_delay = 0.15
