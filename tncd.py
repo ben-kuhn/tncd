@@ -183,11 +183,11 @@ class AGWPEServerProtocol(asyncio.Protocol):
             # Response must be exactly 12 bytes; pe uses struct.unpack('<8BI', data).
             # Fields: baud, traffic_level, tx_delay, tx_tail, persist,
             #         slot_time, max_frame, active_conns, bytes_rcvd
-            cfg = self.bridge.config
-            tx_delay    = cfg.getint('kiss', 'tx_delay',    fallback=40)
-            persistence = cfg.getint('kiss', 'persistence', fallback=63)
-            slot_time   = cfg.getint('kiss', 'slot_time',   fallback=20)
-            tx_tail     = cfg.getint('kiss', 'tx_tail',     fallback=30)
+            kiss_cfg = self.bridge.config.kiss_config(port)
+            tx_delay    = int(kiss_cfg.get('tx_delay', '40'))
+            persistence = int(kiss_cfg.get('persistence', '63'))
+            slot_time   = int(kiss_cfg.get('slot_time', '20'))
+            tx_tail     = int(kiss_cfg.get('tx_tail', '30'))
             caps = struct.pack('<8BI', 0, 255, tx_delay, tx_tail,
                                persistence, slot_time, 7, 0, 0)
             self.send_frame(port, ord(b'g'), b'', b'', caps)
@@ -212,7 +212,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
         elif datakind_bytes == b'M':
             # Send UNPROTO (UI) frame. Build a complete AX.25 UI frame for KISS.
             logger.debug(f"UNPROTO from {from_str!r} to {to_str!r}")
-            self._send_unproto(from_str, to_str, pid, data)
+            self._send_unproto(from_str, to_str, pid, data, port=port)
 
         elif datakind_bytes == b'V':
             # Send UNPROTO via digipeaters. Payload: count(1) + vias(10 each) + info.
@@ -223,9 +223,9 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 info = data[1 + n_via * 10:]
                 vias = [via_data[i*10:(i+1)*10].rstrip(b'\x00').decode('ascii', errors='replace')
                         for i in range(n_via)]
-                self._send_unproto(from_str, to_str, pid, info, via=vias)
+                self._send_unproto(from_str, to_str, pid, info, via=vias, port=port)
             else:
-                self._send_unproto(from_str, to_str, pid, b'')
+                self._send_unproto(from_str, to_str, pid, b'', port=port)
 
         elif datakind_bytes == b'C':
             # Initiate AX.25 connection: send SABM to TNC.
@@ -239,7 +239,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
             try:
                 frame = _cmd_frame(to_str, from_str,
                                    control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-                self.bridge._send_ax25(frame)
+                self.bridge._send_ax25(frame, port)
                 self.bridge._start_t1(conn)
             except Exception as e:
                 logger.error(f"Failed to build SABM: {e}")
@@ -256,7 +256,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
             try:
                 frame = _cmd_frame(to_str, from_str,
                                    control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-                self.bridge._send_ax25(frame)
+                self.bridge._send_ax25(frame, port)
                 self.bridge._start_t1(conn)
             except Exception as e:
                 logger.error(f"Failed to build SABM: {e}")
@@ -287,7 +287,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
                     via=[ax25.Address(v, repeater=True) for v in vias] if vias else None,
                     control=ax25.Control(ax25.FrameType.SABM, poll_final=True),
                 )
-                self.bridge._send_ax25(frame)
+                self.bridge._send_ax25(frame, port)
                 self.bridge._start_t1(conn)
             except Exception as e:
                 logger.error(f"Failed to build SABM via: {e}")
@@ -322,7 +322,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 try:
                     frame = _cmd_frame(to_str, from_str,
                                        control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
-                    self.bridge._send_ax25(frame)
+                    self.bridge._send_ax25(frame, port)
                 except Exception as e:
                     logger.error(f"Failed to build DISC: {e}")
 
@@ -331,7 +331,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
             raw = data[1:] if (data and data[0] == 0x00) else data
             logger.debug(f"Raw KISS frame, {len(raw)} bytes")
             if raw:
-                self.bridge.send_to_kiss(raw)
+                self.bridge.send_to_kiss(port, raw)
 
         elif datakind_bytes == b'k':
             # Toggle raw frame reception mode (K frames to client).
@@ -365,7 +365,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
         else:
             logger.info(f"Unknown frame type: {datakind_bytes!r} ({datakind})")
 
-    def _send_unproto(self, from_str, to_str, pid, data, via=None):
+    def _send_unproto(self, from_str, to_str, pid, data, via=None, port=0):
         """Build a complete AX.25 UI frame and send it to KISS."""
         via_str = f" via {','.join(via)}" if via else ""
         logger.info(f"UNPROTO     {from_str} -> {to_str}{via_str}  ({len(data)} bytes)")
@@ -380,7 +380,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 pid=pid if pid else 0xF0,
                 data=data if data else b'',
             )
-            self.bridge._send_ax25(frame)
+            self.bridge._send_ax25(frame, port)
         except Exception as e:
             logger.error(f"Failed to build AX.25 UI frame: {e}")
 
@@ -427,8 +427,10 @@ class AGWPEServerProtocol(asyncio.Protocol):
     def send_port_info(self):
         # pe parses: data.split(null,1)[0].decode().split(';')
         # Non-empty fields after the first become the port description list.
-        data = b'1;KISS TNC;'
-        self.send_frame(0, ord(b'G'), b'', b'', data)
+        count = self.bridge.config.port_count
+        names = [self.bridge.config.port_name(i) for i in range(count)]
+        payload = f"{count};{';'.join(names)};"
+        self.send_frame(0, ord(b'G'), b'', b'', payload.encode())
 
 
 class KISSClient:
@@ -711,7 +713,7 @@ class KISSClient:
         on the asyncio event loop thread via call_soon_threadsafe.
         """
         def _on_frame(frame_data):
-            loop.call_soon_threadsafe(self.bridge.on_kiss_frame, bytes(frame_data))
+            loop.call_soon_threadsafe(self.bridge.on_kiss_frame, self.port_num, bytes(frame_data))
 
         def _read_loop():
             try:
@@ -804,13 +806,6 @@ class BluetoothKISS(kiss.classes.KISS):
 class Bridge:
     def __init__(self, config, traffic_debug=0, verbose=0):
         self.config = config
-        self.kiss_client = KISSClient(
-            port_num=0,
-            port_section=config._ports[0],
-            kiss_section=config._kiss.get(0),
-            raw_config=config._raw,
-            traffic_debug=traffic_debug,
-        )
         self.clients = []
         self.connections = {}   # (port, local, remote) -> Connection
         self.callsign = config.get('server', 'callsign', fallback='AGWPE')
@@ -820,34 +815,68 @@ class Bridge:
         # back via KISS. Track recently-sent raw bytes to discard them.
         self._sent_frames = collections.deque(maxlen=20)
 
-        # Window size, retry limit, and T1 timer calculation
-        self.max_window = config.getint('ax25', 'max_window', fallback=DEFAULT_MAX_WINDOW)
-        self.max_window = max(1, min(7, self.max_window))  # clamp to 1-7
-        self.n2_retry = config.getint('ax25', 'n2_retry', fallback=DEFAULT_N2_RETRY)
+        # Create one KISSClient per configured port
+        self.kiss_clients = []
+        for i in range(config.port_count):
+            kc = KISSClient(
+                port_num=i,
+                port_section=config._ports[i],
+                kiss_section=config._kiss.get(i),
+                raw_config=config._raw,
+                traffic_debug=traffic_debug,
+            )
+            kc.set_bridge(self)
+            self.kiss_clients.append(kc)
+        # Backward compat for tests that reference kiss_client (singular)
+        self.kiss_client = self.kiss_clients[0] if self.kiss_clients else None
 
-        # Calculate T1 and T2 from OTA baud rate
-        ota_baudrate = config.getint('client', 'ota_baudrate', fallback=1200)
-        max_frame_bytes = 256 + AX25_OVERHEAD
-        frame_time = (max_frame_bytes * 8) / ota_baudrate
+        # Window size and retry limit (global defaults, overridden per-port below)
+        max_window = config.getint('ax25', 'max_window', fallback=DEFAULT_MAX_WINDOW)
+        max_window = max(1, min(7, max_window))  # clamp to 1-7
+        n2_retry = config.getint('ax25', 'n2_retry', fallback=DEFAULT_N2_RETRY)
 
-        # T1 = 2 * (window_frames * frame_time + turnaround)
-        turnaround = 1.0  # processing + channel turnaround
-        self.t1_timeout = 2.0 * (self.max_window * frame_time + turnaround)
-        self.t1_timeout = max(3.0, self.t1_timeout)  # floor at 3 seconds
+        # Per-port T1/T2/window parameters derived from each port's ota_baudrate
+        self._port_params = []
+        for i in range(config.port_count):
+            port_section = config._ports[i]
+            ota_baudrate = config._raw.getint(port_section, 'ota_baudrate', fallback=1200)
+            max_frame_bytes = 256 + AX25_OVERHEAD
+            frame_time = (max_frame_bytes * 8) / ota_baudrate
+            turnaround = 1.0
+            t1_timeout = max(3.0, 2.0 * (max_window * frame_time + turnaround))
+            t2_delay = max(0.1, T2_MULTIPLIER * frame_time)
+            self._port_params.append({
+                'max_window': max_window,
+                'n2_retry': n2_retry,
+                't1_timeout': t1_timeout,
+                't2_delay': t2_delay,
+            })
+            logger.info(f"Port {i}: window={max_window}, T1={t1_timeout:.1f}s, "
+                        f"T2={t2_delay:.2f}s (ota_baudrate={ota_baudrate})")
 
-        # T2 = slightly longer than one frame time — fires after burst ends
-        self.t2_delay = T2_MULTIPLIER * frame_time
-        self.t2_delay = max(0.1, self.t2_delay)  # floor at 100ms
+        # Backward compat aliases for port 0 (used by existing tests)
+        if self._port_params:
+            self.max_window = self._port_params[0]['max_window']
+            self.n2_retry = self._port_params[0]['n2_retry']
+            self.t1_timeout = self._port_params[0]['t1_timeout']
+            self.t2_delay = self._port_params[0]['t2_delay']
+        else:
+            self.max_window = max_window
+            self.n2_retry = n2_retry
+            self.t1_timeout = 3.0
+            self.t2_delay = 0.1
 
-        logger.info(f"AX.25 window={self.max_window}, T1={self.t1_timeout:.1f}s, "
-                    f"T2={self.t2_delay:.2f}s (ota_baudrate={ota_baudrate})")
+    def _get_port_param(self, port, key):
+        if port < len(self._port_params):
+            return self._port_params[port][key]
+        return self._port_params[0][key]
 
     async def start(self):
-        await self.kiss_client.connect()
-        self.kiss_client.set_bridge(self)
-
         loop = asyncio.get_running_loop()
-        self.kiss_client.start_receive(loop)
+        for kc in self.kiss_clients:
+            await kc.connect()
+            kc.start_receive(loop)
+            kc.online = True
 
         server_cfg = self.config['server']
         host = server_cfg.get('listen_host', '0.0.0.0')
@@ -930,14 +959,19 @@ class Bridge:
             except Exception:
                 print(f"      {data[:64].hex()}")
 
-    def _send_ax25(self, frame):
+    def _send_ax25(self, frame, port=0):
         """Log (at verbose>=1) and send an AX.25 frame to the KISS TNC."""
         self._log_ax25(frame, 'TX')
-        self.send_to_kiss(bytes(frame))
+        self.send_to_kiss(port, bytes(frame))
 
-    def send_to_kiss(self, data):
+    def send_to_kiss(self, port, data):
+        if port >= len(self.kiss_clients):
+            return
+        kc = self.kiss_clients[port]
+        if not kc.online:
+            return
         self._sent_frames.append(bytes(data))
-        self.kiss_client.send(data)
+        kc.send(data)
 
     def _drain_outbound(self, conn):
         """Send queued I-frames while the outbound window has space.
@@ -950,7 +984,8 @@ class Bridge:
         sent_count = 0
         if conn.remote_busy:
             return
-        while conn.outbound_queue and conn.unacked < self.max_window:
+        max_window = self._get_port_param(conn.port, 'max_window')
+        while conn.outbound_queue and conn.unacked < max_window:
             chunk, pid = conn.outbound_queue.popleft()
             # Coalesce adjacent entries with the same PID up to 256 bytes.
             while conn.outbound_queue and len(chunk) < 256:
@@ -967,7 +1002,7 @@ class Bridge:
                                    pid=pid,
                                    data=chunk)
                 ns = conn.send_seqno
-                self._send_ax25(frame)
+                self._send_ax25(frame, conn.port)
                 conn.retransmit_buf[ns] = bytes(frame)
                 conn.send_seqno = (ns + 1) % 8
                 conn.unacked += 1
@@ -990,7 +1025,8 @@ class Bridge:
         self._cancel_t1(conn)
         try:
             loop = asyncio.get_running_loop()
-            conn.t1_handle = loop.call_later(self.t1_timeout, self._t1_expired, conn)
+            t1 = self._get_port_param(conn.port, 't1_timeout')
+            conn.t1_handle = loop.call_later(t1, self._t1_expired, conn)
         except RuntimeError:
             pass  # no event loop (e.g. in tests)
 
@@ -1009,7 +1045,8 @@ class Bridge:
         conn._t2_dst = str(dst)
         try:
             loop = asyncio.get_running_loop()
-            conn.t2_handle = loop.call_later(self.t2_delay, self._t2_expired, conn)
+            t2 = self._get_port_param(conn.port, 't2_delay')
+            conn.t2_handle = loop.call_later(t2, self._t2_expired, conn)
         except RuntimeError:
             # No event loop (tests) — send immediately
             self._send_delayed_rr(conn)
@@ -1036,7 +1073,7 @@ class Bridge:
             rr = _resp_frame(conn._t2_src, conn._t2_dst,
                              control=ax25.Control(ax25.FrameType.RR,
                                                   recv_seqno=conn.recv_seqno))
-            self._send_ax25(rr)
+            self._send_ax25(rr, conn.port)
         except Exception as e:
             logger.error(f"Failed to send delayed RR: {e}")
 
@@ -1050,29 +1087,30 @@ class Bridge:
         After N2 consecutive retransmissions, disconnect (AX.25 6.3.2).
         """
         conn.t1_handle = None
+        n2_retry = self._get_port_param(conn.port, 'n2_retry')
 
         # SABM retransmission while waiting for UA (AX.25 6.3.1)
         if conn.state == 'CONNECTING':
             conn.t1_polls += 1
-            if conn.t1_polls > self.n2_retry:
-                logger.warning(f"N2 retry limit ({self.n2_retry}) exceeded for "
+            if conn.t1_polls > n2_retry:
+                logger.warning(f"N2 retry limit ({n2_retry}) exceeded for "
                                f"SABM to {conn.remote}, giving up")
                 conn.state = 'DISCONNECTED'
                 msg = f'*** BUSY From {conn.remote}\r'.encode()
                 if conn.owner:
                     try:
-                        conn.owner.send_frame(0, ord('d'),
+                        conn.owner.send_frame(conn.port, ord('d'),
                                               conn.remote.encode(), conn.local.encode(), msg)
                     except Exception as e:
                         logger.error(f"Error sending 'd' for SABM timeout: {e}")
                 self.remove_connection(conn.port, conn.local, conn.remote)
                 return
             logger.info(f"T1 expired, retransmitting SABM to {conn.remote} "
-                        f"(attempt {conn.t1_polls}/{self.n2_retry})")
+                        f"(attempt {conn.t1_polls}/{n2_retry})")
             try:
                 frame = _cmd_frame(conn.remote, conn.local,
                                    control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-                self._send_ax25(frame)
+                self._send_ax25(frame, conn.port)
             except Exception as e:
                 logger.error(f"Failed to retransmit SABM: {e}")
             self._start_t1(conn)
@@ -1083,14 +1121,14 @@ class Bridge:
         conn.t1_polls += 1
 
         # N2 retry limit: disconnect after too many unanswered polls.
-        if conn.t1_polls > self.n2_retry:
-            logger.warning(f"N2 retry limit ({self.n2_retry}) exceeded for "
+        if conn.t1_polls > n2_retry:
+            logger.warning(f"N2 retry limit ({n2_retry}) exceeded for "
                            f"{conn.local}<->{conn.remote}, disconnecting")
             conn.state = 'DISCONNECTED'
             msg = f'*** DISCONNECTED From {conn.remote}\r'.encode()
             if conn.owner:
                 try:
-                    conn.owner.send_frame(0, ord('d'),
+                    conn.owner.send_frame(conn.port, ord('d'),
                                           conn.remote.encode(), conn.local.encode(), msg)
                 except Exception as e:
                     logger.error(f"Error sending 'd' for N2 timeout: {e}")
@@ -1099,14 +1137,14 @@ class Bridge:
 
         retransmit = conn.t1_polls > 1
         logger.debug(f"T1 expired for {conn.local}<->{conn.remote}, "
-                     f"{conn.unacked} unacked, poll #{conn.t1_polls}/{self.n2_retry}"
+                     f"{conn.unacked} unacked, poll #{conn.t1_polls}/{n2_retry}"
                      f"{' + retransmit' if retransmit else ''}")
         try:
             rr = _cmd_frame(conn.remote, conn.local,
                             control=ax25.Control(ax25.FrameType.RR,
                                                  poll_final=True,
                                                  recv_seqno=conn.recv_seqno))
-            self._send_ax25(rr)
+            self._send_ax25(rr, conn.port)
         except Exception as e:
             logger.error(f"Failed to send T1 poll: {e}")
         if retransmit:
@@ -1120,7 +1158,8 @@ class Bridge:
         # A retransmit may carry an old N(R) that's behind last_acked;
         # the mod-8 arithmetic would interpret this as a huge forward ACK.
         # Only accept N(R) that ACKs at most max_window frames.
-        if newly_acked > self.max_window:
+        max_window = self._get_port_param(conn.port, 'max_window')
+        if newly_acked > max_window:
             logger.debug(f"Ignoring backwards N(R)={r_seq} (last_acked={conn.last_acked})")
             return
         if newly_acked:
@@ -1160,14 +1199,14 @@ class Bridge:
                 pid=orig.pid,
                 data=orig.data)
             conn.retransmit_buf[seq] = bytes(frame)
-            self._send_ax25(frame)
+            self._send_ax25(frame, conn.port)
             seq = (seq + 1) % 8
 
     # ------------------------------------------------------------------
     # KISS receive path
     # ------------------------------------------------------------------
 
-    def on_kiss_frame(self, raw_kiss):
+    def on_kiss_frame(self, port_num, raw_kiss):
         """Called on the asyncio thread when a frame arrives from the KISS TNC."""
         # kiss3 with strip_df_start=False (the default) includes the KISS command byte
         # as the first byte: high nibble = port, low nibble = command (0 = data frame).
@@ -1199,13 +1238,13 @@ class Bridge:
         dst = str(frame.dst)
 
         if ft is ax25.FrameType.UI:
-            self._dispatch_ui(frame, src, dst)
+            self._dispatch_ui(frame, src, dst, port_num)
         elif ft.is_I():
-            self._dispatch_i(frame, src, dst)
+            self._dispatch_i(frame, src, dst, port_num)
         elif ft.is_S():
-            self._dispatch_s(frame, src, dst)
+            self._dispatch_s(frame, src, dst, port_num)
         elif ft is ax25.FrameType.SABM:
-            self._dispatch_sabm(frame, src, dst)
+            self._dispatch_sabm(frame, src, dst, port_num)
         elif ft is ax25.FrameType.SABME:
             # Reject extended (mod-128) mode — we only support basic (mod-8).
             # Remote should fall back to SABM.
@@ -1213,17 +1252,17 @@ class Bridge:
             try:
                 dm = _resp_frame(src, dst,
                                  control=ax25.Control(ax25.FrameType.DM, poll_final=True))
-                self._send_ax25(dm)
+                self._send_ax25(dm, port_num)
             except Exception as e:
                 logger.error(f"Failed to send DM for SABME: {e}")
         elif ft is ax25.FrameType.UA:
-            self._dispatch_ua(frame, src, dst)
+            self._dispatch_ua(frame, src, dst, port_num)
         elif ft is ax25.FrameType.DM:
-            self._dispatch_dm(frame, src, dst)
+            self._dispatch_dm(frame, src, dst, port_num)
         elif ft is ax25.FrameType.DISC:
-            self._dispatch_disc(frame, src, dst)
+            self._dispatch_disc(frame, src, dst, port_num)
         elif ft is ax25.FrameType.FRMR:
-            self._dispatch_frmr(frame, src, dst)
+            self._dispatch_frmr(frame, src, dst, port_num)
         else:
             logger.debug(f"Received AX.25 {ft.name} frame, not forwarded")
 
@@ -1236,7 +1275,7 @@ class Bridge:
             f"[{ts}]\r"
         ).encode()
 
-    def _dispatch_ui(self, frame, src, dst):
+    def _dispatch_ui(self, frame, src, dst, port=0):
         """Forward a UI (UNPROTO) frame to monitoring clients as 'U'."""
         pid  = frame.pid
         data = frame.data or b''
@@ -1244,12 +1283,12 @@ class Bridge:
         for client in self.clients:
             if client.monitoring:
                 try:
-                    client.send_frame(0, ord('U'), src.encode(), dst.encode(),
+                    client.send_frame(port, ord('U'), src.encode(), dst.encode(),
                                       payload, pid=pid)
                 except Exception as e:
                     logger.error(f"Error sending 'U' to client: {e}")
 
-    def _dispatch_i(self, frame, src, dst):
+    def _dispatch_i(self, frame, src, dst, port=0):
         """Handle received I-frame: deliver data to connection owner and monitoring clients."""
         pid  = frame.pid
         data = frame.data or b''
@@ -1258,7 +1297,7 @@ class Bridge:
                     f"{len(data)}B")
 
         # Find connection: local=dst (frame addressed to us), remote=src
-        conn = self.get_connection(0, dst, src)
+        conn = self.get_connection(port, dst, src)
 
         # I-frame while CONNECTING: the UA was lost OTA but the remote
         # clearly accepted our SABM.  Promote to CONNECTED so the
@@ -1271,7 +1310,7 @@ class Bridge:
             msg = f'*** CONNECTED With {src}\r'.encode()
             if conn.owner:
                 try:
-                    conn.owner.send_frame(0, ord('C'), src.encode(), dst.encode(), msg)
+                    conn.owner.send_frame(port, ord('C'), src.encode(), dst.encode(), msg)
                 except Exception as e:
                     logger.error(f"Error sending 'C' to owner: {e}")
 
@@ -1282,7 +1321,7 @@ class Bridge:
                     dm = _resp_frame(src, dst,
                                      control=ax25.Control(ax25.FrameType.DM,
                                                           poll_final=True))
-                    self._send_ax25(dm)
+                    self._send_ax25(dm, port)
                     logger.info(f"TX DM to {src} (no connection for I-frame)")
                 except Exception as e:
                     logger.error(f"Failed to send DM: {e}")
@@ -1315,7 +1354,7 @@ class Bridge:
                 # Deliver data to connection owner as 'D' frame
                 if conn.owner:
                     try:
-                        conn.owner.send_frame(0, ord('D'), src.encode(), dst.encode(),
+                        conn.owner.send_frame(port, ord('D'), src.encode(), dst.encode(),
                                               data, pid=pid)
                     except Exception as e:
                         logger.error(f"Error delivering 'D' to client: {e}")
@@ -1325,23 +1364,23 @@ class Bridge:
         for client in self.clients:
             if client.monitoring:
                 try:
-                    client.send_frame(0, ord('I'), src.encode(), dst.encode(),
+                    client.send_frame(port, ord('I'), src.encode(), dst.encode(),
                                       payload, pid=pid)
                 except Exception as e:
                     logger.error(f"Error sending 'I' to client: {e}")
 
-    def _dispatch_sabm(self, frame, src, dst):
+    def _dispatch_sabm(self, frame, src, dst, port=0):
         """Handle incoming SABM/SABME: accept connection, notify AGWPE clients."""
         logger.info(f"CONNECT     {src} -> {dst}  (incoming)")
         try:
             ua = _resp_frame(str(frame.src), str(frame.dst),
                              control=ax25.Control(ax25.FrameType.UA, poll_final=True))
-            self._send_ax25(ua)
+            self._send_ax25(ua, port)
         except Exception as e:
             logger.error(f"Failed to send UA for incoming SABM: {e}")
             return
 
-        conn = self.get_or_create_connection(0, dst, src)
+        conn = self.get_or_create_connection(port, dst, src)
         conn.state = 'CONNECTED'
         conn.send_seqno = 0
         conn.recv_seqno = 0
@@ -1360,14 +1399,14 @@ class Bridge:
         msg = f'*** CONNECTED To Station {src}\r'.encode()
         for client in self.clients:
             try:
-                client.send_frame(0, ord('C'), src.encode(), dst.encode(), msg)
+                client.send_frame(port, ord('C'), src.encode(), dst.encode(), msg)
             except Exception as e:
                 logger.error(f"Error sending 'C' notification: {e}")
 
-    def _dispatch_ua(self, frame, src, dst):
+    def _dispatch_ua(self, frame, src, dst, port=0):
         """Handle UA: outgoing connection established, or disconnect confirmed."""
         # src=remote sent UA, dst=local received it
-        conn = self.get_connection(0, dst, src)
+        conn = self.get_connection(port, dst, src)
         if conn is None:
             logger.debug(f"UA from {src}: no pending connection")
             return
@@ -1382,7 +1421,7 @@ class Bridge:
             msg = f'*** CONNECTED With {src}\r'.encode()
             if conn.owner:
                 try:
-                    conn.owner.send_frame(0, ord('C'), src.encode(), dst.encode(), msg)
+                    conn.owner.send_frame(port, ord('C'), src.encode(), dst.encode(), msg)
                 except Exception as e:
                     logger.error(f"Error sending 'C' to owner: {e}")
 
@@ -1391,14 +1430,14 @@ class Bridge:
             msg = f'*** DISCONNECTED From {src}\r'.encode()
             if conn.owner:
                 try:
-                    conn.owner.send_frame(0, ord('d'), src.encode(), dst.encode(), msg)
+                    conn.owner.send_frame(port, ord('d'), src.encode(), dst.encode(), msg)
                 except Exception as e:
                     logger.error(f"Error sending 'd' to owner: {e}")
-            self.remove_connection(0, dst, src)
+            self.remove_connection(port, dst, src)
 
-    def _dispatch_dm(self, frame, src, dst):
+    def _dispatch_dm(self, frame, src, dst, port=0):
         """Handle DM: connection refused or remote forced disconnect."""
-        conn = self.get_connection(0, dst, src)
+        conn = self.get_connection(port, dst, src)
         if conn is None:
             logger.debug(f"DM from {src}: no active connection")
             return
@@ -1408,39 +1447,39 @@ class Bridge:
                else f'*** DISCONNECTED From {src}\r'.encode())
         if conn.owner:
             try:
-                conn.owner.send_frame(0, ord('d'), src.encode(), dst.encode(), msg)
+                conn.owner.send_frame(port, ord('d'), src.encode(), dst.encode(), msg)
             except Exception as e:
                 logger.error(f"Error sending 'd' for DM: {e}")
-        self.remove_connection(0, dst, src)
+        self.remove_connection(port, dst, src)
 
-    def _dispatch_disc(self, frame, src, dst):
+    def _dispatch_disc(self, frame, src, dst, port=0):
         """Handle remote DISC: send UA, notify AGWPE client of disconnection."""
         logger.info(f"DISCONNECT  {src} -> {dst}  (remote)")
         try:
             ua = _resp_frame(str(frame.src), str(frame.dst),
                              control=ax25.Control(ax25.FrameType.UA, poll_final=True))
-            self._send_ax25(ua)
+            self._send_ax25(ua, port)
         except Exception as e:
             logger.error(f"Failed to send UA for DISC: {e}")
 
-        conn = self.get_connection(0, dst, src)
+        conn = self.get_connection(port, dst, src)
         if conn:
             msg = f'*** DISCONNECTED From {src}\r'.encode()
             if conn.owner:
                 try:
-                    conn.owner.send_frame(0, ord('d'), src.encode(), dst.encode(), msg)
+                    conn.owner.send_frame(port, ord('d'), src.encode(), dst.encode(), msg)
                 except Exception as e:
                     logger.error(f"Error sending 'd' for DISC: {e}")
-            self.remove_connection(0, dst, src)
+            self.remove_connection(port, dst, src)
 
-    def _dispatch_frmr(self, frame, src, dst):
+    def _dispatch_frmr(self, frame, src, dst, port=0):
         """Handle incoming FRMR: reset the connection (AX.25 2.4.5).
 
         FRMR indicates a protocol error that cannot be recovered by
         retransmission.  Re-establish the link by sending SABM.
         """
         logger.warning(f"FRMR from {src} -> {dst}, resetting connection")
-        conn = self.get_connection(0, dst, src)
+        conn = self.get_connection(port, dst, src)
         if conn and conn.state == 'CONNECTED':
             conn.state = 'CONNECTING'
             conn.send_seqno = 0
@@ -1454,7 +1493,7 @@ class Bridge:
             try:
                 frame = _cmd_frame(src, dst,
                                    control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-                self._send_ax25(frame)
+                self._send_ax25(frame, port)
             except Exception as e:
                 logger.error(f"Failed to send SABM after FRMR: {e}")
 
@@ -1477,7 +1516,7 @@ class Bridge:
                              control=ax25.Control(ax25.FrameType.RR,
                                                   poll_final=True,
                                                   recv_seqno=nr))
-            self._send_ax25(rr)
+            self._send_ax25(rr, conn.port)
         except Exception as e:
             logger.error(f"Failed to send RR F=1 to {src}: {e}")
 
@@ -1494,7 +1533,7 @@ class Bridge:
                         f"from seq {conn.last_acked}")
             self._retransmit_from(conn, conn.last_acked)
 
-    def _dispatch_s(self, frame, src, dst):
+    def _dispatch_s(self, frame, src, dst, port=0):
         """Handle received S (supervisory) frame: respond to polls, forward to monitors."""
         ft = frame.control.frame_type
         ft_name = ft.name
@@ -1503,7 +1542,7 @@ class Bridge:
         except TypeError:
             r_seq = 0
 
-        conn = self.get_connection(0, dst, src)
+        conn = self.get_connection(port, dst, src)
         logger.info(f"RX {ft_name} {src}->{dst} N(R)={r_seq} "
                     f"P={frame.control.poll_final} "
                     f"recv_seqno={conn.recv_seqno if conn else '?'}")
@@ -1533,7 +1572,7 @@ class Bridge:
         # event loop (from the same KISS burst) are processed first,
         # advancing recv_seqno before we build the response.
         if frame.control.poll_final:
-            conn = self.get_connection(0, dst, src)
+            conn = self.get_connection(port, dst, src)
             if conn and conn.state == 'CONNECTED':
                 loop = asyncio.get_running_loop()
                 loop.call_soon(self._send_poll_response, conn,
@@ -1547,7 +1586,7 @@ class Bridge:
         for client in self.clients:
             if client.monitoring:
                 try:
-                    client.send_frame(0, ord('S'), src.encode(), dst.encode(), payload)
+                    client.send_frame(port, ord('S'), src.encode(), dst.encode(), payload)
                 except Exception as e:
                     logger.error(f"Error sending 'S' to client: {e}")
 
