@@ -191,9 +191,9 @@ class TestPortCapsResponse:
     def test_port_number_echoed(self):
         """Response port field should match the requested port."""
         protocol, transport, _ = make_protocol()
-        protocol.data_received(make_frame(1, ord('g')))
+        protocol.data_received(make_frame(0, ord('g')))
         parsed = parse_frame(transport.write.call_args[0][0])
-        assert parsed['port'] == 1
+        assert parsed['port'] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1963,6 +1963,79 @@ class TestMultiPortBridge:
         assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
         # UA response sent on port 1
         mock_kc1.send.assert_called_once()
+
+
+class TestOfflinePort:
+    """Tests for offline port behavior."""
+
+    def _make_bridge_with_protocol(self, port_count=1):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        for i in range(port_count):
+            raw[f'client.{i}'] = {'type': 'tcp', 'host': '127.0.0.1',
+                                  'port': str(8001 + i), 'ota_baudrate': '1200'}
+        config = PortConfig(raw, [f'client.{i}' for i in range(port_count)], {})
+        bridge = Bridge(config)
+        for kc in bridge.kiss_clients:
+            mock_kc = Mock()
+            mock_kc.online = False  # all ports offline by default
+            mock_kc.port_num = kc.port_num
+            bridge.kiss_clients[kc.port_num] = mock_kc
+        bridge.kiss_client = bridge.kiss_clients[0]
+        protocol = AGWPEServerProtocol(bridge)
+        transport = Mock()
+        transport.is_closing.return_value = False
+        protocol.connection_made(transport)
+        return bridge, protocol, transport
+
+    async def test_connect_on_offline_port_returns_busy(self):
+        bridge, protocol, transport = self._make_bridge_with_protocol()
+        protocol.registered_calls.add('SRC')
+        protocol.data_received(make_frame(0, ord('C'), b'SRC', b'DST'))
+        # Should get a 'd' frame with BUSY
+        calls = transport.write.call_args_list
+        assert len(calls) >= 1
+        resp = parse_frame(calls[0][0][0])
+        assert resp['kind'] == 'd'
+        assert b'BUSY' in resp['data']
+
+    async def test_unproto_on_offline_port_silently_dropped(self):
+        bridge, protocol, transport = self._make_bridge_with_protocol()
+        protocol.data_received(make_frame(0, ord('M'), b'SRC', b'DST', b'hello'))
+        bridge.kiss_clients[0].send.assert_not_called()
+        transport.write.assert_not_called()
+
+    async def test_invalid_port_silently_ignored(self):
+        bridge, protocol, transport = self._make_bridge_with_protocol(port_count=1)
+        protocol.data_received(make_frame(5, ord('M'), b'SRC', b'DST', b'hello'))
+        bridge.kiss_clients[0].send.assert_not_called()
+        transport.write.assert_not_called()
+
+    def test_port_went_offline_disconnects_sessions(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1',
+                           'port': '8001', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
+        bridge = Bridge(config)
+        bridge.kiss_clients[0] = Mock()
+        bridge.kiss_clients[0].online = True
+        bridge.kiss_client = bridge.kiss_clients[0]
+
+        # Create an active connection
+        conn = bridge.get_or_create_connection(0, 'LOCAL', 'REMOTE')
+        conn.state = 'CONNECTED'
+        conn.owner = Mock()
+
+        bridge._port_went_offline(0)
+
+        # Connection should be removed
+        assert bridge.get_connection(0, 'LOCAL', 'REMOTE') is None
+        # Owner should have received disconnect notification
+        conn.owner.send_frame.assert_called_once()
+        args = conn.owner.send_frame.call_args[0]
+        assert args[1] == ord('d')
+        assert b'DISCONNECTED' in args[4]
 
 
 if __name__ == '__main__':

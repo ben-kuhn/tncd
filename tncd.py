@@ -167,6 +167,13 @@ class AGWPEServerProtocol(asyncio.Protocol):
             print(f"  [AGWPE RX] '{kind_ch}'  port={port}"
                   f"  {from_str} -> {to_str}  {len(data)} bytes")
 
+        # Validate port number for frame types that route to a specific port
+        _routed_kinds = {b'M', b'V', b'C', b'c', b'D', b'd', b'K', b'g', b'y', b'Y'}
+        if datakind_bytes in _routed_kinds:
+            if port >= self.bridge.config.port_count:
+                logger.debug(f"Ignoring frame for invalid port {port}")
+                return
+
         if datakind_bytes == b'P':
             logger.debug(f"LOGIN from={from_str!r} (accepted)")
 
@@ -229,6 +236,11 @@ class AGWPEServerProtocol(asyncio.Protocol):
 
         elif datakind_bytes == b'C':
             # Initiate AX.25 connection: send SABM to TNC.
+            if not self.bridge.kiss_clients[port].online:
+                logger.info(f"CONNECT on offline port {port}: BUSY")
+                busy_msg = f'*** BUSY From {from_str}\r'.encode()
+                self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
+                return
             logger.info(f"CONNECT     {from_str} -> {to_str}")
             conn = self.bridge.get_or_create_connection(port, from_str, to_str)
             conn.owner = self
@@ -922,6 +934,25 @@ class Bridge:
         if conn:
             self._cancel_t1(conn)
             self._cancel_t2(conn)
+
+    def _port_went_offline(self, port_num):
+        """Called when a KISSClient loses its connection."""
+        logger.warning(f"Port {port_num} went offline")
+        self.kiss_clients[port_num].online = False
+        # Notify and remove active connections on this port
+        to_remove = [(k, conn) for k, conn in self.connections.items()
+                     if conn.port == port_num and conn.state in ('CONNECTED', 'CONNECTING')]
+        for key, conn in to_remove:
+            self._cancel_t1(conn)
+            self._cancel_t2(conn)
+            if conn.owner:
+                msg = f'*** DISCONNECTED From {conn.remote}\r'.encode()
+                try:
+                    conn.owner.send_frame(port_num, ord('d'),
+                                          conn.local.encode(), conn.remote.encode(), msg)
+                except Exception:
+                    pass
+            del self.connections[key]
 
     def _log_ax25(self, frame, direction):
         """Print per-frame AX.25 info when -v or -vv is active.
