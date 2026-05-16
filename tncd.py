@@ -1539,30 +1539,141 @@ class Bridge:
                     logger.error(f"Error sending 'S' to client: {e}")
 
 
+class PortConfig:
+    """Wrapper around ConfigParser providing multi-port access.
+
+    Numbered sections [client.0], [client.1], ... define ports.
+    Backward-compatible: config['client'] and config.get('client', ...) map
+    to port 0's section so existing Bridge/KISSClient code continues to work.
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        # Ordered list of section names for each port index (e.g. 'client.0')
+        self._ports = {}   # int -> section name
+        self._kiss  = {}   # int -> section name (may be absent for some ports)
+        for section in raw.sections():
+            if section.startswith('client.'):
+                try:
+                    idx = int(section[len('client.'):])
+                    self._ports[idx] = section
+                except ValueError:
+                    pass
+            elif section.startswith('kiss.'):
+                try:
+                    idx = int(section[len('kiss.'):])
+                    self._kiss[idx] = section
+                except ValueError:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Multi-port API
+    # ------------------------------------------------------------------
+
+    @property
+    def port_count(self):
+        return len(self._ports)
+
+    def port_config(self, n):
+        """Return dict of config values for port N (from [client.N])."""
+        section = self._ports[n]
+        return {k: v for k, v in self._raw.items(section)
+                if k not in self._raw.defaults()}
+
+    def kiss_config(self, n):
+        """Return dict of KISS config values for port N, or {} if none."""
+        if n not in self._kiss:
+            return {}
+        section = self._kiss[n]
+        return {k: v for k, v in self._raw.items(section)
+                if k not in self._raw.defaults()}
+
+    def port_name(self, n):
+        """Human-readable name for port N."""
+        section = self._ports.get(n)
+        if section and self._raw.has_option(section, 'name'):
+            return self._raw.get(section, 'name')
+        return f"Port {n}"
+
+    # ------------------------------------------------------------------
+    # Backward-compatible delegation (map 'client'/'kiss' to port 0)
+    # ------------------------------------------------------------------
+
+    def _resolve_section(self, section):
+        if section == 'client' and self._ports:
+            return self._ports[0]
+        if section == 'kiss' and 0 in self._kiss:
+            return self._kiss[0]
+        return section
+
+    def get(self, section, key, **kwargs):
+        return self._raw.get(self._resolve_section(section), key, **kwargs)
+
+    def getint(self, section, key, **kwargs):
+        return self._raw.getint(self._resolve_section(section), key, **kwargs)
+
+    def getfloat(self, section, key, **kwargs):
+        return self._raw.getfloat(self._resolve_section(section), key, **kwargs)
+
+    def getboolean(self, section, key, **kwargs):
+        return self._raw.getboolean(self._resolve_section(section), key, **kwargs)
+
+    def has_option(self, section, key):
+        return self._raw.has_option(self._resolve_section(section), key)
+
+    def has_section(self, section):
+        return self._raw.has_section(self._resolve_section(section))
+
+    def __getitem__(self, key):
+        return self._raw[self._resolve_section(key)]
+
+    def __contains__(self, key):
+        return self._resolve_section(key) in self._raw
+
+
 def load_config(args):
     config = configparser.ConfigParser()
     config.add_section("server")
-    config.add_section("client")
-    config.add_section("kiss")
-    config.add_section("ax25")
     config["server"]["listen_host"] = "0.0.0.0"
     config["server"]["listen_port"] = "8000"
     config["server"]["callsign"]    = "AGWPE"
-    config["client"]["type"]        = "serial"
-    config["client"]["device"]      = "/dev/ttyUSB0"
-    config["client"]["serial_baudrate"] = "9600"
-    config["client"]["ota_baudrate"]    = "1200"
-    config["kiss"]["tx_delay"]      = "40"
-    config["kiss"]["persistence"]   = "63"
-    config["kiss"]["slot_time"]     = "20"
-    config["kiss"]["tx_tail"]       = "30"
-    config["kiss"]["full_duplex"]   = "0"
 
     if args.config:
         config_file = Path(args.config)
         if config_file.exists():
             config.read(config_file)
             logger.info(f"Loaded config from {args.config}")
+
+    # --- Detect bare [client] / [kiss] sections and migrate to numbered form ---
+    if config.has_section("client") and not any(
+            s.startswith("client.") for s in config.sections()):
+        logger.warning(
+            "[client] section is deprecated; rename to [client.0]")
+        config.add_section("client.0")
+        for k, v in config.items("client"):
+            if k not in config.defaults():
+                config.set("client.0", k, v)
+        config.remove_section("client")
+
+    if config.has_section("kiss") and not any(
+            s.startswith("kiss.") for s in config.sections()):
+        logger.warning(
+            "[kiss] section is deprecated; rename to [kiss.0]")
+        config.add_section("kiss.0")
+        for k, v in config.items("kiss"):
+            if k not in config.defaults():
+                config.set("kiss.0", k, v)
+        config.remove_section("kiss")
+
+    # --- Apply CLI overrides to port 0 ---
+    # Ensure [client.0] exists if no port sections exist yet (CLI-only usage)
+    if not any(s.startswith("client.") for s in config.sections()):
+        config.add_section("client.0")
+        # Set defaults for port 0
+        config["client.0"]["type"]             = "serial"
+        config["client.0"]["device"]           = "/dev/ttyUSB0"
+        config["client.0"]["serial_baudrate"]  = "9600"
+        config["client.0"]["ota_baudrate"]     = "1200"
 
     if args.listen_host:
         config["server"]["listen_host"] = args.listen_host
@@ -1571,19 +1682,73 @@ def load_config(args):
     if args.callsign:
         config["server"]["callsign"] = args.callsign
     if args.kiss_type:
-        config["client"]["type"] = args.kiss_type
+        config["client.0"]["type"] = args.kiss_type
     if args.kiss_device:
-        config["client"]["device"] = args.kiss_device
+        config["client.0"]["device"] = args.kiss_device
     if args.kiss_host:
-        config["client"]["host"] = args.kiss_host
+        config["client.0"]["host"] = args.kiss_host
     if args.kiss_port:
-        config["client"]["port"] = str(args.kiss_port)
+        config["client.0"]["port"] = str(args.kiss_port)
     if args.baudrate:
-        config["client"]["serial_baudrate"] = str(args.baudrate)
+        config["client.0"]["serial_baudrate"] = str(args.baudrate)
     if getattr(args, 'ota_baudrate', None):
-        config["client"]["ota_baudrate"] = str(args.ota_baudrate)
+        config["client.0"]["ota_baudrate"] = str(args.ota_baudrate)
 
-    return config
+    # --- Validate ---
+    def _parse_port_idx(s, prefix):
+        try:
+            return int(s[len(prefix):])
+        except ValueError:
+            return None
+
+    port_sections = sorted(
+        (idx, s)
+        for s in config.sections()
+        if s.startswith("client.")
+        for idx in [_parse_port_idx(s, "client.")]
+        if idx is not None
+    )
+
+    if not port_sections:
+        logger.error("No [client.N] sections found in config. "
+                     "Define at least [client.0].")
+        sys.exit(1)
+
+    # Contiguous numbering from 0
+    expected = list(range(len(port_sections)))
+    actual   = [idx for idx, _ in port_sections]
+    if actual != expected:
+        logger.error(
+            f"Port numbering must be contiguous starting from 0. "
+            f"Found ports: {actual}")
+        sys.exit(1)
+
+    # Required fields per connection type
+    _REQUIRED = {
+        "bluetooth": ["bdaddr"],
+        "serial":    ["device"],
+        "tcp":       ["host", "port"],
+    }
+    for idx, section in port_sections:
+        ctype = config.get(section, "type", fallback=None)
+        if not ctype:
+            logger.error(f"[{section}] missing required 'type' field")
+            sys.exit(1)
+        if ctype not in _REQUIRED:
+            logger.error(
+                f"[{section}] invalid type '{ctype}'. "
+                f"Must be one of: {', '.join(sorted(_REQUIRED))}"
+            )
+            sys.exit(1)
+        required = _REQUIRED.get(ctype, [])
+        missing = [f for f in required if not config.has_option(section, f)]
+        if missing:
+            logger.error(
+                f"[{section}] type={ctype} is missing required field(s): "
+                f"{', '.join(missing)}")
+            sys.exit(1)
+
+    return PortConfig(config)
 
 
 def main():

@@ -8,10 +8,13 @@ import socket
 import struct
 from unittest.mock import Mock, MagicMock, patch
 
+import os
+import tempfile
+
 from tncd import (
     AGWPEServerProtocol, BluetoothKISS, Bridge, Connection, KISSClient,
     AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, DEFAULT_MAX_WINDOW,
-    DEFAULT_N2_RETRY, load_config,
+    DEFAULT_N2_RETRY, load_config, PortConfig,
 )
 
 # ---------------------------------------------------------------------------
@@ -1585,6 +1588,260 @@ class TestBluetoothReconnect:
         assert len(attempts) == 3
         client.connection.stop()
         client._test_s2.close()
+
+
+# ---------------------------------------------------------------------------
+# Multi-port config
+# ---------------------------------------------------------------------------
+
+def _write_ini(content):
+    """Write content to a NamedTemporaryFile, return path. Caller must unlink."""
+    f = tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False)
+    f.write(content)
+    f.close()
+    return f.name
+
+
+class TestMultiPortConfig:
+    def test_numbered_sections_parsed(self):
+        path = _write_ini("""
+[server]
+listen_port = 8000
+
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[client.1]
+type = tcp
+host = 192.168.1.10
+port = 8001
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.port_count == 2
+            p0 = cfg.port_config(0)
+            assert p0['type'] == 'serial'
+            assert p0['device'] == '/dev/ttyUSB0'
+            p1 = cfg.port_config(1)
+            assert p1['type'] == 'tcp'
+            assert p1['host'] == '192.168.1.10'
+        finally:
+            os.unlink(path)
+
+    def test_bare_client_section_treated_as_port0_with_warning(self):
+        path = _write_ini("""
+[client]
+type = serial
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with patch('tncd.logger') as mock_logger:
+                cfg = load_config(args)
+                mock_logger.warning.assert_called()
+                warning_msg = mock_logger.warning.call_args[0][0]
+                assert '[client]' in warning_msg
+            assert cfg.port_count == 1
+            assert cfg.port_config(0)['type'] == 'serial'
+        finally:
+            os.unlink(path)
+
+    def test_kiss_n_sections_provide_per_port_kiss_params(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[kiss.0]
+tx_delay = 55
+persistence = 50
+
+[client.1]
+type = tcp
+host = 10.0.0.1
+port = 8100
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            k0 = cfg.kiss_config(0)
+            assert k0['tx_delay'] == '55'
+            assert k0['persistence'] == '50'
+            # Port 1 has no kiss section
+            assert cfg.kiss_config(1) == {}
+        finally:
+            os.unlink(path)
+
+    def test_port_name_configured(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+name = VHF Modem
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.port_name(0) == 'VHF Modem'
+        finally:
+            os.unlink(path)
+
+    def test_port_name_default(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.port_name(0) == 'Port 0'
+        finally:
+            os.unlink(path)
+
+    def test_non_contiguous_ports_exits(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[client.2]
+type = serial
+device = /dev/ttyUSB1
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_no_client_sections_exits(self):
+        """A config file with [client] sections that have no valid int suffix
+        leaves port_sections empty after migration, triggering sys.exit(1).
+        We simulate this by writing a config with a [client.notanumber] section
+        which load_config cannot interpret as a port index."""
+        path = _write_ini("""
+[server]
+listen_port = 8000
+
+[client.notanumber]
+type = serial
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_type_exits(self):
+        """Unknown type value exits with error."""
+        path = _write_ini("""
+[client.0]
+type = foobar
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_missing_type_exits(self):
+        """Section with no type field exits with error."""
+        path = _write_ini("""
+[client.0]
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_backward_compat_client_access(self):
+        """config['client'] and config.get('client', ...) map to port 0."""
+        path = _write_ini("""
+[client.0]
+type = tcp
+host = 10.0.0.1
+port = 8001
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.get('client', 'type') == 'tcp'
+            assert cfg['client']['host'] == '10.0.0.1'
+        finally:
+            os.unlink(path)
+
+    def test_backward_compat_kiss_access(self):
+        """config['kiss'] and config.get('kiss', ...) map to kiss.0."""
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[kiss.0]
+tx_delay = 77
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.get('kiss', 'tx_delay') == '77'
+            assert cfg['kiss']['tx_delay'] == '77'
+        finally:
+            os.unlink(path)
 
 
 if __name__ == '__main__':
