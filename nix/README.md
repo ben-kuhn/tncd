@@ -92,6 +92,48 @@ services.tncd = {
 };
 ```
 
+## Multi-port configuration
+
+Configure multiple TNCs and select the active one from your AGWPE client:
+
+```nix
+services.tncd = {
+  enable = true;
+  bluetooth.enable = true;
+  settings = {
+    server = {
+      listen_host = "0.0.0.0";
+      listen_port = 8000;
+      callsign = "N0CALL";
+    };
+    "client.0" = {
+      name = "TNC3 Mobilinkd (2m)";
+      type = "bluetooth";
+      bdaddr = "34:81:F4:3D:98:4B";
+      ota_baudrate = 1200;
+    };
+    "client.1" = {
+      name = "TS-2000 (HF)";
+      type = "serial";
+      device = "/dev/ttyUSB0";
+      serial_baudrate = 57600;
+      ota_baudrate = 1200;
+    };
+    "client.2" = {
+      name = "Direwolf (testing)";
+      type = "tcp";
+      host = "127.0.0.1";
+      port = 8001;
+      ota_baudrate = 1200;
+    };
+    "kiss.1".tx_delay = 80;
+  };
+};
+```
+
+Ports are numbered starting at 0 and must be contiguous. Each port appears
+in the AGWPE client's port selector with its configured `name`.
+
 ## KISS mode init string (serial TNCs)
 
 For TNCs that need a command to enter KISS mode (e.g. Kantronics KPC-3):
