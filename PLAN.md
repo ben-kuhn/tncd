@@ -62,6 +62,17 @@ Full AX.25 layer 2 implementation for KISS TNCs:
 - DISC/DM handling in both directions
 - Correct AX.25 C/R (command/response) bits on all frame types
 
+### Milestone 4: Native Bluetooth SPP (COMPLETE)
+Direct Bluetooth SPP connection via BlueZ D-Bus Profile API:
+
+- Register SPP profile via `ProfileManager1`, receive connected fd via `NewConnection`
+- Auto-detect RFCOMM channel via SDP (no manual configuration needed)
+- Disconnect existing BLE auto-connection before SPP connect (dual-mode devices)
+- Auto-reconnect with configurable exponential backoff
+- SABM retransmission via T1 timer during connection setup (AX.25 6.3.1)
+- Optional `dbus-python`/`PyGObject` import (only when `type = bluetooth`)
+- Deprecates `tncd-rfcomm` helper
+
 ## systemd Service
 Type: `simple`
 User: configurable

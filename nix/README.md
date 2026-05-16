@@ -44,12 +44,13 @@ This creates a `tncd` system user (with `dialout` group access), generates
 
 ## Bluetooth TNC
 
-Enable the rfcomm manager alongside the main bridge:
+Enable Bluetooth support to pull in `dbus-python` and `PyGObject` and add
+the service user to the `bluetooth` group:
 
 ```nix
 services.tncd = {
   enable = true;
-  bluetooth.enable = true;   # also starts tncd-rfcomm.service
+  bluetooth.enable = true;   # adds D-Bus/GLib deps, bluetooth group
   settings = {
     server = {
       listen_host = "0.0.0.0";
@@ -57,25 +58,27 @@ services.tncd = {
       callsign = "N0CALL";
     };
     client = {
-      type = "serial";
-      device = "/dev/rfcomm0";
-      serial_baudrate = 9600;
-      ota_baudrate = 1200;
-    };
-    bluetooth = {
-      enabled = true;
-      bind_dev = "/dev/rfcomm0";
+      type = "bluetooth";
       bdaddr = "AA:BB:CC:DD:EE:FF";
-      channel = 1;
-      mode = "watch";
-      retry_delay = 5;
+      ota_baudrate = 1200;
+      # channel = 6;            # optional, auto-detected via SDP
+      # reconnect = true;       # auto-reconnect (default)
+      # reconnect_delay = 5;    # initial delay seconds (default)
+      # reconnect_max_delay = 60;  # max delay seconds (default)
     };
   };
 };
 ```
 
-`tncd-rfcomm.service` runs as root (required for `rfcomm` commands) and will
-start before `tncd.service`.
+Pair and trust the TNC before starting the service:
+
+```bash
+bluetoothctl pair AA:BB:CC:DD:EE:FF
+bluetoothctl trust AA:BB:CC:DD:EE:FF
+```
+
+tncd connects to the TNC directly via the BlueZ D-Bus Profile API — no
+external tools like `rfcomm` needed.
 
 ## Existing config file
 
@@ -114,4 +117,4 @@ services.tncd.settings.client = {
 | `services.tncd.settings` | `{}` | Nix-generated INI config |
 | `services.tncd.user` | `"tncd"` | Service user |
 | `services.tncd.group` | `"tncd"` | Service group |
-| `services.tncd.bluetooth.enable` | `false` | Also run rfcomm manager |
+| `services.tncd.bluetooth.enable` | `false` | Add Bluetooth SPP deps and bluetooth group |

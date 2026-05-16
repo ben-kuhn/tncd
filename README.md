@@ -313,8 +313,8 @@ systemctl daemon-reload
 systemctl enable --now tncd
 ```
 
-When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
-`tncd.service` so the bridge starts after the rfcomm device is ready.
+For Bluetooth TNCs, tncd handles the connection directly — no separate
+service is needed. Just ensure `bluetooth.service` is running.
 
 ## Compatibility
 
@@ -334,8 +334,8 @@ When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
 These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
 
 - [x] BTECH UV-Pro/Radioddity GA-5WB/Vero NR N76 (Bluetooth)
-- [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A. Bluetooth still needs testing.
-- [x] Mobilinkd TNC3 (USB). Bluetooth still needs testing.
+- [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A
+- [x] Mobilinkd TNC3 (Bluetooth SPP) — OTA-verified at 1200 baud via native D-Bus SPP, full Winlink CMS round-trip with 10KB attachment
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
