@@ -210,6 +210,7 @@
     <a href="/">Home</a>
     <a href="https://github.com/ben-kuhn/tncd">GitHub</a>
     <a href="https://github.com/ben-kuhn/tncd/releases">Releases</a>
+    <a href="/changelog.html">Changelog</a>
     <a href="https://github.com/ben-kuhn/tncd/blob/main/COPYING">GPL-3.0</a>
   </div>
 </header>
@@ -636,14 +637,22 @@ python tncd.py -c tncd.ini</code></pre>
     <h2>Bluetooth TNC Setup</h2>
 
     <p>
-      If your TNC connects over Bluetooth (like the BTECH UV-Pro or Mobilinkd), there's an
-      extra step: you need to set up an RFCOMM serial connection before tncd can talk to it.
-      The <code>tncd-rfcomm</code> helper handles this for you.
+      If your TNC connects over Bluetooth (like the Mobilinkd TNC3/TNC4), tncd can connect
+      to it directly using the BlueZ D-Bus Profile API &mdash; no external tools like
+      <code>rfcomm</code> needed. tncd handles the SPP (Serial Port Profile) connection,
+      auto-detects the RFCOMM channel via SDP, and reconnects automatically if the link drops.
     </p>
+
+    <div class="note">
+      <strong>Linux only:</strong> Native Bluetooth support uses the BlueZ D-Bus API, which is
+      Linux-specific. On macOS, Bluetooth TNCs appear as <code>/dev/tty.*</code> serial devices
+      &mdash; use <code>type = serial</code> instead. On Windows (WSL), use the COM port
+      assigned by Windows.
+    </div>
 
     <h3>Step 1: Pair your TNC</h3>
     <p>
-      First, make sure your TNC is paired with your computer. Turn on the TNC and put it in
+      First, make sure your TNC is paired and trusted. Turn on the TNC and put it in
       pairing mode (check your TNC's manual), then pair it from your Linux system:
     </p>
     <pre><code># Open the Bluetooth control tool
@@ -661,81 +670,78 @@ trust AA:BB:CC:DD:EE:FF
 exit</code></pre>
     <p>
       Replace <code>AA:BB:CC:DD:EE:FF</code> throughout this guide with your TNC's actual
-      Bluetooth address. You only need to pair once &mdash; your system will remember the
-      device.
+      Bluetooth address. You only need to pair and trust once &mdash; your system will
+      remember the device.
     </p>
     <p>
       If you've already paired but don't remember the address, you can list paired devices:
     </p>
     <pre><code>bluetoothctl devices</code></pre>
 
-    <h3>Step 2: Configure the Bluetooth section</h3>
-    <p>Add these settings to your <code>tncd.ini</code>, replacing
-      <code>AA:BB:CC:DD:EE:FF</code> with the Bluetooth address you found in Step 1:</p>
-    <pre><code>[client]
-type = serial
-device = /dev/rfcomm0
-serial_baudrate = 9600
-ota_baudrate = 1200
+    <h3>Step 2: Configure Bluetooth in tncd.ini</h3>
+    <p>Set <code>type = bluetooth</code> and provide the Bluetooth address:</p>
+    <pre><code>[server]
+listen_host = 127.0.0.1
+listen_port = 8000
+callsign = N0CALL
 
-[bluetooth]
-enabled = true
-bind_dev = /dev/rfcomm0
+[client]
+type = bluetooth
 bdaddr = AA:BB:CC:DD:EE:FF
-channel = 1
-mode = watch
-retry_delay = 5</code></pre>
+ota_baudrate = 1200</code></pre>
     <table>
-      <tr><th>Setting</th><th>What it does</th></tr>
-      <tr>
-        <td><code>enabled</code></td>
-        <td>Set to <code>true</code> to enable Bluetooth management.</td>
-      </tr>
-      <tr>
-        <td><code>bind_dev</code></td>
-        <td>The RFCOMM device that will be created. <code>/dev/rfcomm0</code> is standard.</td>
-      </tr>
+      <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
       <tr>
         <td><code>bdaddr</code></td>
-        <td>Your TNC's Bluetooth address.</td>
+        <td>Your TNC's Bluetooth address (required).</td>
+        <td>&mdash;</td>
       </tr>
       <tr>
-        <td><code>channel</code></td>
-        <td>RFCOMM channel number. Most TNCs use <code>1</code>. Mobilinkd TNC3 and
-          TNC4 use channel <code>2</code>.</td>
+        <td><code>ota_baudrate</code></td>
+        <td>Over-the-air baud rate for T1/T2 timer calculation.</td>
+        <td><code>1200</code></td>
       </tr>
       <tr>
-        <td><code>mode</code></td>
-        <td><code>watch</code> automatically reconnects if the Bluetooth link drops.
-          Use <code>connect</code> for a one-shot connection.</td>
+        <td><code>reconnect</code></td>
+        <td>Auto-reconnect if the Bluetooth link drops.</td>
+        <td><code>true</code></td>
       </tr>
       <tr>
-        <td><code>retry_delay</code></td>
-        <td>Seconds to wait before reconnecting after a drop (only in watch mode).</td>
+        <td><code>reconnect_delay</code></td>
+        <td>Initial delay (seconds) before reconnecting.</td>
+        <td><code>5</code></td>
+      </tr>
+      <tr>
+        <td><code>reconnect_max_delay</code></td>
+        <td>Maximum delay with exponential backoff.</td>
+        <td><code>60</code></td>
       </tr>
     </table>
     <p>
-      Notice that <code>[client]</code> still says <code>type = serial</code> and points at
-      <code>/dev/rfcomm0</code>. That's because the Bluetooth RFCOMM connection looks like a
-      regular serial port to tncd.
+      The RFCOMM channel is auto-detected via SDP. If your TNC requires a specific channel,
+      you can set <code>channel = 6</code> (e.g. Mobilinkd TNC3 uses channel 6).
     </p>
 
-    <h3>Step 3: Start the rfcomm manager</h3>
+    <h3>Step 3: Install Bluetooth dependencies</h3>
     <p>
-      The rfcomm manager needs to run <strong>before</strong> tncd, because it creates the
-      <code>/dev/rfcomm0</code> device that tncd connects to. It also disconnects any
-      Bluetooth audio profiles first (some TNCs connect as audio devices by default, which
-      blocks the serial channel).
+      The Bluetooth feature requires <code>dbus-python</code> and <code>PyGObject</code>.
+      These are included automatically when installing from packages. If running from source:
     </p>
-    <pre><code># Start the rfcomm manager (needs root for Bluetooth access)
-sudo tncd-rfcomm -c /etc/tncd.ini
-
-# In another terminal, start tncd
-tncd -c /etc/tncd.ini</code></pre>
+    <pre><code>pip install dbus-python PyGObject</code></pre>
     <p>
-      In <code>watch</code> mode, <code>tncd-rfcomm</code> stays running and automatically
-      reconnects if the TNC turns off or goes out of range. For long-term use, run both as
-      services (see below).
+      Your user also needs to be in the <code>bluetooth</code> group:
+    </p>
+    <pre><code>sudo gpasswd -a $USER bluetooth</code></pre>
+    <p>Log out and back in for the group change to take effect.</p>
+
+    <h3>Step 4: Run tncd</h3>
+    <p>
+      Just start tncd normally &mdash; it handles the Bluetooth connection directly:
+    </p>
+    <pre><code>tncd -c /etc/tncd.ini</code></pre>
+    <p>
+      You should see log messages confirming the SPP profile was registered and the connection
+      established. If the TNC is off or out of range, tncd will retry automatically.
     </p>
   </section>
 
@@ -770,18 +776,13 @@ sudo systemctl enable tncd</code></pre>
     <p>Or do both at once:</p>
     <pre><code>sudo systemctl enable --now tncd</code></pre>
 
-    <h3>Bluetooth Service</h3>
+    <h3>Bluetooth</h3>
     <p>
-      If you're using a Bluetooth TNC, you also need to run the rfcomm manager service.
-      It must start before tncd so the Bluetooth serial device is ready:
+      No extra service is needed for Bluetooth TNCs &mdash; tncd handles the connection
+      directly. Just make sure Bluetooth is enabled on your system:
     </p>
-    <pre><code># Enable and start both services
-sudo systemctl enable --now tncd-rfcomm
+    <pre><code>sudo systemctl enable --now bluetooth
 sudo systemctl enable --now tncd</code></pre>
-    <p>
-      The package already configures tncd to wait for the rfcomm manager, so they'll start
-      in the right order.
-    </p>
 
     <h3>Checking Status</h3>
     <p>To see if tncd is running and whether there are any errors:</p>
@@ -800,10 +801,7 @@ sudo systemctl enable --now tncd</code></pre>
 sudo journalctl -u tncd --no-pager -n 50
 
 # Follow the log in real time (like tail -f)
-sudo journalctl -u tncd -f
-
-# Show rfcomm manager logs
-sudo journalctl -u tncd-rfcomm --no-pager -n 50</code></pre>
+sudo journalctl -u tncd -f</code></pre>
     <p>
       The <code>-u tncd</code> part filters the log to only show tncd output. The
       <code>-n 50</code> shows the last 50 lines. Press <code>Ctrl+C</code> to stop
@@ -863,13 +861,17 @@ sudo systemctl disable tncd</code></pre>
     <h3>Bluetooth TNC won't connect</h3>
     <ul>
       <li>Make sure the TNC is powered on and in range.</li>
-      <li>Check that it's paired: run <code>bluetoothctl info AA:BB:CC:DD:EE:FF</code> and
-        look for "Paired: yes".</li>
-      <li>Check the rfcomm manager logs:
-        <code>sudo journalctl -u tncd-rfcomm --no-pager -n 20</code></li>
-      <li>Some TNCs connect as an audio device first. The rfcomm manager handles this
-        automatically, but if you're having trouble, try manually disconnecting first:
-        <code>bluetoothctl disconnect AA:BB:CC:DD:EE:FF</code></li>
+      <li>Check that it's paired <strong>and trusted</strong>: run
+        <code>bluetoothctl info AA:BB:CC:DD:EE:FF</code> and look for "Paired: yes" and
+        "Trusted: yes".</li>
+      <li>Check tncd logs: <code>sudo journalctl -u tncd --no-pager -n 20</code></li>
+      <li>If you see <code>br-connection-page-timeout</code>, the TNC may have auto-connected
+        via BLE. tncd handles this automatically, but you can also try:
+        <code>bluetoothctl disconnect AA:BB:CC:DD:EE:FF</code> then restart tncd.</li>
+      <li>If you see <code>br-connection-key-missing</code>, re-pair the device:
+        <code>bluetoothctl remove AA:BB:CC:DD:EE:FF</code> then pair and trust again.</li>
+      <li>Make sure your user is in the <code>bluetooth</code> group:
+        <code>groups | grep bluetooth</code></li>
     </ul>
 
     <h3>Client application can't connect to tncd</h3>
