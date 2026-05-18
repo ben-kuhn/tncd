@@ -1,0 +1,78 @@
+# Copyright 2026 Gentoo Authors
+# Distributed under the terms of the GNU General Public License v3
+
+EAPI=8
+
+PYTHON_COMPAT=( python3_{11..13} )
+DISTUTILS_USE_PEP517=no
+inherit python-single-r1 systemd
+
+DESCRIPTION="AGWPE-to-KISS Translation Bridge for amateur radio"
+HOMEPAGE="https://github.com/ben-kuhn/tncd"
+
+MY_PV="${PV/_beta/-BETA}"
+SRC_URI="https://github.com/ben-kuhn/${PN}/archive/v${MY_PV}.tar.gz -> ${P}.tar.gz"
+S="${WORKDIR}/${PN}-${MY_PV}"
+
+LICENSE="GPL-3"
+SLOT="0"
+KEYWORDS="~amd64 ~arm ~arm64 ~riscv ~x86"
+IUSE="bluetooth"
+
+REQUIRED_USE="${PYTHON_REQUIRED_USE}"
+
+RDEPEND="
+	${PYTHON_DEPS}
+	$(python_gen_cond_dep '
+		dev-python/pyserial[${PYTHON_USEDEP}]
+	')
+	bluetooth? (
+		$(python_gen_cond_dep '
+			dev-python/dbus-python[${PYTHON_USEDEP}]
+			dev-python/pygobject[${PYTHON_USEDEP}]
+		')
+		net-wireless/bluez
+	)
+"
+# kiss3 and pyham-ax25 are not in the Gentoo tree; users must install
+# them manually or from an overlay.  Listed here for documentation.
+# dev-python/kiss3
+# dev-python/pyham-ax25
+
+src_install() {
+	python_fix_shebang tncd.py tncd-rfcomm
+
+	exeinto /usr/bin
+	newexe tncd.py tncd
+	newexe tncd-rfcomm tncd-rfcomm
+
+	insinto /etc
+	newins tncd.ini tncd.ini.example
+
+	systemd_dounit tncd.service
+	sed -i \
+		-e "s|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|" \
+		-e "/^WorkingDirectory=/d" \
+		"${D}$(systemd_get_systemunitdir)/tncd.service" || die
+
+	systemd_dounit tncd-rfcomm.service
+	sed -i \
+		-e "s|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|" \
+		-e "/^WorkingDirectory=/d" \
+		"${D}$(systemd_get_systemunitdir)/tncd-rfcomm.service" || die
+
+	dodoc README.md
+}
+
+pkg_postinst() {
+	elog "Copy /etc/tncd.ini.example to /etc/tncd.ini and edit for your setup."
+	elog ""
+	elog "kiss3 and pyham-ax25 are required but not in the Gentoo tree."
+	elog "Install them via pip in a venv or from an overlay:"
+	elog "  pip install kiss3 pyham-ax25"
+	if use bluetooth; then
+		elog ""
+		elog "For Bluetooth support, ensure the service user is in the"
+		elog "'bluetooth' group."
+	fi
+}
