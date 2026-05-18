@@ -73,6 +73,18 @@ Direct Bluetooth SPP connection via BlueZ D-Bus Profile API:
 - Optional `dbus-python`/`PyGObject` import (only when `type = bluetooth`)
 - Deprecates `tncd-rfcomm` helper
 
+### Milestone 5: Multi-Port / Multi-Modem Support (COMPLETE)
+Multiple KISS TNC connections managed simultaneously:
+
+- `[client.N]` numbered port sections with per-port config
+- `[kiss.N]` per-port KISS parameters (defaults if no section)
+- Per-port AX.25 state (connections, T1/T2 timers, window size derived from `ota_baudrate`)
+- AGWPE `G` frame reports port count and human-readable names
+- AGWPE `g` frame returns per-port KISS capabilities
+- Ports connect in parallel at startup; offline ports return BUSY for `C` frames
+- Port going offline disconnects active sessions with notification
+- Backward compatible: bare `[client]`/`[kiss]` treated as port 0 with deprecation warning
+
 ## systemd Service
 Type: `simple`
 User: configurable

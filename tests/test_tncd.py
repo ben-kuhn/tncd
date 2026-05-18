@@ -8,10 +8,13 @@ import socket
 import struct
 from unittest.mock import Mock, MagicMock, patch
 
+import os
+import tempfile
+
 from tncd import (
     AGWPEServerProtocol, BluetoothKISS, Bridge, Connection, KISSClient,
     AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, DEFAULT_MAX_WINDOW,
-    DEFAULT_N2_RETRY, load_config,
+    DEFAULT_N2_RETRY, load_config, PortConfig,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,10 +53,11 @@ def parse_frame(raw):
 
 def make_protocol():
     """Return (protocol, transport_mock, bridge_mock) ready for use."""
-    config = configparser.ConfigParser()
-    config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
-    config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-    config['kiss']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    raw = configparser.ConfigParser()
+    raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+    raw['client.0'] = {'type': 'serial', 'device': '/dev/null', 'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+    raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
 
     bridge = Mock()
     bridge.config = config
@@ -187,9 +191,9 @@ class TestPortCapsResponse:
     def test_port_number_echoed(self):
         """Response port field should match the requested port."""
         protocol, transport, _ = make_protocol()
-        protocol.data_received(make_frame(1, ord('g')))
+        protocol.data_received(make_frame(0, ord('g')))
         parsed = parse_frame(transport.write.call_args[0][0])
-        assert parsed['port'] == 1
+        assert parsed['port'] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +367,7 @@ class TestRawKissFrame:
         raw_ax25 = b'\x82\xa0\xa4\xa6@@`\xaeb\x82\x84\x86@a\x03\xf0hello'
         # pe format: 0x00 + raw_ax25
         protocol.data_received(make_frame(0, ord('K'), b'', b'', b'\x00' + raw_ax25))
-        bridge.send_to_kiss.assert_called_once_with(raw_ax25)
+        bridge.send_to_kiss.assert_called_once_with(0, raw_ax25)
 
     def test_k_raw_mode_toggle_produces_no_response(self):
         """'k' raw mode toggle: no response, no KISS forward."""
@@ -399,15 +403,20 @@ class TestKISSReceivePath:
     """Verify frames received from KISS are forwarded to monitoring clients."""
 
     def _make_bridge_with_client(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                             'callsign': 'N0CALL'}
-        config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-        config['kiss']   = {'tx_delay': '40', 'persistence': '63',
-                             'slot_time': '20', 'tx_tail': '30'}
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000',
+                           'callsign': 'N0CALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63',
+                           'slot_time': '20', 'tx_tail': '30'}
+        config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
         bridge = Bridge(config)
         # Mock out the kiss_client so we don't actually connect
-        bridge.kiss_client = Mock()
+        mock_kc = Mock()
+        mock_kc.online = True
+        bridge.kiss_clients[0] = mock_kc
+        bridge.kiss_client = mock_kc
         # Add a mock monitoring client
         client = Mock()
         client.monitoring = True
@@ -424,7 +433,7 @@ class TestKISSReceivePath:
             pid=0xF0,
             data=b'Hello',
         )
-        bridge.on_kiss_frame(b'\x00' + bytes(frame))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frame))
         client.send_frame.assert_called_once()
         args = client.send_frame.call_args[0]
         assert args[1] == ord('U')
@@ -440,7 +449,7 @@ class TestKISSReceivePath:
             pid=0xF0,
             data=info,
         )
-        bridge.on_kiss_frame(b'\x00' + bytes(frame))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frame))
         payload = client.send_frame.call_args[0][4]  # data arg
         assert b'\r' in payload
         header, data = payload.split(b'\r', 1)
@@ -459,7 +468,7 @@ class TestKISSReceivePath:
             pid=0xF0,
             data=info,
         )
-        bridge.on_kiss_frame(b'\x00' + bytes(frame))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frame))
         payload = client.send_frame.call_args[0][4]
         header = payload.split(b'\r', 1)[0].decode()
         m = re.search(r' Len=(\d+) ', header)
@@ -477,13 +486,13 @@ class TestKISSReceivePath:
             pid=0xF0,
             data=b'test',
         )
-        bridge.on_kiss_frame(b'\x00' + bytes(frame))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frame))
         client.send_frame.assert_not_called()
 
     def test_invalid_ax25_frame_does_not_crash(self):
         """Garbage from KISS must be logged and discarded without exception."""
         bridge, client = self._make_bridge_with_client()
-        bridge.on_kiss_frame(b'\xff\xff\xff')  # must not raise
+        bridge.on_kiss_frame(0, b'\xff\xff\xff')  # must not raise
 
 
 class TestBufferingAndReassembly:
@@ -521,74 +530,80 @@ class TestBufferingAndReassembly:
 # KISSClient
 # ---------------------------------------------------------------------------
 
+def _make_kiss_client(port_section_dict, kiss_section_dict=None):
+    """Helper: build a KISSClient with numbered sections."""
+    raw = configparser.ConfigParser()
+    raw['client.0'] = port_section_dict
+    if kiss_section_dict is not None:
+        raw['kiss.0'] = kiss_section_dict
+    return KISSClient(
+        port_num=0,
+        port_section='client.0',
+        kiss_section='kiss.0' if kiss_section_dict is not None else None,
+        raw_config=raw,
+    )
+
+
 class TestKISSClient:
     @pytest.mark.asyncio
     async def test_connect_serial(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
         with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
             await client.connect()
             mock_kiss.assert_called_once_with(port='/dev/ttyUSB0', speed=9600)
             mock_instance.start.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_connect_tcp(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'tcp', 'host': 'kiss.example.com', 'port': '8001'}
         with patch('tncd.kiss.TCPKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'tcp', 'host': 'kiss.example.com', 'port': '8001'})
             await client.connect()
             mock_kiss.assert_called_once_with(host='kiss.example.com', port=8001)
             mock_instance.start.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_send_data(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
         with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
             await client.connect()
             client.send(b'\x00\x01\x02')
             mock_instance.write.assert_called_once_with(b'\x00\x01\x02')
 
     @pytest.mark.asyncio
     async def test_close(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
         with patch('tncd.kiss.SerialKISS') as mock_kiss:
             mock_instance = MagicMock()
             mock_kiss.return_value = mock_instance
-            client = KISSClient(config)
+            client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
             await client.connect()
             client.close()
             mock_instance.stop.assert_called_once()
             assert client.connection is None
 
     def test_send_no_connection_is_noop(self):
-        config = configparser.ConfigParser()
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
         client.send(b'\x00\x01\x02')  # must not raise
 
     def test_kiss_params_extracted(self):
-        config = configparser.ConfigParser()
-        config.read_string('[kiss]\ntx_delay = 50\npersistence = 64\n')
-        client = KISSClient(config)
+        client = _make_kiss_client(
+            {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'},
+            {'tx_delay': '50', 'persistence': '64'},
+        )
         params = client._get_kiss_params()
         assert params['TX_DELAY'] == 50
         assert params['PERSISTENCE'] == 64
 
     def test_kiss_params_empty_section(self):
-        config = configparser.ConfigParser()
-        config.add_section('kiss')
-        client = KISSClient(config)
+        client = _make_kiss_client(
+            {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'},
+            {},
+        )
         assert client._get_kiss_params() == {}
 
 
@@ -598,9 +613,11 @@ class TestKISSClient:
 
 class TestBridge:
     def _make_bridge(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'MYCALL'}
-        config['client'] = {'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'}
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'MYCALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/ttyUSB0',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
         return Bridge(config)
 
     def test_init(self):
@@ -630,7 +647,8 @@ class TestBridge:
         bridge = self._make_bridge()
         mock_conn = MagicMock()
         bridge.kiss_client.connection = mock_conn
-        bridge.send_to_kiss(b'\x00\x01\x02')
+        bridge.kiss_client.online = True
+        bridge.send_to_kiss(0, b'\x00\x01\x02')
         mock_conn.write.assert_called_once_with(b'\x00\x01\x02')
 
 
@@ -640,12 +658,16 @@ class TestBridge:
 
 def make_real_protocol():
     """Return (protocol, transport, bridge) with a real Bridge and mocked KISS."""
-    config = configparser.ConfigParser()
-    config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
-    config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-    config['kiss']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    raw = configparser.ConfigParser()
+    raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+    raw['client.0'] = {'type': 'serial', 'device': '/dev/null', 'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+    raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+    config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
     bridge = Bridge(config)
-    bridge.kiss_client = Mock()
+    mock_kc = Mock()
+    mock_kc.online = True
+    bridge.kiss_clients[0] = mock_kc
+    bridge.kiss_client = mock_kc
     protocol = AGWPEServerProtocol(bridge)
     transport = Mock()
     transport.is_closing.return_value = False
@@ -743,7 +765,7 @@ class TestConnectedMode:
         # Remote ACKs all with RR N(R)=max_win
         rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                          control=ax25.Control(ax25.FrameType.RR, recv_seqno=max_win))
-        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rr))
         # The 3 queued frames should now be drained
         assert bridge.kiss_client.send.call_count == max_win + 3
         assert conn.unacked == 3
@@ -773,7 +795,7 @@ class TestConnectedMode:
         # Remote ACKs first 2 with RR N(R)=2
         rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                          control=ax25.Control(ax25.FrameType.RR, recv_seqno=2))
-        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rr))
         assert len(conn.retransmit_buf) == 1
         assert 2 in conn.retransmit_buf  # only the unacked one remains
 
@@ -789,7 +811,7 @@ class TestConnectedMode:
         # Remote sends REJ N(R)=1 (frame 0 was lost, retransmit from 1)
         rej = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.REJ, recv_seqno=1))
-        bridge.on_kiss_frame(b'\x00' + bytes(rej))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rej))
         # Frames with N(S)=1 and N(S)=2 should be retransmitted
         assert bridge.kiss_client.send.call_count == 3 + 2
 
@@ -807,7 +829,7 @@ class TestConnectedMode:
         rr_poll = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                              control=ax25.Control(ax25.FrameType.RR, recv_seqno=1,
                                                   poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(rr_poll))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rr_poll))
         # Poll response is deferred via call_soon — yield to let it run.
         await asyncio.sleep(0)
         # Should send: RR F=1 response + retransmit of frames 1 and 2 = 3 more
@@ -846,7 +868,7 @@ class TestConnectedMode:
         # ACK everything
         rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                          control=ax25.Control(ax25.FrameType.RR, recv_seqno=1))
-        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rr))
         assert conn.t1_handle is None
 
     def test_d_sends_disc(self):
@@ -894,12 +916,17 @@ class TestConnectedMode:
 class TestConnectedModeReceivePath:
 
     def _make_bridge(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
-        config['client'] = {'type': 'serial', 'device': '/dev/null', 'baudrate': '9600'}
-        config['kiss']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+        config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
         bridge = Bridge(config)
-        bridge.kiss_client = Mock()
+        mock_kc = Mock()
+        mock_kc.online = True
+        bridge.kiss_clients[0] = mock_kc
+        bridge.kiss_client = mock_kc
         return bridge
 
     def test_incoming_sabm_sends_ua(self):
@@ -907,7 +934,7 @@ class TestConnectedModeReceivePath:
         bridge = self._make_bridge()
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(sabm))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
         bridge.kiss_client.send.assert_called_once()
         ua = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
         assert ua.control.frame_type is ax25.FrameType.UA
@@ -921,7 +948,7 @@ class TestConnectedModeReceivePath:
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(sabm))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
         client.send_frame.assert_called_once()
         assert client.send_frame.call_args[0][1] == ord('C')
 
@@ -929,7 +956,7 @@ class TestConnectedModeReceivePath:
         bridge = self._make_bridge()
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(sabm))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
         conn = bridge.get_connection(0, 'W1ABC', 'W2DEF')
         assert conn is not None
         assert conn.state == 'CONNECTED'
@@ -943,7 +970,7 @@ class TestConnectedModeReceivePath:
         conn.owner = owner
         ua = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                         control=ax25.Control(ax25.FrameType.UA, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(ua))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(ua))
         owner.send_frame.assert_called_once()
         assert owner.send_frame.call_args[0][1] == ord('C')
         assert conn.state == 'CONNECTED'
@@ -957,7 +984,7 @@ class TestConnectedModeReceivePath:
         conn.owner = owner
         ua = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                         control=ax25.Control(ax25.FrameType.UA, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(ua))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(ua))
         owner.send_frame.assert_called_once()
         assert owner.send_frame.call_args[0][1] == ord('d')
         assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
@@ -971,7 +998,7 @@ class TestConnectedModeReceivePath:
         conn.owner = owner
         dm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                         control=ax25.Control(ax25.FrameType.DM, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(dm))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(dm))
         owner.send_frame.assert_called_once()
         assert owner.send_frame.call_args[0][1] == ord('d')
         assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
@@ -985,7 +1012,7 @@ class TestConnectedModeReceivePath:
         conn.owner = owner
         dm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                         control=ax25.Control(ax25.FrameType.DM, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(dm))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(dm))
         owner.send_frame.assert_called_once()
         assert owner.send_frame.call_args[0][1] == ord('d')
 
@@ -1000,7 +1027,7 @@ class TestConnectedModeReceivePath:
                             control=ax25.Control(ax25.FrameType.I, send_seqno=0,
                                                  recv_seqno=0, poll_final=True),
                             pid=0xF0, data=b'hello')
-        bridge.on_kiss_frame(b'\x00' + bytes(iframe))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
         sent_frames = [ax25.Frame.unpack(c[0][0]) for c in bridge.kiss_client.send.call_args_list]
         rr_frames = [f for f in sent_frames if f.control.frame_type is ax25.FrameType.RR]
         assert len(rr_frames) == 1
@@ -1017,7 +1044,7 @@ class TestConnectedModeReceivePath:
                             control=ax25.Control(ax25.FrameType.I, send_seqno=0,
                                                  recv_seqno=0, poll_final=False),
                             pid=0xF0, data=b'hello')
-        bridge.on_kiss_frame(b'\x00' + bytes(iframe))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
         sent_frames = [ax25.Frame.unpack(c[0][0]) for c in bridge.kiss_client.send.call_args_list]
         rr_frames = [f for f in sent_frames if f.control.frame_type is ax25.FrameType.RR]
         assert len(rr_frames) == 1
@@ -1036,7 +1063,7 @@ class TestConnectedModeReceivePath:
                                 control=ax25.Control(ax25.FrameType.I, send_seqno=ns,
                                                      recv_seqno=0, poll_final=False),
                                 pid=0xF0, data=f'data{ns}'.encode())
-            bridge.on_kiss_frame(b'\x00' + bytes(iframe))
+            bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
         sent_frames = [ax25.Frame.unpack(c[0][0]) for c in bridge.kiss_client.send.call_args_list]
         rr_frames = [f for f in sent_frames if f.control.frame_type is ax25.FrameType.RR]
         assert len(rr_frames) == 4
@@ -1053,7 +1080,7 @@ class TestConnectedModeReceivePath:
         iframe = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                             control=ax25.Control(ax25.FrameType.I, send_seqno=0, recv_seqno=0),
                             pid=0xF0, data=b'hello')
-        bridge.on_kiss_frame(b'\x00' + bytes(iframe))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
         owner.send_frame.assert_called_once()
         args = owner.send_frame.call_args[0]
         assert args[1] == ord('D')
@@ -1066,7 +1093,7 @@ class TestConnectedModeReceivePath:
         conn.state = 'CONNECTED'
         disc = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(disc))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(disc))
         bridge.kiss_client.send.assert_called_once()
         ua = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
         assert ua.control.frame_type is ax25.FrameType.UA
@@ -1080,7 +1107,7 @@ class TestConnectedModeReceivePath:
         conn.owner = owner
         disc = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(disc))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(disc))
         owner.send_frame.assert_called_once()
         assert owner.send_frame.call_args[0][1] == ord('d')
         assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
@@ -1091,7 +1118,7 @@ class TestConnectedModeReceivePath:
         bridge = self._make_bridge()
         sabme = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                            control=ax25.Control(ax25.FrameType.SABME, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(sabme))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabme))
         bridge.kiss_client.send.assert_called_once()
         dm = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
         assert dm.control.frame_type is ax25.FrameType.DM
@@ -1107,7 +1134,7 @@ class TestConnectedModeReceivePath:
         bridge.add_client(protocol)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(sabm))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
         conn = bridge.get_connection(0, 'W1ABC', 'W2DEF')
         assert conn is not None
         assert conn.owner is protocol
@@ -1120,7 +1147,7 @@ class TestConnectedModeReceivePath:
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
-        bridge.on_kiss_frame(b'\x00' + bytes(sabm))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
         msg = client.send_frame.call_args[0][4]
         assert b'CONNECTED To' in msg
 
@@ -1139,7 +1166,7 @@ class TestRNRHandling:
         # Receive RNR from remote
         rnr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                          control=ax25.Control(ax25.FrameType.RNR, recv_seqno=0))
-        bridge.on_kiss_frame(b'\x00' + bytes(rnr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rnr))
         assert conn.remote_busy
 
         # Queue data — should NOT be sent while remote is busy
@@ -1167,7 +1194,7 @@ class TestRNRHandling:
         # Receive RR from remote (clears busy)
         rr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                         control=ax25.Control(ax25.FrameType.RR, recv_seqno=0))
-        bridge.on_kiss_frame(b'\x00' + bytes(rr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rr))
         assert not conn.remote_busy
         # Queued frame should have been drained
         assert len(conn.outbound_queue) == 0
@@ -1182,7 +1209,7 @@ class TestRNRHandling:
 
         rej = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                          control=ax25.Control(ax25.FrameType.REJ, recv_seqno=0))
-        bridge.on_kiss_frame(b'\x00' + bytes(rej))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(rej))
         assert not conn.remote_busy
 
 
@@ -1274,7 +1301,7 @@ class TestFRMRHandling:
 
         frmr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.FRMR))
-        bridge.on_kiss_frame(b'\x00' + bytes(frmr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frmr))
 
         # Connection should be reset to CONNECTING
         conn = bridge.get_connection(0, 'W1ABC', 'W2DEF')
@@ -1295,7 +1322,7 @@ class TestFRMRHandling:
         bridge.kiss_client.send.reset_mock()
         frmr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.FRMR))
-        bridge.on_kiss_frame(b'\x00' + bytes(frmr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frmr))
 
         bridge.kiss_client.send.assert_called()
         sent = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
@@ -1310,7 +1337,7 @@ class TestFRMRHandling:
         bridge.kiss_client.send.reset_mock()
         frmr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.FRMR))
-        bridge.on_kiss_frame(b'\x00' + bytes(frmr))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frmr))
 
         # Should not send SABM since not in CONNECTED state
         for call in bridge.kiss_client.send.call_args_list:
@@ -1339,9 +1366,8 @@ class TestBluetoothKISS:
             bt.start()
             test_data = b'\x01\x02\x03'
             bt.write(test_data)
-            # Give the event loop a chance to flush the write
-            import time
-            time.sleep(0.05)
+            # Pump the event loop so call_soon_threadsafe write is flushed
+            bt.loop.run_until_complete(asyncio.sleep(0.05))
             received = s2.recv(1024)
             assert received[0:1] == b'\xc0'   # FEND
             assert received[-1:] == b'\xc0'    # FEND
@@ -1365,23 +1391,13 @@ class TestBluetoothConfig:
     """Test Bluetooth config parsing in KISSClient.connect()."""
 
     async def test_bluetooth_missing_bdaddr_raises(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'ota_baudrate': '1200'})
         with pytest.raises(Exception):
             await client.connect()
 
     async def test_bluetooth_missing_dbus_raises_runtime_error(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
         with patch.dict('sys.modules', {'dbus': None, 'dbus.service': None,
                                          'dbus.mainloop': None,
                                          'dbus.mainloop.glib': None}):
@@ -1389,36 +1405,23 @@ class TestBluetoothConfig:
                 await client.connect()
 
     async def test_bluetooth_channel_optional_defaults_none(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        assert config.get('client', 'channel', fallback=None) is None
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
+        assert client.config.get('client.0', 'channel', fallback=None) is None
 
     async def test_bluetooth_reconnect_defaults(self):
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        assert config.getboolean('client', 'reconnect', fallback=True) is True
-        assert config.getfloat('client', 'reconnect_delay', fallback=5.0) == 5.0
-        assert config.getfloat('client', 'reconnect_max_delay', fallback=60.0) == 60.0
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
+        assert client.config.getboolean('client.0', 'reconnect', fallback=True) is True
+        assert client.config.getfloat('client.0', 'reconnect_delay', fallback=5.0) == 5.0
+        assert client.config.getfloat('client.0', 'reconnect_max_delay', fallback=60.0) == 60.0
 
 
 class TestBluetoothConnect:
     async def test_connect_calls_register_and_connect_profile(self):
         """Verify D-Bus wiring: profile registered, ConnectProfile called."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
 
         mock_dbus = MagicMock()
         mock_glib = MagicMock()
@@ -1467,9 +1470,8 @@ class TestBluetoothFullFlow:
             test_frame = b'\x01\x02\x03\x04'
             bt.write(test_frame)
 
-            # Small delay for async transport to flush
-            import time
-            time.sleep(0.05)
+            # Pump the event loop so call_soon_threadsafe write is flushed
+            bt.loop.run_until_complete(asyncio.sleep(0.05))
 
             raw = s2.recv(1024)
             assert raw[0:1] == b'\xc0'   # FEND
@@ -1482,13 +1484,8 @@ class TestBluetoothFullFlow:
     def test_bluetooth_connection_lost_hook(self):
         """connection_lost hook fires when socket closes."""
         s1, s2 = socket.socketpair()
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
         client.connection = BluetoothKISS(s1)
         client.connection.start()
 
@@ -1505,14 +1502,9 @@ class TestBluetoothFullFlow:
 class TestBluetoothReconnect:
     async def test_connection_lost_triggers_reconnect(self):
         """When bluetooth socket closes and reconnect=true, reconnect loop starts."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200', 'reconnect': 'true',
-                            'reconnect_delay': '0.1', 'reconnect_max_delay': '0.2'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200', 'reconnect': 'true',
+                                    'reconnect_delay': '0.1', 'reconnect_max_delay': '0.2'})
         client._bt_reconnect = True
         client._bt_reconnect_delay = 0.1
         client._bt_reconnect_max_delay = 0.2
@@ -1530,13 +1522,8 @@ class TestBluetoothReconnect:
 
     async def test_reconnect_disabled_does_not_reconnect(self):
         """When reconnect=false, connection loss does not trigger reconnect."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200', 'reconnect': 'false'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200', 'reconnect': 'false'})
         client._bt_reconnect = False
 
         reconnect_called = False
@@ -1552,13 +1539,8 @@ class TestBluetoothReconnect:
 
     async def test_reconnect_loop_exponential_backoff(self):
         """Reconnect delay doubles on each failure up to max."""
-        config = configparser.ConfigParser()
-        config['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000',
-                            'callsign': 'N0CALL'}
-        config['client'] = {'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
-                            'ota_baudrate': '1200'}
-        config['kiss'] = {}
-        client = KISSClient(config)
+        client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
+                                    'ota_baudrate': '1200'})
         client._bt_reconnect = True
         client._bt_reconnect_delay = 0.05
         client._bt_reconnect_max_delay = 0.15
@@ -1585,6 +1567,473 @@ class TestBluetoothReconnect:
         assert len(attempts) == 3
         client.connection.stop()
         client._test_s2.close()
+
+
+# ---------------------------------------------------------------------------
+# Multi-port config
+# ---------------------------------------------------------------------------
+
+def _write_ini(content):
+    """Write content to a NamedTemporaryFile, return path. Caller must unlink."""
+    f = tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False)
+    f.write(content)
+    f.close()
+    return f.name
+
+
+class TestMultiPortConfig:
+    def test_numbered_sections_parsed(self):
+        path = _write_ini("""
+[server]
+listen_port = 8000
+
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[client.1]
+type = tcp
+host = 192.168.1.10
+port = 8001
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.port_count == 2
+            p0 = cfg.port_config(0)
+            assert p0['type'] == 'serial'
+            assert p0['device'] == '/dev/ttyUSB0'
+            p1 = cfg.port_config(1)
+            assert p1['type'] == 'tcp'
+            assert p1['host'] == '192.168.1.10'
+        finally:
+            os.unlink(path)
+
+    def test_bare_client_section_treated_as_port0_with_warning(self):
+        path = _write_ini("""
+[client]
+type = serial
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with patch('tncd.logger') as mock_logger:
+                cfg = load_config(args)
+                mock_logger.warning.assert_called()
+                warning_msg = mock_logger.warning.call_args[0][0]
+                assert '[client]' in warning_msg
+            assert cfg.port_count == 1
+            assert cfg.port_config(0)['type'] == 'serial'
+        finally:
+            os.unlink(path)
+
+    def test_kiss_n_sections_provide_per_port_kiss_params(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[kiss.0]
+tx_delay = 55
+persistence = 50
+
+[client.1]
+type = tcp
+host = 10.0.0.1
+port = 8100
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            k0 = cfg.kiss_config(0)
+            assert k0['tx_delay'] == '55'
+            assert k0['persistence'] == '50'
+            # Port 1 has no kiss section
+            assert cfg.kiss_config(1) == {}
+        finally:
+            os.unlink(path)
+
+    def test_port_name_configured(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+name = VHF Modem
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.port_name(0) == 'VHF Modem'
+        finally:
+            os.unlink(path)
+
+    def test_port_name_default(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.port_name(0) == 'Port 0'
+        finally:
+            os.unlink(path)
+
+    def test_non_contiguous_ports_exits(self):
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[client.2]
+type = serial
+device = /dev/ttyUSB1
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_no_client_sections_exits(self):
+        """A config file with [client] sections that have no valid int suffix
+        leaves port_sections empty after migration, triggering sys.exit(1).
+        We simulate this by writing a config with a [client.notanumber] section
+        which load_config cannot interpret as a port index."""
+        path = _write_ini("""
+[server]
+listen_port = 8000
+
+[client.notanumber]
+type = serial
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_type_exits(self):
+        """Unknown type value exits with error."""
+        path = _write_ini("""
+[client.0]
+type = foobar
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_missing_type_exits(self):
+        """Section with no type field exits with error."""
+        path = _write_ini("""
+[client.0]
+device = /dev/ttyUSB0
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            with pytest.raises(SystemExit):
+                load_config(args)
+        finally:
+            os.unlink(path)
+
+    def test_backward_compat_client_access(self):
+        """config['client'] and config.get('client', ...) map to port 0."""
+        path = _write_ini("""
+[client.0]
+type = tcp
+host = 10.0.0.1
+port = 8001
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.get('client', 'type') == 'tcp'
+            assert cfg['client']['host'] == '10.0.0.1'
+        finally:
+            os.unlink(path)
+
+    def test_backward_compat_kiss_access(self):
+        """config['kiss'] and config.get('kiss', ...) map to kiss.0."""
+        path = _write_ini("""
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+
+[kiss.0]
+tx_delay = 77
+""")
+        try:
+            args = argparse.Namespace(
+                config=path, listen_host=None, listen_port=None, callsign=None,
+                kiss_type=None, kiss_device=None, kiss_host=None,
+                kiss_port=None, baudrate=None,
+            )
+            cfg = load_config(args)
+            assert cfg.get('kiss', 'tx_delay') == '77'
+            assert cfg['kiss']['tx_delay'] == '77'
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Multi-port Bridge tests
+# ---------------------------------------------------------------------------
+
+class TestMultiPortBridge:
+    def test_bridge_creates_multiple_kiss_clients(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200'}
+        raw['client.1'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8002', 'ota_baudrate': '9600'}
+        config = PortConfig(raw, ['client.0', 'client.1'], {})
+        bridge = Bridge(config)
+        assert len(bridge.kiss_clients) == 2
+        assert bridge.kiss_clients[0].port_num == 0
+        assert bridge.kiss_clients[1].port_num == 1
+
+    def test_different_ota_baud_gives_different_t1(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200'}
+        raw['client.1'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8002', 'ota_baudrate': '9600'}
+        config = PortConfig(raw, ['client.0', 'client.1'], {})
+        bridge = Bridge(config)
+        assert bridge._port_params[0]['t1_timeout'] > bridge._port_params[1]['t1_timeout']
+
+    async def test_G_frame_reports_all_ports(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200', 'name': 'TNC3 (2m)'}
+        raw['client.1'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8002', 'ota_baudrate': '1200', 'name': 'TS-2000'}
+        config = PortConfig(raw, ['client.0', 'client.1'], {})
+        bridge = Bridge(config)
+        mock_kc0 = Mock()
+        mock_kc0.online = True
+        mock_kc1 = Mock()
+        mock_kc1.online = True
+        bridge.kiss_clients[0] = mock_kc0
+        bridge.kiss_clients[1] = mock_kc1
+        protocol = AGWPEServerProtocol(bridge)
+        transport = Mock()
+        transport.is_closing.return_value = False
+        protocol.connection_made(transport)
+        protocol.data_received(make_frame(0, ord('G')))
+        written = transport.write.call_args[0][0]
+        resp = parse_frame(written)
+        assert resp['kind'] == 'G'
+        payload = resp['data'].split(b'\x00')[0].decode()
+        assert payload == '2;TNC3 (2m);TS-2000;'
+
+    async def test_g_frame_per_port_kiss_params(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200'}
+        raw['client.1'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8002', 'ota_baudrate': '1200'}
+        raw['kiss.1'] = {'tx_delay': '80', 'persistence': '32'}
+        config = PortConfig(raw, ['client.0', 'client.1'], {1: 'kiss.1'})
+        bridge = Bridge(config)
+        mock_kc0 = Mock()
+        mock_kc0.online = True
+        mock_kc1 = Mock()
+        mock_kc1.online = True
+        bridge.kiss_clients[0] = mock_kc0
+        bridge.kiss_clients[1] = mock_kc1
+        protocol = AGWPEServerProtocol(bridge)
+        transport = Mock()
+        transport.is_closing.return_value = False
+        protocol.connection_made(transport)
+        protocol.data_received(make_frame(1, ord('g')))
+        written = transport.write.call_args[0][0]
+        resp = parse_frame(written)
+        caps = struct.unpack('<8BI', resp['data'])
+        assert caps[2] == 80   # tx_delay
+        assert caps[4] == 32   # persistence
+
+    async def test_send_to_kiss_routes_by_port(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200'}
+        raw['client.1'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8002', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0', 'client.1'], {})
+        bridge = Bridge(config)
+        mock_kc0 = Mock()
+        mock_kc0.online = True
+        mock_kc1 = Mock()
+        mock_kc1.online = True
+        bridge.kiss_clients[0] = mock_kc0
+        bridge.kiss_clients[1] = mock_kc1
+        bridge.send_to_kiss(1, b'test_data')
+        mock_kc1.send.assert_called_once_with(b'test_data')
+        mock_kc0.send.assert_not_called()
+
+    def test_send_to_kiss_skips_offline_port(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
+        bridge = Bridge(config)
+        mock_kc = Mock()
+        mock_kc.online = False
+        bridge.kiss_clients[0] = mock_kc
+        bridge.send_to_kiss(0, b'test_data')
+        mock_kc.send.assert_not_called()
+
+    def test_send_to_kiss_out_of_range_port(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
+        bridge = Bridge(config)
+        # Must not raise
+        bridge.send_to_kiss(5, b'test_data')
+
+    def test_on_kiss_frame_port_num_passed_to_dispatch(self):
+        """on_kiss_frame routes to correct port for connection lookup."""
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8001', 'ota_baudrate': '1200'}
+        raw['client.1'] = {'type': 'tcp', 'host': '127.0.0.1', 'port': '8002', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0', 'client.1'], {})
+        bridge = Bridge(config)
+        mock_kc0 = Mock()
+        mock_kc0.online = True
+        mock_kc1 = Mock()
+        mock_kc1.online = True
+        bridge.kiss_clients[0] = mock_kc0
+        bridge.kiss_clients[1] = mock_kc1
+        # Incoming SABM on port 1
+        sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+        bridge.on_kiss_frame(1, b'\x00' + bytes(sabm))
+        # Connection should be keyed to port 1
+        conn = bridge.get_connection(1, 'W1ABC', 'W2DEF')
+        assert conn is not None
+        assert conn.state == 'CONNECTED'
+        # Should NOT exist on port 0
+        assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
+        # UA response sent on port 1
+        mock_kc1.send.assert_called_once()
+
+
+class TestOfflinePort:
+    """Tests for offline port behavior."""
+
+    def _make_bridge_with_protocol(self, port_count=1):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        for i in range(port_count):
+            raw[f'client.{i}'] = {'type': 'tcp', 'host': '127.0.0.1',
+                                  'port': str(8001 + i), 'ota_baudrate': '1200'}
+        config = PortConfig(raw, [f'client.{i}' for i in range(port_count)], {})
+        bridge = Bridge(config)
+        for kc in bridge.kiss_clients:
+            mock_kc = Mock()
+            mock_kc.online = False  # all ports offline by default
+            mock_kc.port_num = kc.port_num
+            bridge.kiss_clients[kc.port_num] = mock_kc
+        bridge.kiss_client = bridge.kiss_clients[0]
+        protocol = AGWPEServerProtocol(bridge)
+        transport = Mock()
+        transport.is_closing.return_value = False
+        protocol.connection_made(transport)
+        return bridge, protocol, transport
+
+    async def test_connect_on_offline_port_returns_busy(self):
+        bridge, protocol, transport = self._make_bridge_with_protocol()
+        protocol.registered_calls.add('SRC')
+        protocol.data_received(make_frame(0, ord('C'), b'SRC', b'DST'))
+        # Should get a 'd' frame with BUSY
+        calls = transport.write.call_args_list
+        assert len(calls) >= 1
+        resp = parse_frame(calls[0][0][0])
+        assert resp['kind'] == 'd'
+        assert b'BUSY' in resp['data']
+
+    async def test_unproto_on_offline_port_silently_dropped(self):
+        bridge, protocol, transport = self._make_bridge_with_protocol()
+        protocol.data_received(make_frame(0, ord('M'), b'SRC', b'DST', b'hello'))
+        bridge.kiss_clients[0].send.assert_not_called()
+        transport.write.assert_not_called()
+
+    async def test_invalid_port_silently_ignored(self):
+        bridge, protocol, transport = self._make_bridge_with_protocol(port_count=1)
+        protocol.data_received(make_frame(5, ord('M'), b'SRC', b'DST', b'hello'))
+        bridge.kiss_clients[0].send.assert_not_called()
+        transport.write.assert_not_called()
+
+    def test_port_went_offline_disconnects_sessions(self):
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1',
+                           'port': '8001', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
+        bridge = Bridge(config)
+        bridge.kiss_clients[0] = Mock()
+        bridge.kiss_clients[0].online = True
+        bridge.kiss_client = bridge.kiss_clients[0]
+
+        # Create an active connection
+        conn = bridge.get_or_create_connection(0, 'LOCAL', 'REMOTE')
+        conn.state = 'CONNECTED'
+        conn.owner = Mock()
+
+        bridge._port_went_offline(0)
+
+        # Connection should be removed
+        assert bridge.get_connection(0, 'LOCAL', 'REMOTE') is None
+        # Owner should have received disconnect notification
+        conn.owner.send_frame.assert_called_once()
+        args = conn.owner.send_frame.call_args[0]
+        assert args[1] == ord('d')
+        assert b'DISCONNECTED' in args[4]
 
 
 if __name__ == '__main__':
