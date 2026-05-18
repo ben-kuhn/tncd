@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+
 pytestmark = [
     pytest.mark.skipif(
         not shutil.which("direwolf"), reason="direwolf not installed"
@@ -999,3 +1000,206 @@ class TestConnectedModeKISSPTY:
     def test_p2p_message_both_directions(self, pat_pair_pty, tmp_path):
         """Send a P2P message with attachment in both directions via KISS PTY."""
         _run_p2p_test(pat_pair_pty, tmp_path)
+
+
+# --- Multi-port tests ---
+
+def write_tncd_multiport_config(path, agwpe_port, ports):
+    """Write a tncd INI config with multiple [client.N] sections.
+
+    ports: list of dicts with keys type, host, port (for TCP).
+    """
+    lines = [
+        "[server]",
+        "listen_host = 127.0.0.1",
+        f"listen_port = {agwpe_port}",
+        "callsign = N0CALL-1",
+        "",
+    ]
+    for i, p in enumerate(ports):
+        lines.append(f"[client.{i}]")
+        if p.get('name'):
+            lines.append(f"name = {p['name']}")
+        lines.append(f"type = {p['type']}")
+        if p['type'] == 'tcp':
+            lines.append(f"host = {p['host']}")
+            lines.append(f"port = {p['port']}")
+        lines.append("ota_baudrate = 1200")
+        lines.append("")
+    Path(path).write_text("\n".join(lines) + "\n")
+
+
+@pytest.fixture()
+def multiport_direwolf_pair(tmp_path):
+    """Start two Direwolf instances with KISS TCP, cross-linked via PipeWire.
+
+    Yields dict with kiss_port_a, kiss_port_b, and log paths.
+    Both are audio-cross-linked so packets sent via one are received by the other.
+    """
+    pw_original = pw_configure_for_test()
+
+    kiss_port_a = free_port()
+    kiss_port_b = free_port()
+
+    conf_a = tmp_path / "direwolf-a.conf"
+    conf_b = tmp_path / "direwolf-b.conf"
+
+    write_direwolf_config(conf_a, "N0CALL-1", agwport=0, kissport=kiss_port_a)
+    write_direwolf_config(conf_b, "N0CALL-2", agwport=0, kissport=kiss_port_b)
+
+    log_a = open(tmp_path / "direwolf-a.log", "w+b")
+    log_b = open(tmp_path / "direwolf-b.log", "w+b")
+
+    proc_a = subprocess.Popen(
+        ["direwolf", "-c", str(conf_a), "-t", "0"],
+        stdout=log_a, stderr=subprocess.STDOUT,
+    )
+    proc_b = subprocess.Popen(
+        ["direwolf", "-c", str(conf_b), "-t", "0"],
+        stdout=log_b, stderr=subprocess.STDOUT,
+    )
+
+    sink_ids = []
+    try:
+        wait_for_port(kiss_port_a)
+        wait_for_port(kiss_port_b)
+        time.sleep(1.0)
+        sink_ids = pw_crosslink(proc_a.pid, proc_b.pid)
+
+        yield {
+            "kiss_port_a": kiss_port_a,
+            "kiss_port_b": kiss_port_b,
+            "proc_a": proc_a,
+            "proc_b": proc_b,
+            "log_a_path": tmp_path / "direwolf-a.log",
+            "log_b_path": tmp_path / "direwolf-b.log",
+        }
+    finally:
+        kill_proc(proc_a)
+        kill_proc(proc_b)
+        for lb in sink_ids:
+            kill_proc(lb)
+        pw_restore_settings(pw_original)
+        log_a.close()
+        log_b.close()
+
+
+@pytest.fixture()
+def tncd_multiport(multiport_direwolf_pair, tmp_path):
+    """Start tncd with 2 ports: port 0 → Direwolf-A, port 1 → Direwolf-B.
+
+    Yields dict with agwpe_port, proc, and direwolf info.
+    """
+    dw = multiport_direwolf_pair
+    agwpe_port = free_port()
+    config_path = tmp_path / "tncd-multiport.ini"
+
+    write_tncd_multiport_config(config_path, agwpe_port, [
+        {'type': 'tcp', 'host': '127.0.0.1', 'port': dw['kiss_port_a'],
+         'name': 'Direwolf-A'},
+        {'type': 'tcp', 'host': '127.0.0.1', 'port': dw['kiss_port_b'],
+         'name': 'Direwolf-B'},
+    ])
+
+    proc = subprocess.Popen(
+        [sys.executable, "tncd.py", "-c", str(config_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    try:
+        wait_for_port(agwpe_port)
+        yield {
+            "agwpe_port": agwpe_port,
+            "proc": proc,
+            "dw": dw,
+        }
+    finally:
+        kill_proc(proc)
+
+
+class TestMultiPort:
+    """Test multi-port configuration with two KISS TCP Direwolf instances."""
+
+    def test_g_frame_reports_two_ports(self, tncd_multiport):
+        """G frame should report 2 ports with configured names."""
+        from tests.emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
+
+        agwpe_port = tncd_multiport["agwpe_port"]
+
+        async def query_ports():
+            client = AGWPEClientEmulator("127.0.0.1", agwpe_port)
+            await client.connect()
+
+            # Send G frame (port info request)
+            g_frame = create_agwpe_frame(0, ord('G'), '', '', b'')
+            client.writer.write(g_frame)
+            await client.writer.drain()
+
+            resp = await client.receive(timeout=5.0)
+            await client.close()
+            return resp
+
+        resp = asyncio.run(query_ports())
+        assert resp is not None, "No G frame response received"
+        assert resp['type'] == 'G'
+        payload_str = resp['data'].split(b'\x00')[0].decode()
+        assert payload_str == '2;Direwolf-A;Direwolf-B;'
+
+    def test_ui_frame_routes_to_correct_port(self, tncd_multiport):
+        """UI frame on port 0 goes to Direwolf-A, port 1 goes to Direwolf-B."""
+        from tests.emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
+
+        agwpe_port = tncd_multiport["agwpe_port"]
+        dw = tncd_multiport["dw"]
+
+        async def send_on_ports():
+            client = AGWPEClientEmulator("127.0.0.1", agwpe_port)
+            await client.connect()
+
+            # Register callsign
+            reg = create_agwpe_frame(0, ord('X'), 'N0CALL-1', '', b'')
+            client.writer.write(reg)
+            await client.writer.drain()
+            await client.receive(timeout=2.0)
+
+            # Wait for audio to settle
+            await asyncio.sleep(3.0)
+
+            # Send APRS on port 0 (should go via Direwolf-A)
+            frame0 = create_agwpe_frame(0, ord('M'), 'N0CALL-1', 'APRS',
+                                        b'!0000.00N/00000.00W-PORT0MARKER')
+            client.writer.write(frame0)
+            await client.writer.drain()
+            await asyncio.sleep(5.0)
+
+            # Send APRS on port 1 (should go via Direwolf-B)
+            frame1 = create_agwpe_frame(1, ord('M'), 'N0CALL-1', 'APRS',
+                                        b'!0000.00N/00000.00W-PORT1MARKER')
+            client.writer.write(frame1)
+            await client.writer.drain()
+            await asyncio.sleep(5.0)
+
+            await client.close()
+
+        asyncio.run(send_on_ports())
+
+        # Since Direwolf-A and B are cross-linked:
+        # - PORT0MARKER sent via Direwolf-A → received by Direwolf-B
+        # - PORT1MARKER sent via Direwolf-B → received by Direwolf-A
+        log_a = Path(dw["log_a_path"]).read_text(errors="replace")
+        log_b = Path(dw["log_b_path"]).read_text(errors="replace")
+
+        print("=== Direwolf-A log (tail) ===")
+        print(log_a[-2000:])
+        print("=== Direwolf-B log (tail) ===")
+        print(log_b[-2000:])
+
+        # PORT0MARKER was sent from Direwolf-A, so Direwolf-B should receive it
+        assert "PORT0MARKER" in log_b, (
+            "PORT0MARKER not found in Direwolf-B log — port 0 routing failed"
+        )
+        # PORT1MARKER was sent from Direwolf-B, so Direwolf-A should receive it
+        assert "PORT1MARKER" in log_a, (
+            "PORT1MARKER not found in Direwolf-A log — port 1 routing failed"
+        )

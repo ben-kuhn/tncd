@@ -179,11 +179,11 @@ class AGWPEServerProtocol(asyncio.Protocol):
 
         elif datakind_bytes == b'R':
             logger.debug("VERSION request")
-            self.send_version()
+            self.send_version(port)
 
         elif datakind_bytes == b'G':
             logger.debug("PORT INFO request")
-            self.send_port_info()
+            self.send_port_info(port)
 
         elif datakind_bytes == b'g':
             logger.debug(f"PORT CAPABILITIES request for port {port}")
@@ -203,8 +203,8 @@ class AGWPEServerProtocol(asyncio.Protocol):
             logger.debug(f"REGISTER: from={from_str!r}")
             self.registered_calls.add(from_str)
             # pe reads CallFrom from the response to record registered callsign.
-            # data[0] != 0 means success.
-            self.send_frame(0, ord(b'X'), call_from, b'', b'\x01')
+            # data[0] != 0 means success.  Echo the port from the request.
+            self.send_frame(port, ord(b'X'), call_from, b'', b'\x01')
 
         elif datakind_bytes == b'x':
             # Unregister callsign: per spec, no response is sent.
@@ -423,7 +423,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
             if self.traffic_debug:
                 print(hex_dump(header + data, prefix="AGWPE TX: "))
             self.transport.write(header + data)
-            logger.debug(f"sent response: kind={datakind}, data={data!r}")
+            logger.debug(f"sent response: port={port}, kind={chr(datakind) if 32 <= datakind < 127 else datakind}, len={len(data)}")
             if self.bridge.verbose >= 3:
                 kind_ch = chr(datakind) if 32 <= datakind < 127 else f'\\x{datakind:02x}'
                 fr_str = from_bytes.rstrip(b'\x00').decode('ascii', 'replace')
@@ -431,18 +431,18 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 print(f"  [AGWPE TX] '{kind_ch}'  port={port}"
                       f"  {fr_str} -> {to_str}  {len(data)} bytes")
 
-    def send_version(self):
+    def send_version(self, port=0):
         # pe reads: major, minor = struct.unpack('H2xH2x', data) — 8 bytes total
         data = struct.pack('<II', 2, 0)  # MajorRevision=2, MinorRevision=0
-        self.send_frame(0, ord(b'R'), b'', b'', data)
+        self.send_frame(port, ord(b'R'), b'', b'', data)
 
-    def send_port_info(self):
+    def send_port_info(self, port=0):
         # pe parses: data.split(null,1)[0].decode().split(';')
         # Non-empty fields after the first become the port description list.
         count = self.bridge.config.port_count
         names = [self.bridge.config.port_name(i) for i in range(count)]
         payload = f"{count};{';'.join(names)};"
-        self.send_frame(0, ord(b'G'), b'', b'', payload.encode())
+        self.send_frame(port, ord(b'G'), b'', b'', payload.encode())
 
 
 class KISSClient:
@@ -509,10 +509,9 @@ class KISSClient:
             logger.info(f"Connecting to Bluetooth TNC at {bdaddr}"
                         f"{f' channel {channel}' if channel else ' (SDP auto-detect)'}")
 
-            sock = await self._bluetooth_connect(
-                dbus, GLib, bdaddr, channel, loop)
-            self.connection = BluetoothKISS(sock)
-
+            # Store reconnect params before connect attempt so they're
+            # available if the initial connect fails and we enter the
+            # reconnect loop.
             self._bt_dbus = dbus
             self._bt_glib = GLib
             self._bt_bdaddr = bdaddr
@@ -520,6 +519,10 @@ class KISSClient:
             self._bt_reconnect = reconnect
             self._bt_reconnect_delay = reconnect_delay
             self._bt_reconnect_max_delay = reconnect_max_delay
+
+            sock = await self._bluetooth_connect(
+                dbus, GLib, bdaddr, channel, loop)
+            self.connection = BluetoothKISS(sock)
         else:
             device   = self.config.get(ps, 'device', fallback='/dev/ttyUSB0')
             baudrate = self.config.getint(ps, 'serial_baudrate',
@@ -553,6 +556,12 @@ class KISSClient:
             return False
 
         def blocking_start():
+            # kiss3 uses a shared class-level event loop (SyncFrameDecode._loop).
+            # Reset it so each KISSClient gets a fresh loop, avoiding
+            # "This event loop is already running" when connecting multiple ports.
+            from kiss.classes import SyncFrameDecode
+            SyncFrameDecode._loop = None
+
             if init_str and conn_type != 'tcp':
                 # Open serial via kiss3 without sending KISS config yet,
                 # then send init commands through the SAME serial port so
@@ -588,17 +597,15 @@ class KISSClient:
                 ser.stopbits = stopbits
                 ser.rtscts   = rtscts
 
-        with ThreadPoolExecutor() as executor:
-            await loop.run_in_executor(executor, blocking_start)
-
-        logger.info("KISS connection established")
-
-        # Hook connection_lost for bluetooth reconnection
         if conn_type == 'bluetooth':
-            def _on_connection_lost(exc):
-                if hasattr(self, '_on_bt_connection_lost'):
-                    self._on_bt_connection_lost(exc)
-            self.connection.protocol._on_connection_lost = _on_connection_lost
+            # Bluetooth uses a per-instance event loop.  Defer start() to
+            # _start_and_receive() so start() and read() run on the same
+            # thread — asyncio loops aren't safely usable across threads.
+            self._deferred_kiss_params = kiss_params
+        else:
+            with ThreadPoolExecutor() as executor:
+                await loop.run_in_executor(executor, blocking_start)
+            logger.info("KISS connection established")
 
     def _on_bt_connection_lost(self, exc):
         """Called when the Bluetooth connection drops."""
@@ -628,7 +635,6 @@ class KISSClient:
                     self._bt_dbus, self._bt_glib,
                     self._bt_bdaddr, self._bt_channel, loop)
                 conn = BluetoothKISS(sock)
-                # start() uses run_until_complete, so run in executor
                 with ThreadPoolExecutor() as executor:
                     await loop.run_in_executor(
                         executor, functools.partial(conn.start, **kiss_params))
@@ -641,7 +647,8 @@ class KISSClient:
                 self.connection.protocol._on_connection_lost = _on_connection_lost
 
                 self.start_receive(loop)
-                logger.info("Bluetooth reconnected successfully")
+                self.online = True
+                logger.info(f"Port {self.port_num} ({self.name}) online — Bluetooth reconnected")
                 return
             except Exception as e:
                 logger.warning(f"Bluetooth reconnect failed: {e}")
@@ -650,34 +657,36 @@ class KISSClient:
     async def _bluetooth_connect(self, dbus_mod, GLib, bdaddr, channel, loop):
         """Connect to a Bluetooth SPP device via D-Bus Profile API.
 
-        Registers an SPP profile, calls ConnectProfile on the target device,
-        and waits for BlueZ to deliver a connected fd via NewConnection.
+        Registers a shared SPP profile (once per process), calls
+        ConnectProfile on the target device, and waits for BlueZ to
+        deliver a connected fd via NewConnection.
         Returns a socket wrapping the fd.
         """
+        global _bt_profile, _bt_pending
+
         dbus_mod.mainloop.glib.DBusGMainLoop(set_as_default=True)
         bus = dbus_mod.SystemBus()
 
-        fd_future = loop.create_future()
-        ProfileClass = _make_spp_profile(dbus_mod, fd_future, loop)
-        profile_path = '/org/tncd/spp'
-        profile = ProfileClass(bus, profile_path)
+        # Register the shared SPP profile once for all Bluetooth ports
+        if _bt_profile is None:
+            profile_path = '/org/tncd/spp'
+            ProfileClass = _make_spp_profile(dbus_mod, _bt_pending, loop)
+            _bt_profile = ProfileClass(bus, profile_path)
 
-        manager = dbus_mod.Interface(
-            bus.get_object('org.bluez', '/org/bluez'),
-            'org.bluez.ProfileManager1')
-        opts = dbus_mod.Dictionary({
-            'Role': dbus_mod.String('client'),
-        }, signature='sv')
-        if channel:
-            opts['Channel'] = dbus_mod.UInt16(int(channel))
-        manager.RegisterProfile(profile_path, SPP_UUID, opts)
-        logger.info("Bluetooth SPP profile registered")
+            manager = dbus_mod.Interface(
+                bus.get_object('org.bluez', '/org/bluez'),
+                'org.bluez.ProfileManager1')
+            opts = dbus_mod.Dictionary({
+                'Role': dbus_mod.String('client'),
+            }, signature='sv')
+            manager.RegisterProfile(profile_path, SPP_UUID, opts)
+            logger.info("Bluetooth SPP profile registered")
 
-        glib_loop = GLib.MainLoop()
-        glib_thread = threading.Thread(target=glib_loop.run, daemon=True,
-                                       name='glib-mainloop')
-        glib_thread.start()
-        self._glib_loop = glib_loop
+            glib_loop = GLib.MainLoop()
+            glib_thread = threading.Thread(target=glib_loop.run, daemon=True,
+                                           name='glib-mainloop')
+            glib_thread.start()
+            self._glib_loop = glib_loop
 
         device_path = f'/org/bluez/hci0/dev_{bdaddr.upper().replace(":", "_")}'
         device = dbus_mod.Interface(
@@ -697,6 +706,10 @@ class KISSClient:
             logger.info(f"Disconnecting existing connection to {bdaddr}")
             device.Disconnect()
 
+        # Register a future for this device so NewConnection can route to us
+        fd_future = loop.create_future()
+        _bt_pending[device_path] = fd_future
+
         logger.info(f"Calling ConnectProfile on {device_path}")
 
         def _connect_profile():
@@ -712,7 +725,11 @@ class KISSClient:
         threading.Thread(target=_connect_profile, daemon=True,
                          name='bt-connect').start()
 
-        fd = await fd_future
+        try:
+            fd = await asyncio.wait_for(fd_future, timeout=30.0)
+        except asyncio.TimeoutError:
+            _bt_pending.pop(device_path, None)
+            raise TimeoutError(f"Bluetooth connection to {bdaddr} timed out (30s)")
         sock = socket_mod.fromfd(fd, socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
         os.close(fd)
         logger.info(f"Bluetooth SPP socket ready (fd={sock.fileno()})")
@@ -728,17 +745,52 @@ class KISSClient:
             loop.call_soon_threadsafe(self.bridge.on_kiss_frame, self.port_num, bytes(frame_data))
 
         def _read_loop():
+            logger.info(f"KISS RX thread started for port {self.port_num}")
             try:
                 # min_frames=None blocks until the connection closes.
                 self.connection.read(callback=_on_frame, min_frames=None)
             except Exception as e:
                 if self.connection is not None:
-                    logger.error(f"KISS RX error: {e}")
+                    logger.error(f"KISS RX error (port {self.port_num}): {e}")
+            logger.info(f"KISS RX thread exited for port {self.port_num}")
 
         self._rx_thread = threading.Thread(target=_read_loop, daemon=True,
-                                           name='kiss-rx')
+                                           name=f'kiss-rx-{self.port_num}')
         self._rx_thread.start()
-        logger.debug("KISS RX thread started")
+
+    def _start_and_receive(self, loop, kiss_params):
+        """Start connection AND read loop on the same thread.
+
+        BluetoothKISS uses a per-instance asyncio event loop.  Both start()
+        and read() call run_until_complete() on it, and asyncio loops are
+        not safely usable across threads.  Running both on the same thread
+        avoids cross-thread selector issues.
+        """
+        def _on_frame(frame_data):
+            loop.call_soon_threadsafe(self.bridge.on_kiss_frame, self.port_num, bytes(frame_data))
+
+        def _start_and_read():
+            logger.info(f"KISS start+RX thread started for port {self.port_num}")
+            try:
+                self.connection.start(**kiss_params)
+                logger.info("KISS connection established")
+                # Hook connection_lost for bluetooth reconnection
+                if hasattr(self, '_bt_reconnect'):
+                    def _on_connection_lost(exc):
+                        if hasattr(self, '_on_bt_connection_lost'):
+                            self._on_bt_connection_lost(exc)
+                    self.connection.protocol._on_connection_lost = _on_connection_lost
+                self.online = True
+                logger.info(f"Port {self.port_num} ({self.name}) online")
+                self.connection.read(callback=_on_frame, min_frames=None)
+            except Exception as e:
+                if self.connection is not None:
+                    logger.error(f"KISS RX error (port {self.port_num}): {e}")
+            logger.info(f"KISS start+RX thread exited for port {self.port_num}")
+
+        self._rx_thread = threading.Thread(target=_start_and_read, daemon=True,
+                                           name=f'kiss-rx-{self.port_num}')
+        self._rx_thread.start()
 
     def send(self, data):
         if self.connection:
@@ -755,11 +807,12 @@ class KISSClient:
 SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb'
 
 
-def _make_spp_profile(dbus_mod, fd_future, loop):
+def _make_spp_profile(dbus_mod, pending_connections, loop):
     """Create an SPP Profile1 D-Bus service object class.
 
-    BlueZ calls NewConnection() with a connected fd when the remote
-    device's SPP channel is established.
+    A single profile is shared across all Bluetooth ports.  BlueZ calls
+    NewConnection() with a connected fd; we route to the correct
+    KISSClient via pending_connections keyed by device path.
     """
     class SPPProfile(dbus_mod.service.Object):
         @dbus_mod.service.method("org.bluez.Profile1",
@@ -767,7 +820,12 @@ def _make_spp_profile(dbus_mod, fd_future, loop):
         def NewConnection(self, path, fd, properties):
             fd_val = fd.take()
             logger.info(f"Bluetooth SPP connected: path={path}, fd={fd_val}")
-            loop.call_soon_threadsafe(fd_future.set_result, fd_val)
+            future = pending_connections.pop(path, None)
+            if future and not future.done():
+                loop.call_soon_threadsafe(future.set_result, fd_val)
+            else:
+                logger.warning(f"Unexpected Bluetooth connection from {path}, closing fd")
+                os.close(fd_val)
 
         @dbus_mod.service.method("org.bluez.Profile1",
                                  in_signature="o", out_signature="")
@@ -780,6 +838,11 @@ def _make_spp_profile(dbus_mod, fd_future, loop):
             logger.info("Bluetooth SPP profile released")
 
     return SPPProfile
+
+
+# Shared Bluetooth SPP profile state (one registration per process)
+_bt_profile = None
+_bt_pending = {}   # device_path -> asyncio.Future
 
 
 class _BluetoothKISSProtocol(kiss.kiss.KISSProtocol):
@@ -799,6 +862,23 @@ class BluetoothKISS(kiss.classes.KISS):
     def __init__(self, sock, strip_df_start=False):
         super().__init__(strip_df_start)
         self._sock = sock
+        # Per-instance event loop so multiple BluetoothKISS instances
+        # don't share the class-level SyncFrameDecode._loop.
+        self._bt_loop = asyncio.new_event_loop()
+
+    @property
+    def loop(self):
+        return self._bt_loop
+
+    @loop.setter
+    def loop(self, value):
+        self._bt_loop = value
+
+    def stop(self):
+        if self.protocol and self.protocol.transport:
+            self.protocol.transport.close()
+        # Don't close the loop in stop() — it may still be needed by the
+        # RX thread.  It will be cleaned up when the instance is GC'd.
 
     def start(self, **kwargs):
         _, self.protocol = self.loop.run_until_complete(
@@ -810,9 +890,14 @@ class BluetoothKISS(kiss.classes.KISS):
         self.loop.run_until_complete(self.protocol.connection_future)
         self._write_defaults(**kwargs)
 
-    def stop(self):
-        if self.protocol and self.protocol.transport:
-            self.protocol.transport.close()
+    def write(self, frame):
+        """Thread-safe write: schedule on the instance's event loop.
+
+        The per-instance loop is pumped by the kiss-rx thread's
+        run_until_complete(read), so call_soon_threadsafe writes get
+        processed during the read loop.
+        """
+        self.loop.call_soon_threadsafe(self.protocol.write, frame)
 
 
 class Bridge:
@@ -885,10 +970,27 @@ class Bridge:
 
     async def start(self):
         loop = asyncio.get_running_loop()
+
+        # Connect ports sequentially; kiss3's blocking start() uses its own
+        # event loop internally and doesn't play well with parallel execution.
+        # Failures log and leave port offline (don't crash the bridge).
         for kc in self.kiss_clients:
-            await kc.connect()
-            kc.start_receive(loop)
-            kc.online = True
+            try:
+                await kc.connect()
+                if hasattr(kc, '_deferred_kiss_params'):
+                    # Bluetooth: start() + read() on same thread
+                    kc._start_and_receive(loop, kc._deferred_kiss_params)
+                    # online is set by _start_and_receive thread
+                else:
+                    kc.start_receive(loop)
+                    kc.online = True
+                    logger.info(f"Port {kc.port_num} ({kc.name}) online")
+            except Exception as e:
+                logger.error(f"Port {kc.port_num} ({kc.name}) failed to connect: {e}")
+                kc.online = False
+                # Schedule reconnect loop for Bluetooth ports
+                if getattr(kc, '_bt_reconnect', False):
+                    asyncio.ensure_future(kc._bt_reconnect_loop())
 
         server_cfg = self.config['server']
         host = server_cfg.get('listen_host', '0.0.0.0')
@@ -1346,7 +1448,17 @@ class Bridge:
                     logger.error(f"Error sending 'C' to owner: {e}")
 
         if not conn or conn.state != 'CONNECTED':
-            # No active connection — send DM so the remote knows to disconnect.
+            # Check if this connection exists on a different port (overheard
+            # frame from a TNC on the same frequency).  If so, silently drop.
+            for other_port in range(self.config.port_count):
+                if other_port != port:
+                    other = self.get_connection(other_port, dst, src)
+                    if other and other.state in ('CONNECTING', 'CONNECTED'):
+                        logger.debug(f"Dropping overheard I-frame from {src} "
+                                     f"on port {port} (conn on port {other_port})")
+                        return
+            # No active connection on any port — send DM so the remote
+            # knows to disconnect.
             if frame.control.poll_final:
                 try:
                     dm = _resp_frame(src, dst,
@@ -1402,6 +1514,17 @@ class Bridge:
 
     def _dispatch_sabm(self, frame, src, dst, port=0):
         """Handle incoming SABM/SABME: accept connection, notify AGWPE clients."""
+        # If this callsign pair already has an active connection on another
+        # port, this is an overheard frame (both TNCs on the same frequency).
+        # Silently drop it to avoid creating phantom connections and sending
+        # spurious UA responses.
+        for other_port in range(self.config.port_count):
+            if other_port != port:
+                other = self.get_connection(other_port, dst, src)
+                if other and other.state in ('CONNECTING', 'CONNECTED'):
+                    logger.debug(f"Dropping overheard SABM from {src} on port {port} "
+                                 f"(conn on port {other_port})")
+                    return
         logger.info(f"CONNECT     {src} -> {dst}  (incoming)")
         try:
             ua = _resp_frame(str(frame.src), str(frame.dst),
@@ -1485,6 +1608,16 @@ class Bridge:
 
     def _dispatch_disc(self, frame, src, dst, port=0):
         """Handle remote DISC: send UA, notify AGWPE client of disconnection."""
+        # Suppress overheard DISC from TNCs on the same frequency.
+        conn = self.get_connection(port, dst, src)
+        if not conn:
+            for other_port in range(self.config.port_count):
+                if other_port != port:
+                    other = self.get_connection(other_port, dst, src)
+                    if other and other.state in ('CONNECTING', 'CONNECTED', 'DISCONNECTING'):
+                        logger.debug(f"Dropping overheard DISC from {src} on port {port} "
+                                     f"(conn on port {other_port})")
+                        return
         logger.info(f"DISCONNECT  {src} -> {dst}  (remote)")
         try:
             ua = _resp_frame(str(frame.src), str(frame.dst),

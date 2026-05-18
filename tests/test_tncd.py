@@ -1366,9 +1366,8 @@ class TestBluetoothKISS:
             bt.start()
             test_data = b'\x01\x02\x03'
             bt.write(test_data)
-            # Give the event loop a chance to flush the write
-            import time
-            time.sleep(0.05)
+            # Pump the event loop so call_soon_threadsafe write is flushed
+            bt.loop.run_until_complete(asyncio.sleep(0.05))
             received = s2.recv(1024)
             assert received[0:1] == b'\xc0'   # FEND
             assert received[-1:] == b'\xc0'    # FEND
@@ -1471,9 +1470,8 @@ class TestBluetoothFullFlow:
             test_frame = b'\x01\x02\x03\x04'
             bt.write(test_frame)
 
-            # Small delay for async transport to flush
-            import time
-            time.sleep(0.05)
+            # Pump the event loop so call_soon_threadsafe write is flushed
+            bt.loop.run_until_complete(asyncio.sleep(0.05))
 
             raw = s2.recv(1024)
             assert raw[0:1] == b'\xc0'   # FEND
