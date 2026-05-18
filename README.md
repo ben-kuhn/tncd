@@ -42,6 +42,7 @@ sequencing, RR acknowledgement, duplicate detection, and clean DISC handling.
 | `k`  | RX    | Raw KISS mode toggle |
 | `M`  | RX    | Send UI (unproto) frame |
 | `V`  | RX    | Send UI frame via digipeaters |
+| `v`  | RX    | Connect via digipeaters |
 | `C`  | RX/TX | Connect / connected notification |
 | `D`  | RX/TX | Send / receive connected data |
 | `d`  | RX/TX | Disconnect / disconnected notification |
@@ -76,11 +77,22 @@ The bridge fully implements AX.25 v2.0 connected mode for KISS TNCs:
   discarded; only in-sequence frames are forwarded to the AGWPE client
 - **AGWPE flow control** — `Y` (outstanding frames) accurately reflects unacked
   I-frames so clients like PAT know when it is safe to send the next data block
+- **Digipeater support** — `v` (connect via digipeaters) stores the via path and
+  includes it on all subsequent frames (I, RR, REJ, DISC, UA) for the connection;
+  incoming digipeated connections reverse the path automatically
 - **TX echo suppression** — some TNCs (e.g. BTECH UV-Pro) echo transmitted frames
-  back via KISS; these are detected and discarded
+  back via KISS; these are detected and discarded, including digipeated echoes
+  where the H-bit differs from the original
+- **Adaptive T1 (Karn's algorithm)** — round-trip time measured from I-frame
+  acknowledgments; SRTT/RTTVAR updated per RFC 2988; exponential backoff on
+  timeout; retransmit RTT samples excluded
+- **T3 inactive link timer** — polls idle connections every 180 s with RR P=1;
+  T1 handles retries if the remote doesn't respond
+- **REJ gap detection** — out-of-sequence I-frames trigger REJ to request
+  retransmission from V(R), improving recovery on lossy links
 - **Dynamic T1/T2 timers** — retransmit and delayed-ACK timeouts calculated from
   the configured over-the-air baud rate and window size
-- **DISC/DM handling** — clean disconnect in both directions
+- **DISC/DM handling** — clean disconnect in both directions; F-bit echoed per spec
 
 ## Supported TNC Connections
 
@@ -374,7 +386,7 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 
 - [x] BTECH UV-Pro/Radioddity GA-5WB/Vero NR N76 (Bluetooth)
 - [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A
-- [x] Mobilinkd TNC3 (Bluetooth SPP) — OTA-verified at 1200 baud via native D-Bus SPP, full Winlink CMS round-trip with 10KB attachment
+- [x] Mobilinkd TNC3 (Bluetooth SPP) — OTA-verified at 1200 baud via native D-Bus SPP, full Winlink CMS round-trip with 10KB attachment; 2-hop digipeater verified
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud

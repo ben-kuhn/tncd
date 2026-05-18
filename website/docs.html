@@ -245,6 +245,8 @@
       <code>tncd</code> sits in the middle and translates between the two. It also handles
       the AX.25 "connected mode" handshaking that KISS TNCs don't do on their own &mdash;
       this is what makes Winlink and other connection-based applications work.
+      Connections through digipeaters are fully supported: the via path is stored and
+      included on every frame for the duration of the session.
     </p>
     <p>
       You can connect your TNC to <code>tncd</code> over a USB serial cable, a TCP network

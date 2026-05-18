@@ -14,7 +14,7 @@ import tempfile
 from tncd import (
     AGWPEServerProtocol, BluetoothKISS, Bridge, Connection, KISSClient,
     AGWPE_HEADER_FORMAT, AGWPE_HEADER_SIZE, DEFAULT_MAX_WINDOW,
-    DEFAULT_N2_RETRY, load_config, PortConfig,
+    DEFAULT_N2_RETRY, DEFAULT_T3_TIMEOUT, load_config, PortConfig,
 )
 
 # ---------------------------------------------------------------------------
@@ -354,7 +354,7 @@ class TestHeardStations:
     def test_H_query_produces_response(self):
         """'H' heard stations query must produce an 'H' response frame."""
         protocol, transport, bridge = make_protocol()
-        protocol.data_received(make_frame(1, ord('H')))
+        protocol.data_received(make_frame(0, ord('H')))
         transport.write.assert_called_once()
         parsed = parse_frame(transport.write.call_args[0][0])
         assert parsed['kind'] == 'H'
@@ -2034,6 +2034,358 @@ class TestOfflinePort:
         args = conn.owner.send_frame.call_args[0]
         assert args[1] == ord('d')
         assert b'DISCONNECTED' in args[4]
+
+
+class TestSpecViolationFixes:
+    """Regression tests for protocol spec violations found during audit."""
+
+    def _make_bridge(self):
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
+        bridge = Bridge(config)
+        mock_kc = Mock()
+        mock_kc.online = True
+        bridge.kiss_clients[0] = mock_kc
+        bridge.kiss_client = mock_kc
+        return bridge
+
+    def test_disc_no_connection_sends_dm_not_ua(self):
+        """AX.25 v2.0 §2.4.5: DISC when disconnected must respond with DM."""
+        bridge = self._make_bridge()
+        # No connection exists for this callsign pair
+        disc = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(disc))
+        bridge.kiss_client.send.assert_called_once()
+        sent = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert sent.control.frame_type is ax25.FrameType.DM
+
+    def test_disc_with_connection_still_sends_ua(self):
+        """DISC on an active connection must still respond with UA."""
+        bridge = self._make_bridge()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        disc = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(disc))
+        bridge.kiss_client.send.assert_called_once()
+        sent = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert sent.control.frame_type is ax25.FrameType.UA
+
+    async def test_frmr_starts_t1_for_sabm(self):
+        """FRMR re-establishment SABM must start T1 for retransmission."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+
+        frmr = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.FRMR))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(frmr))
+
+        assert conn.state == 'CONNECTING'
+        # T1 should be active (the handle is not None)
+        assert conn.t1_handle is not None
+
+    def test_port_went_offline_callsign_order(self):
+        """Disconnect notification from _port_went_offline must use CallFrom=remote."""
+        raw = configparser.ConfigParser()
+        raw['server'] = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'TEST'}
+        raw['client.0'] = {'type': 'tcp', 'host': '127.0.0.1',
+                           'port': '8001', 'ota_baudrate': '1200'}
+        config = PortConfig(raw, ['client.0'], {})
+        bridge = Bridge(config)
+        bridge.kiss_clients[0] = Mock()
+        bridge.kiss_clients[0].online = True
+        bridge.kiss_client = bridge.kiss_clients[0]
+
+        conn = bridge.get_or_create_connection(0, 'LOCAL', 'REMOTE')
+        conn.state = 'CONNECTED'
+        conn.owner = Mock()
+
+        bridge._port_went_offline(0)
+
+        args = conn.owner.send_frame.call_args[0]
+        # CallFrom (args[2]) must be remote, CallTo (args[3]) must be local
+        assert args[2] == b'REMOTE'
+        assert args[3] == b'LOCAL'
+
+    def test_tx_echo_suppression_with_digipeater_hbit(self):
+        """TX echo via digipeater must be suppressed despite H-bit change.
+
+        When a frame is sent via a digipeater, the TNC echoes it back with
+        the H-bit set on the repeater's address.  The raw bytes differ from
+        what was sent, but it's still our own frame.
+        """
+        bridge = self._make_bridge()
+        # Build SABM via a digipeater
+        dst = ax25.Address('W0NE-10')
+        dst.command_response = True
+        sabm = ax25.Frame(
+            dst=dst,
+            src=ax25.Address('KU0HN'),
+            via=[ax25.Address('KU0HN-7', repeater=True)],
+            control=ax25.Control(ax25.FrameType.SABM, poll_final=True),
+        )
+        raw_sent = bytes(sabm)
+        bridge.send_to_kiss(0, raw_sent)
+        bridge.kiss_client.send.reset_mock()
+
+        # Simulate echo with H-bit set on the via address
+        echoed = bytearray(raw_sent)
+        # Via address SSID byte: dst(7) + src(7) + via_callsign(6) = byte 20
+        echoed[20] |= 0x80  # set H-bit
+        bridge.on_kiss_frame(0, b'\x00' + bytes(echoed))
+
+        # The echoed frame should have been suppressed — no SABM dispatch
+        assert bridge.get_connection(0, 'KU0HN', 'W0NE-10') is None
+
+    def test_normalize_hbits_no_via(self):
+        """Frames without via addresses should pass through unchanged."""
+        frame = ax25.Frame(
+            dst=ax25.Address('W1ABC'),
+            src=ax25.Address('W2DEF'),
+            control=ax25.Control(ax25.FrameType.SABM, poll_final=True),
+        )
+        raw = bytes(frame)
+        assert Bridge._normalize_hbits(raw) == raw
+
+
+class TestT3InactiveLinkTimer:
+    """AX.25 v2.0 §6.3.3: T3 detects dead peers on idle connections."""
+
+    async def test_t3_sends_poll_on_expiry(self):
+        """T3 expiry must send RR P=1 to poll the remote."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        conn.recv_seqno = 3
+
+        # Manually fire T3
+        bridge.kiss_client.send.reset_mock()
+        bridge._t3_expired(conn)
+
+        bridge.kiss_client.send.assert_called_once()
+        sent = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert sent.control.frame_type is ax25.FrameType.RR
+        assert sent.control.poll_final is True
+        assert sent.control.recv_seqno == 3
+        # T1 should be started for retransmit if no response
+        assert conn.t1_handle is not None
+
+    async def test_t3_reset_on_received_frame(self):
+        """Any received frame on a CONNECTED session must reset T3."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+
+        # Send an I-frame to the connection
+        iframe = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                            control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                                 recv_seqno=0, poll_final=True),
+                            pid=0xF0, data=b'hello')
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
+
+        # T3 should be running
+        assert conn.t3_handle is not None
+
+    def test_t3_cancelled_on_remove(self):
+        """Removing a connection must cancel T3."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        mock_handle = Mock()
+        conn.t3_handle = mock_handle
+
+        bridge.remove_connection(0, 'W1ABC', 'W2DEF')
+        mock_handle.cancel.assert_called_once()
+
+    async def test_t3_not_sent_when_disconnected(self):
+        """T3 expiry on a non-CONNECTED session must be a no-op."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'DISCONNECTING'
+
+        bridge.kiss_client.send.reset_mock()
+        bridge._t3_expired(conn)
+        bridge.kiss_client.send.assert_not_called()
+
+
+class TestKarnsAlgorithm:
+    """Karn's algorithm: adaptive T1 based on measured RTT."""
+
+    def test_first_rtt_initializes_srtt(self):
+        """First RTT measurement initializes SRTT and RTTVAR directly."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+
+        bridge._update_srtt(conn, 5.0)
+        assert conn.srtt == 5.0
+        assert conn.rttvar == 2.5  # rtt / 2
+        assert conn.t1_value == max(3.0, 5.0 + 4 * 2.5)  # 15.0
+
+    def test_subsequent_rtt_uses_ewma(self):
+        """Subsequent RTT measurements use exponential weighted moving average."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+
+        bridge._update_srtt(conn, 4.0)  # first
+        bridge._update_srtt(conn, 6.0)  # second
+        # SRTT = 0.875 * 4.0 + 0.125 * 6.0 = 4.25
+        assert abs(conn.srtt - 4.25) < 0.01
+        # RTTVAR = 0.75 * 2.0 + 0.25 * |4.0 - 6.0| = 2.0
+        assert abs(conn.rttvar - 2.0) < 0.01
+
+    def test_t1_floor_enforced(self):
+        """T1 must not go below 3.0 seconds."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+
+        bridge._update_srtt(conn, 0.1)  # very fast RTT
+        assert conn.t1_value >= 3.0
+
+    def test_t1_ceiling_enforced(self):
+        """T1 must not exceed 60.0 seconds."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+
+        bridge._update_srtt(conn, 50.0)  # very slow RTT
+        assert conn.t1_value <= 60.0
+
+    def test_retransmit_clears_timestamp(self):
+        """Retransmitted frames must not contribute RTT samples (Karn's rule)."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+
+        # Simulate sending an I-frame
+        conn._iframe_timestamps[0] = 100.0
+        conn.retransmit_buf[0] = bytes(
+            ax25.Frame(dst=ax25.Address('W2DEF'), src=ax25.Address('W1ABC'),
+                       control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                            recv_seqno=0),
+                       pid=0xF0, data=b'test'))
+
+        # Retransmit — should clear the timestamp
+        bridge._retransmit_from(conn, 0)
+        assert 0 not in conn._iframe_timestamps
+
+    def _dummy_iframe(self):
+        return bytes(ax25.Frame(
+            dst=ax25.Address('W2DEF'), src=ax25.Address('W1ABC'),
+            control=ax25.Control(ax25.FrameType.I, send_seqno=0, recv_seqno=0),
+            pid=0xF0, data=b'test'))
+
+    async def test_t1_backoff_on_timeout(self):
+        """T1 must double on timeout (exponential backoff)."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        conn.t1_value = 5.0
+        conn.unacked = 1
+        conn.retransmit_buf[0] = self._dummy_iframe()
+
+        bridge._t1_expired(conn)
+        assert conn.t1_value == 10.0  # doubled
+
+        bridge._t1_expired(conn)
+        assert conn.t1_value == 20.0  # doubled again
+
+    async def test_t1_backoff_capped_at_60(self):
+        """T1 backoff must not exceed 60 seconds."""
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        conn.t1_value = 40.0
+        conn.unacked = 1
+        conn.retransmit_buf[0] = self._dummy_iframe()
+
+        bridge._t1_expired(conn)
+        assert conn.t1_value == 60.0  # capped, not 80
+
+
+class TestREJOnGap:
+    """AX.25 v2.0 §2.4.4: out-of-sequence I-frames should trigger REJ."""
+
+    def _make_connected_bridge(self):
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        return bridge, conn
+
+    def test_gap_sends_rej(self):
+        """I-frame with N(S) > V(R) must trigger REJ with expected V(R)."""
+        bridge, conn = self._make_connected_bridge()
+        conn.recv_seqno = 0  # expecting N(S)=0
+
+        # Send I-frame with N(S)=1 (gap — frame 0 was lost)
+        iframe = ax25.Frame(
+            dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+            control=ax25.Control(ax25.FrameType.I, poll_final=False,
+                                 send_seqno=1, recv_seqno=0),
+            pid=0xF0, data=b'test')
+        bridge.kiss_client.send.reset_mock()
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
+
+        bridge.kiss_client.send.assert_called_once()
+        sent = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert sent.control.frame_type is ax25.FrameType.REJ
+        assert sent.control.recv_seqno == 0  # requesting retransmit from V(R)=0
+
+    def test_true_duplicate_no_rej(self):
+        """I-frame with N(S) < V(R) is a true duplicate — no REJ, just RR/T2."""
+        bridge, conn = self._make_connected_bridge()
+        conn.recv_seqno = 3  # expecting N(S)=3
+
+        # Send I-frame with N(S)=1 (already received)
+        iframe = ax25.Frame(
+            dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+            control=ax25.Control(ax25.FrameType.I, poll_final=False,
+                                 send_seqno=1, recv_seqno=0),
+            pid=0xF0, data=b'old')
+        bridge.kiss_client.send.reset_mock()
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
+
+        # Should NOT send REJ for a true duplicate
+        for call in bridge.kiss_client.send.call_args_list:
+            sent = ax25.Frame.unpack(call[0][0])
+            assert sent.control.frame_type is not ax25.FrameType.REJ
+
+
+class TestSABMResetsBuffers:
+    """Incoming SABM on existing connection must fully reset state."""
+
+    def test_sabm_clears_retransmit_buf_and_queue(self):
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        conn.retransmit_buf = {0: b'stale0', 1: b'stale1'}
+        conn.outbound_queue.append((b'queued', 0xF0))
+        conn.remote_busy = True
+
+        sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
+
+        conn = bridge.get_connection(0, 'W1ABC', 'W2DEF')
+        assert conn.state == 'CONNECTED'
+        assert len(conn.retransmit_buf) == 0
+        assert len(conn.outbound_queue) == 0
+        assert conn.remote_busy is False
 
 
 if __name__ == '__main__':
