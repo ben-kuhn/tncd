@@ -155,12 +155,14 @@ listen_host = 0.0.0.0
 listen_port = 8000
 callsign = AGWPE
 
-[client]
-# type = serial or tcp
+# Each TNC is numbered: [client.0] = AGWPE port 0, [client.1] = port 1, etc.
+[client.0]
+# type = serial, tcp, or bluetooth
 type = serial
 device = /dev/ttyUSB0
 serial_baudrate = 9600
 ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
+# name = My TNC         # human-readable name shown to AGWPE clients
 # parity = N            # N=none, O=odd, E=even, M=mark, S=space (default: N)
 # stopbits = 1          # 1, 1.5, or 2 (default: 1)
 # rtscts = false        # RTS/CTS hardware flow control (default: false)
@@ -169,8 +171,8 @@ ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
 # init_string = INT KISS\r   # \r = CR, \n = LF
 # init_delay = 1.0
 
-[kiss]
-# KISS timing parameters (values in 10ms units)
+# Per-port KISS timing parameters (values in 10ms units)
+[kiss.0]
 # tx_delay = 40
 # persistence = 63
 # slot_time = 20
@@ -193,7 +195,7 @@ exit
 Then configure tncd:
 
 ```ini
-[client]
+[client.0]
 type = bluetooth
 bdaddr = AA:BB:CC:DD:EE:FF
 ota_baudrate = 1200
@@ -211,7 +213,7 @@ After pairing in system Bluetooth settings, the OS creates a virtual serial
 port. Use `type = serial` with the device path:
 
 ```ini
-[client]
+[client.0]
 type = serial
 device = /dev/tty.BluetoothTNC    # macOS
 # device = COM5                    # Windows
@@ -239,7 +241,8 @@ tncd -c /etc/tncd.ini
 
 ## KISS Parameters
 
-Configured under `[kiss]` in the INI file. All values are in 10ms units.
+Configured under `[kiss.N]` in the INI file (matching the TNC number, e.g. `[kiss.0]`
+for `[client.0]`). All values are in 10ms units.
 
 | Parameter    | Default | Description                      |
 |--------------|---------|----------------------------------|
@@ -251,7 +254,7 @@ Configured under `[kiss]` in the INI file. All values are in 10ms units.
 
 ## Serial Port Parameters
 
-Some TNCs require non-standard serial settings. Configure under `[client]`:
+Some TNCs require non-standard serial settings. Configure under `[client.N]`:
 
 | Parameter | Default | Description                                  |
 |-----------|---------|----------------------------------------------|
@@ -262,7 +265,7 @@ Some TNCs require non-standard serial settings. Configure under `[client]`:
 Example for AEA TNCs that use odd parity:
 
 ```ini
-[client]
+[client.0]
 type = serial
 device = /dev/ttyUSB0
 serial_baudrate = 9600
@@ -273,10 +276,10 @@ stopbits = 1
 ## KISS Mode Initialization
 
 Some serial TNCs (e.g. Kantronics KPC-3) power up in terminal mode and need a command
-to enter KISS mode. Configure under `[client]`:
+to enter KISS mode. Configure under `[client.N]`:
 
 ```ini
-[client]
+[client.0]
 type = serial
 device = /dev/ttyUSB0
 serial_baudrate = 9600
@@ -288,6 +291,42 @@ init_delay = 1.0
 carriage return and `\n` for line feed — most TNCs expect `\r` to terminate a command.
 `init_delay` (default 1.0 s) is the wait after sending the string before the KISS
 connection opens.
+
+## Multiple TNCs (Multi-Port)
+
+tncd can connect to multiple TNCs simultaneously. Each `[client.N]` section defines an
+AGWPE port numbered to match (port 0, port 1, etc.). Port numbers must be contiguous
+starting at 0. Each port can use any connection type independently.
+
+```ini
+[server]
+listen_host = 0.0.0.0
+listen_port = 8000
+callsign = N0CALL
+
+[client.0]
+name = VHF Serial TNC
+type = serial
+device = /dev/ttyUSB0
+serial_baudrate = 9600
+ota_baudrate = 1200
+
+[client.1]
+name = Mobilinkd TNC3 (BT)
+type = bluetooth
+bdaddr = AA:BB:CC:DD:EE:FF
+ota_baudrate = 1200
+
+[kiss.1]
+tx_delay = 50
+```
+
+AGWPE clients select a TNC by port number. The optional `name` field provides a
+human-readable label shown in the AGWPE port list. Each port can have its own
+`[kiss.N]` section for KISS timing parameters.
+
+When multiple TNCs share the same frequency, tncd automatically suppresses overheard
+frames — packets received by the wrong TNC are silently dropped.
 
 ## systemd Service
 

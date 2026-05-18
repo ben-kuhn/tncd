@@ -270,6 +270,7 @@
       <button class="tab" data-tab="opensuse">openSUSE</button>
       <button class="tab" data-tab="arch">Arch Linux</button>
       <button class="tab" data-tab="nixos">NixOS</button>
+      <button class="tab" data-tab="gentoo">Gentoo</button>
       <button class="tab" data-tab="macos">macOS</button>
       <button class="tab" data-tab="windows">Windows</button>
     </div>
@@ -352,7 +353,7 @@ in {
     enable = true;
     settings = {
       server.callsign = "N0CALL";
-      client = {
+      "client.0" = {
         type = "serial";
         device = "/dev/ttyUSB0";
         serial_baudrate = 9600;
@@ -365,6 +366,43 @@ in {
         <code>sudo nixos-rebuild switch</code>. See the
         <a href="https://github.com/ben-kuhn/tncd/blob/main/nix/README.md">Nix README</a>
         for Bluetooth setup and all module options.</p>
+    </div>
+
+    <div class="tab-content" id="tab-gentoo">
+      <p>tncd is available via a Gentoo overlay that includes the package and its dependencies
+        (<code>kiss3</code>, <code>ax253</code>, <code>pyham-ax25</code>). The overlay is in the
+        <code>packaging/gentoo-overlay/</code> subdirectory of the tncd repository.</p>
+
+      <p>Create a repos.conf entry for the overlay:</p>
+      <pre><code># /etc/portage/repos.conf/ham-radio.conf
+[ham-radio]
+location = /var/db/repos/ham-radio
+sync-type = git
+sync-uri = https://github.com/ben-kuhn/tncd.git
+sync-depth = 1
+auto-sync = yes</code></pre>
+      <p>Since the overlay is in a subdirectory, set up a symlink after syncing:</p>
+      <pre><code># Initial sync to clone the repo
+sudo emaint sync -r ham-radio
+
+# Point Portage at the overlay subdirectory
+sudo mv /var/db/repos/ham-radio /var/db/repos/ham-radio-repo
+sudo ln -s /var/db/repos/ham-radio-repo/packaging/gentoo-overlay \
+  /var/db/repos/ham-radio
+
+# Install tncd
+sudo emerge --ask net-misc/tncd</code></pre>
+      <p>To enable Bluetooth SPP support, set the <code>bluetooth</code> USE flag:</p>
+      <pre><code># /etc/portage/package.use
+net-misc/tncd bluetooth</code></pre>
+      <p>After installation, copy the example config and edit it:</p>
+      <pre><code>sudo cp /etc/tncd.ini.example /etc/tncd.ini
+sudo nano /etc/tncd.ini</code></pre>
+      <div class="note">
+        The overlay provides ebuilds for <code>dev-python/kiss3</code>,
+        <code>dev-python/ax253</code>, and <code>dev-python/pyham-ax25</code> since these
+        are not yet in the main Gentoo repository.
+      </div>
     </div>
 
     <div class="tab-content" id="tab-macos">
@@ -412,9 +450,12 @@ python tncd.py -c tncd.ini</code></pre>
     </p>
     <pre><code>sudo nano /etc/tncd.ini</code></pre>
     <p>
-      The file has four sections: <code>[server]</code>, <code>[client]</code>,
-      <code>[kiss]</code>, and <code>[bluetooth]</code>. Lines starting with <code>#</code>
-      are comments and are ignored &mdash; remove the <code>#</code> to enable a setting.
+      The file has a <code>[server]</code> section for the AGWPE listener, and one or more
+      numbered TNC sections: <code>[client.0]</code>, <code>[client.1]</code>, etc. Each TNC
+      gets its own AGWPE port number matching the section number. Optional
+      <code>[kiss.0]</code>, <code>[kiss.1]</code>, ... sections set per-TNC KISS timing
+      parameters. Lines starting with <code>#</code> are comments and are ignored &mdash;
+      remove the <code>#</code> to enable a setting.
     </p>
 
     <h3>[server] &mdash; AGWPE Server Settings</h3>
@@ -446,14 +487,16 @@ callsign = N0CALL</code></pre>
       </tr>
     </table>
 
-    <h3>[client] &mdash; TNC Connection</h3>
-    <p>This tells tncd how to talk to your TNC. There are two connection types:
-      serial (USB cable) and TCP (network).</p>
+    <h3>[client.0] &mdash; TNC Connection</h3>
+    <p>Each TNC is configured in a numbered section: <code>[client.0]</code> for AGWPE port 0,
+      <code>[client.1]</code> for port 1, and so on. Most setups only need one TNC
+      (<code>[client.0]</code>). There are three connection types:
+      serial (USB cable), TCP (network), and Bluetooth.</p>
 
     <h3>Serial TNC (USB)</h3>
     <p>This is the most common setup. Your TNC is plugged into a USB port and shows up as
       a serial device like <code>/dev/ttyUSB0</code> or <code>/dev/ttyACM0</code>.</p>
-    <pre><code>[client]
+    <pre><code>[client.0]
 type = serial
 device = /dev/ttyUSB0
 serial_baudrate = 9600
@@ -512,7 +555,7 @@ ota_baudrate = 1200</code></pre>
     <p>
       Some older serial TNCs (like the Kantronics KPC-3) start up in "terminal mode" and
       need a special command to switch into KISS mode. If your TNC requires this, add these
-      lines under <code>[client]</code>:
+      lines under your <code>[client.N]</code> section:
     </p>
     <pre><code># Kantronics KPC-3:
 init_string = INT KISS\r
@@ -536,7 +579,7 @@ init_delay = 1.0</code></pre>
       tncd over both KISS-over-TCP and PTY serial modes, including connected-mode Winlink
       sessions over the air at 1200 baud.
     </p>
-    <pre><code>[client]
+    <pre><code>[client.0]
 type = tcp
 host = 192.168.1.50
 port = 8001
@@ -548,11 +591,12 @@ ota_baudrate = 1200</code></pre>
       In that case, use <code>type = serial</code> and point <code>device</code> at the
       PTY path shown in Dire Wolf's startup output (e.g., <code>/dev/pts/1</code>).</p>
 
-    <h3>[kiss] &mdash; KISS Parameters</h3>
+    <h3>[kiss.0] &mdash; KISS Parameters</h3>
     <p>
-      These control the timing of your radio transmissions. Configure them under the
-      <code>[kiss]</code> section. The defaults work well for most setups. Only change these
-      if you know what you're doing or if you're troubleshooting transmission problems.
+      These control the timing of your radio transmissions. Configure them under a
+      <code>[kiss.N]</code> section matching the TNC number (e.g., <code>[kiss.0]</code>
+      for <code>[client.0]</code>). The defaults work well for most setups. Only change
+      these if you know what you're doing or if you're troubleshooting transmission problems.
     </p>
     <table>
       <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
@@ -585,6 +629,45 @@ ota_baudrate = 1200</code></pre>
         <td><code>0</code></td>
       </tr>
     </table>
+
+    <h3>Multiple TNCs (Multi-Port)</h3>
+    <p>
+      tncd can connect to multiple TNCs at the same time. Each TNC is a separate AGWPE port,
+      numbered to match the config section: <code>[client.0]</code> is port 0,
+      <code>[client.1]</code> is port 1, and so on. Your AGWPE client application selects
+      which TNC to use by specifying the port number.
+    </p>
+    <p>
+      Each TNC section can use any connection type (serial, TCP, or Bluetooth) independently.
+      You can optionally give each port a human-readable <code>name</code> that AGWPE clients
+      can display, and each port can have its own <code>[kiss.N]</code> section for KISS
+      timing parameters.
+    </p>
+    <pre><code>[server]
+listen_host = 127.0.0.1
+listen_port = 8000
+callsign = N0CALL
+
+[client.0]
+name = VHF Serial TNC
+type = serial
+device = /dev/ttyUSB0
+serial_baudrate = 9600
+ota_baudrate = 1200
+
+[client.1]
+name = Mobilinkd TNC3 (BT)
+type = bluetooth
+bdaddr = AA:BB:CC:DD:EE:FF
+ota_baudrate = 1200
+
+[kiss.1]
+tx_delay = 50</code></pre>
+    <div class="note">
+      If two TNCs are on the same frequency, tncd automatically suppresses "overheard"
+      frames &mdash; packets received by the wrong TNC are silently dropped rather than
+      causing duplicate connections or spurious responses.
+    </div>
   </section>
 
   <!-- ============================================================ -->
@@ -685,7 +768,7 @@ listen_host = 127.0.0.1
 listen_port = 8000
 callsign = N0CALL
 
-[client]
+[client.0]
 type = bluetooth
 bdaddr = AA:BB:CC:DD:EE:FF
 ota_baudrate = 1200</code></pre>

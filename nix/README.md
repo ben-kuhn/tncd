@@ -28,7 +28,7 @@ in {
         listen_port = 8000;
         callsign = "N0CALL";
       };
-      client = {
+      "client.0" = {
         type = "serial";
         device = "/dev/ttyUSB0";
         serial_baudrate = 9600;
@@ -57,7 +57,7 @@ services.tncd = {
       listen_port = 8000;
       callsign = "N0CALL";
     };
-    client = {
+    "client.0" = {
       type = "bluetooth";
       bdaddr = "AA:BB:CC:DD:EE:FF";
       ota_baudrate = 1200;
@@ -139,7 +139,7 @@ in the AGWPE client's port selector with its configured `name`.
 For TNCs that need a command to enter KISS mode (e.g. Kantronics KPC-3):
 
 ```nix
-services.tncd.settings.client = {
+services.tncd.settings."client.0" = {
   type = "serial";
   device = "/dev/ttyUSB0";
   serial_baudrate = 9600;
