@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>ku0hn@arrl.net</email>
+		<name>Ben Kuhn</name>
+	</maintainer>
+	<upstream>
+		<remote-id type="pypi">pyham-ax25</remote-id>
+		<remote-id type="github">mfncooper/pyham_ax25</remote-id>
+	</upstream>
+</pkgmetadata>
