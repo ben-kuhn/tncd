@@ -71,6 +71,9 @@ def hex_dump(data, prefix="", width=16):
 # Equivalent to pe's '_HDR_FMT = BxxxBxBx10s10sIxxxx'
 AGWPE_HEADER_FORMAT = '<BBBBBBBB10s10sII'
 AGWPE_HEADER_SIZE = 36
+MAX_AGWPE_PAYLOAD = 65536  # 64 KB — reject frames claiming larger payloads
+MAX_CONNECTIONS = 64       # max simultaneous AX.25 connections
+MAX_OUTBOUND_QUEUE = 512   # max queued outbound chunks per connection
 
 
 DEFAULT_MAX_WINDOW = 3   # mod-8 AX.25: max outstanding I-frames (max 7)
@@ -151,6 +154,13 @@ class AGWPEServerProtocol(asyncio.Protocol):
             call_from = values[8]   # bytes 8-17 are CallFrom
             call_to   = values[9]   # bytes 18-27 are CallTo
             data_len  = values[10]  # bytes 28-31 are DataLen (little-endian)
+
+            if data_len > MAX_AGWPE_PAYLOAD:
+                logger.warning(
+                    f"Oversized AGWPE payload ({data_len} bytes) from "
+                    f"{self.transport.get_extra_info('peername')}, closing")
+                self.transport.close()
+                return
 
             if len(self.buffer) < AGWPE_HEADER_SIZE + data_len:
                 logger.debug(
@@ -255,6 +265,10 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 return
             logger.info(f"CONNECT     {from_str} -> {to_str}")
             conn = self.bridge.get_or_create_connection(port, from_str, to_str)
+            if not conn:
+                busy_msg = f'*** BUSY From {from_str}\r'.encode()
+                self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
+                return
             conn.owner = self
             conn.state = 'CONNECTING'
             conn.send_seqno = 0
@@ -272,6 +286,10 @@ class AGWPEServerProtocol(asyncio.Protocol):
             # Connect with non-standard PID (NET/ROM, etc.) — treated as SABM.
             logger.info(f"CONNECT     {from_str} -> {to_str}  (PID=0x{pid:02X})")
             conn = self.bridge.get_or_create_connection(port, from_str, to_str)
+            if not conn:
+                busy_msg = f'*** BUSY From {from_str}\r'.encode()
+                self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
+                return
             conn.owner = self
             conn.state = 'CONNECTING'
             conn.send_seqno = 0
@@ -297,6 +315,10 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 ]
             logger.info(f"CONNECT     {from_str} -> {to_str}  via {vias!r}")
             conn = self.bridge.get_or_create_connection(port, from_str, to_str)
+            if not conn:
+                busy_msg = f'*** BUSY From {from_str}\r'.encode()
+                self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
+                return
             conn.owner = self
             conn.via = vias
             conn.state = 'CONNECTING'
@@ -324,6 +346,10 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 chunks = [payload[i:i+256] for i in range(0, len(payload), 256)] or [b'']
                 frame_pid = pid if pid else 0xF0
                 for chunk in chunks:
+                    if len(conn.outbound_queue) >= MAX_OUTBOUND_QUEUE:
+                        logger.warning(f"Outbound queue full ({MAX_OUTBOUND_QUEUE}), "
+                                       f"dropping data for {from_str}->{to_str}")
+                        break
                     conn.outbound_queue.append((chunk, frame_pid))
                 logger.info(f"'D' frame: {len(payload)}B payload -> {len(chunks)} chunks, "
                             f"queue={len(conn.outbound_queue)}, unacked={conn.unacked}, "
@@ -1036,6 +1062,10 @@ class Bridge:
     def get_or_create_connection(self, port, local, remote):
         key = self._conn_key(port, local, remote)
         if key not in self.connections:
+            if len(self.connections) >= MAX_CONNECTIONS:
+                logger.warning(f"Connection limit ({MAX_CONNECTIONS}) reached, "
+                               f"rejecting {local}->{remote}")
+                return None
             p, loc, rem = key
             self.connections[key] = Connection(p, loc, rem)
         return self.connections[key]
@@ -1662,6 +1692,19 @@ class Bridge:
         return_via = list(reversed(incoming_via))
         logger.info(f"CONNECT     {src} -> {dst}  (incoming)"
                      + (f"  via {incoming_via!r}" if incoming_via else ""))
+
+        conn = self.get_or_create_connection(port, dst, src)
+        if not conn:
+            # Connection limit reached — reject with DM (not UA).
+            try:
+                dm = _resp_frame(str(frame.src), str(frame.dst), via=return_via,
+                                 control=ax25.Control(ax25.FrameType.DM,
+                                                      poll_final=frame.control.poll_final))
+                self._send_ax25(dm, port)
+            except Exception as e:
+                logger.error(f"Failed to send DM for connection limit: {e}")
+            return
+
         try:
             ua = _resp_frame(str(frame.src), str(frame.dst), via=return_via,
                              control=ax25.Control(ax25.FrameType.UA,
@@ -1669,9 +1712,8 @@ class Bridge:
             self._send_ax25(ua, port)
         except Exception as e:
             logger.error(f"Failed to send UA for incoming SABM: {e}")
+            self.remove_connection(port, dst, src)
             return
-
-        conn = self.get_or_create_connection(port, dst, src)
         conn.via = return_via
         conn.state = 'CONNECTED'
         conn.send_seqno = 0
@@ -2022,7 +2064,7 @@ class PortConfig:
 def load_config(args):
     config = configparser.ConfigParser()
     config.add_section("server")
-    config["server"]["listen_host"] = "0.0.0.0"
+    config["server"]["listen_host"] = "127.0.0.1"
     config["server"]["listen_port"] = "8000"
     config["server"]["callsign"]    = "AGWPE"
 
@@ -2150,7 +2192,7 @@ def main():
     server_group = parser.add_argument_group('Server options')
     server_group.add_argument(
         '--listen-host', metavar='HOST',
-        help='AGWPE server listen address (default: 0.0.0.0)')
+        help='AGWPE server listen address (default: 127.0.0.1)')
     server_group.add_argument(
         '--listen-port', metavar='PORT', type=int,
         help='AGWPE server listen port (default: 8000)')

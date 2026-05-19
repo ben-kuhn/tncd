@@ -163,7 +163,7 @@ Copy `tncd.ini` and adjust for your setup:
 
 ```ini
 [server]
-listen_host = 0.0.0.0
+listen_host = 127.0.0.1
 listen_port = 8000
 callsign = AGWPE
 
@@ -312,7 +312,7 @@ starting at 0. Each port can use any connection type independently.
 
 ```ini
 [server]
-listen_host = 0.0.0.0
+listen_host = 127.0.0.1
 listen_port = 8000
 callsign = N0CALL
 

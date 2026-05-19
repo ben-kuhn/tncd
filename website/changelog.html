@@ -153,6 +153,34 @@
 
 <main>
 
+  <!-- v0.11.1-BETA -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v0.11.1-BETA</h2>
+      <span class="date">May 2026</span>
+      <a class="tag" href="https://github.com/ben-kuhn/tncd/releases/tag/v0.11.1-BETA">release</a>
+    </div>
+    <div class="release-body">
+      <h3>Security Hardening</h3>
+      <ul>
+        <li>Default <code>listen_host</code> changed from <code>0.0.0.0</code> to
+          <code>127.0.0.1</code> &mdash; prevents unauthenticated remote access to the
+          AGWPE server. Set to <code>0.0.0.0</code> in config if remote access is needed.</li>
+        <li>Maximum AGWPE payload size limit (64 KB) &mdash; disconnects clients sending
+          oversized frames to prevent memory exhaustion</li>
+        <li>Maximum concurrent AX.25 connections limit (64) &mdash; prevents unbounded
+          connection state accumulation</li>
+        <li>Outbound queue cap (512 entries per connection) &mdash; prevents memory exhaustion
+          from rapid <code>D</code> frame sends</li>
+      </ul>
+      <h3>Bug Fixes</h3>
+      <ul>
+        <li>Fix incoming SABM handling at connection limit: send DM (reject) instead of
+          UA followed by DM, per AX.25 &sect;2.3.4</li>
+      </ul>
+    </div>
+  </div>
+
   <!-- v0.9-BETA -->
   <div class="release">
     <div class="release-header">

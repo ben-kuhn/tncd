@@ -83,7 +83,7 @@ class TestLoadConfig:
             kiss_port=None, baudrate=None,
         )
         cfg = load_config(args)
-        assert cfg.get('server', 'listen_host') == '0.0.0.0'
+        assert cfg.get('server', 'listen_host') == '127.0.0.1'
         assert cfg.getint('server', 'listen_port') == 8000
 
     def test_cli_overrides(self):
@@ -525,6 +525,31 @@ class TestBufferingAndReassembly:
         protocol.data_received(frame1 + frame2)
         assert transport.write.call_count == 2
 
+    def test_oversized_payload_closes_connection(self):
+        """A frame claiming a payload larger than MAX_AGWPE_PAYLOAD must close the connection."""
+        from tncd import MAX_AGWPE_PAYLOAD
+        protocol, transport, bridge = make_protocol()
+        # Craft a header with data_len = MAX_AGWPE_PAYLOAD + 1
+        oversized_len = MAX_AGWPE_PAYLOAD + 1
+        header = struct.pack(
+            AGWPE_HEADER_FORMAT,
+            0, 0, 0, 0,
+            ord('M'),
+            0, 0xF0, 0,
+            (b'W1ABC' + b'\x00' * 10)[:10],
+            (b'APRS' + b'\x00' * 10)[:10],
+            oversized_len, 0,
+        )
+        protocol.data_received(header)
+        transport.close.assert_called_once()
+
+    def test_valid_payload_not_closed(self):
+        """A frame with a payload within MAX_AGWPE_PAYLOAD must not be closed."""
+        protocol, transport, bridge = make_protocol()
+        frame = make_frame(0, ord('R'))
+        protocol.data_received(frame)
+        transport.close.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # KISSClient
@@ -651,6 +676,28 @@ class TestBridge:
         bridge.send_to_kiss(0, b'\x00\x01\x02')
         mock_conn.write.assert_called_once_with(b'\x00\x01\x02')
 
+    def test_connection_limit_enforced(self):
+        """get_or_create_connection must return None when MAX_CONNECTIONS is reached."""
+        from tncd import MAX_CONNECTIONS
+        bridge = self._make_bridge()
+        # Fill up to the limit
+        for i in range(MAX_CONNECTIONS):
+            conn = bridge.get_or_create_connection(0, 'LOCAL', f'REMOTE-{i}')
+            assert conn is not None
+        # One more should be rejected
+        conn = bridge.get_or_create_connection(0, 'LOCAL', 'ONE-TOO-MANY')
+        assert conn is None
+
+    def test_connection_limit_allows_existing(self):
+        """get_or_create_connection must return existing connections even at the limit."""
+        from tncd import MAX_CONNECTIONS
+        bridge = self._make_bridge()
+        for i in range(MAX_CONNECTIONS):
+            bridge.get_or_create_connection(0, 'LOCAL', f'REMOTE-{i}')
+        # Fetching an existing connection should still work
+        conn = bridge.get_or_create_connection(0, 'LOCAL', 'REMOTE-0')
+        assert conn is not None
+
 
 # ---------------------------------------------------------------------------
 # Connected mode helpers
@@ -749,6 +796,26 @@ class TestConnectedMode:
         assert bridge.kiss_client.send.call_count == max_win
         assert conn.unacked == max_win
         assert len(conn.outbound_queue) == 3
+
+    def test_D_outbound_queue_capped(self):
+        """D frames beyond MAX_OUTBOUND_QUEUE must be dropped, not queued."""
+        from tncd import MAX_OUTBOUND_QUEUE
+        protocol, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = protocol
+        # Fill the window so further D frames queue instead of sending
+        max_win = bridge.max_window
+        for i in range(max_win):
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', bytes(200)))
+        assert conn.unacked == max_win
+        # Now fill the queue to the cap
+        for i in range(MAX_OUTBOUND_QUEUE):
+            protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', bytes(200)))
+        assert len(conn.outbound_queue) == MAX_OUTBOUND_QUEUE
+        # One more should be dropped, queue stays at cap
+        protocol.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', bytes(200)))
+        assert len(conn.outbound_queue) == MAX_OUTBOUND_QUEUE
 
     def test_D_window_drains_on_ack(self):
         """Queued frames must be sent when ACKs open the window."""
