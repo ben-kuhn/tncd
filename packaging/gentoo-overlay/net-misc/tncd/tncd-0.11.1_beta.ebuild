@@ -37,11 +37,10 @@ RDEPEND="
 "
 
 src_install() {
-	python_fix_shebang tncd.py tncd-rfcomm
+	python_fix_shebang tncd.py
 
 	exeinto /usr/bin
 	newexe tncd.py tncd
-	newexe tncd-rfcomm tncd-rfcomm
 
 	insinto /etc
 	newins tncd.ini tncd.ini.example
@@ -51,12 +50,6 @@ src_install() {
 		-e "s|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|" \
 		-e "/^WorkingDirectory=/d" \
 		"${D}$(systemd_get_systemunitdir)/tncd.service" || die
-
-	systemd_dounit tncd-rfcomm.service
-	sed -i \
-		-e "s|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|" \
-		-e "/^WorkingDirectory=/d" \
-		"${D}$(systemd_get_systemunitdir)/tncd-rfcomm.service" || die
 
 	dodoc README.md
 }

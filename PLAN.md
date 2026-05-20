@@ -42,12 +42,9 @@ ota_baudrate = 1200
 - Config via CLI args OR config file
 - systemd service ready
 
-### Milestone 2: Bluetooth rfcomm Management (COMPLETE)
-- `tncd-rfcomm` script to manage Bluetooth rfcomm bindings
-- Disconnects audio profiles before connecting serial channel
-- Auto-reconnect (`watch` mode) on connection drop
-- Cleans up rfcomm binding on exit (SIGINT/SIGTERM)
-- Config options for device, bdaddr, channel, retry delay
+### Milestone 2: Bluetooth rfcomm Management (RETIRED)
+- `tncd-rfcomm` standalone script has been removed; superseded by Milestone 4
+- Bluetooth SPP is now handled in-process via BlueZ D-Bus Profile API in `tncd.py`
 
 ### Milestone 3: AX.25 Connected Mode (COMPLETE)
 Full AX.25 layer 2 implementation for KISS TNCs:

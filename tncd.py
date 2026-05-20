@@ -123,8 +123,14 @@ class AGWPEServerProtocol(asyncio.Protocol):
         self.traffic_debug = traffic_debug
         self.monitoring = False  # toggled by 'm' frame
         self.registered_calls = set()  # callsigns registered via 'X' frame
+        self.last_activity = time.monotonic()
 
     def connection_made(self, transport):
+        if len(self.bridge.clients) >= self.bridge.max_clients:
+            logger.warning(f"Client limit ({self.bridge.max_clients}) reached, "
+                           f"rejecting {transport.get_extra_info('peername')}")
+            transport.close()
+            return
         self.transport = transport
         logger.info(f"AGWPE client connected from {transport.get_extra_info('peername')}")
         self.bridge.add_client(self)
@@ -135,6 +141,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
 
     def data_received(self, data):
         self.buffer += data
+        self.last_activity = time.monotonic()
         if self.traffic_debug:
             print(hex_dump(data, prefix="AGWPE RX: "))
         logger.debug(f"data_received: {len(data)} bytes, buffer now {len(self.buffer)}")
@@ -222,16 +229,23 @@ class AGWPEServerProtocol(asyncio.Protocol):
             self.send_frame(port, ord(b'g'), b'', b'', caps)
 
         elif datakind_bytes == b'X':
-            logger.debug(f"REGISTER: from={from_str!r}")
-            self.registered_calls.add(from_str)
+            call = from_str.upper()
+            logger.debug(f"REGISTER: from={call!r}")
+            for other in self.bridge.clients:
+                if other is not self and call in other.registered_calls:
+                    logger.warning(f"Rejecting duplicate registration of {call}")
+                    self.send_frame(port, ord(b'X'), call_from, b'', b'\x00')
+                    return
+            self.registered_calls.add(call)
             # pe reads CallFrom from the response to record registered callsign.
             # data[0] != 0 means success.  Echo the port from the request.
             self.send_frame(port, ord(b'X'), call_from, b'', b'\x01')
 
         elif datakind_bytes == b'x':
             # Unregister callsign: per spec, no response is sent.
-            logger.debug(f"UNREGISTER: from={from_str!r}")
-            self.registered_calls.discard(from_str)
+            call = from_str.upper()
+            logger.debug(f"UNREGISTER: from={call!r}")
+            self.registered_calls.discard(call)
 
         elif datakind_bytes == b'm':
             # Toggle monitoring on/off per call (spec: same frame type both ways).
@@ -269,6 +283,11 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
                 return
+            if conn.state == 'CONNECTED' and conn.owner is not self:
+                logger.warning(f"Rejecting non-owner 'C' for active {from_str}->{to_str}")
+                busy_msg = f'*** BUSY From {from_str}\r'.encode()
+                self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
+                return
             conn.owner = self
             conn.state = 'CONNECTING'
             conn.send_seqno = 0
@@ -287,6 +306,11 @@ class AGWPEServerProtocol(asyncio.Protocol):
             logger.info(f"CONNECT     {from_str} -> {to_str}  (PID=0x{pid:02X})")
             conn = self.bridge.get_or_create_connection(port, from_str, to_str)
             if not conn:
+                busy_msg = f'*** BUSY From {from_str}\r'.encode()
+                self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
+                return
+            if conn.state == 'CONNECTED' and conn.owner is not self:
+                logger.warning(f"Rejecting non-owner 'c' for active {from_str}->{to_str}")
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
                 return
@@ -319,6 +343,11 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
                 return
+            if conn.state == 'CONNECTED' and conn.owner is not self:
+                logger.warning(f"Rejecting non-owner 'v' for active {from_str}->{to_str}")
+                busy_msg = f'*** BUSY From {from_str}\r'.encode()
+                self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
+                return
             conn.owner = self
             conn.via = vias
             conn.state = 'CONNECTING'
@@ -340,6 +369,8 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 logger.warning(
                     f"'D' from {from_str!r} to {to_str!r}: "
                     f"no active connection (state={conn.state if conn else 'None'})")
+            elif conn.owner is not self:
+                logger.warning(f"Rejecting non-owner 'D' for {from_str}->{to_str}")
             else:
                 # I-frame info field is limited to 256 bytes; fragment if needed.
                 payload = data if data else b''
@@ -361,6 +392,8 @@ class AGWPEServerProtocol(asyncio.Protocol):
             conn = self.bridge.get_connection(port, from_str, to_str)
             if not conn:
                 logger.warning(f"'d' disconnect with no connection {from_str!r} -> {to_str!r}")
+            elif conn.owner is not self:
+                logger.warning(f"Rejecting non-owner 'd' for {from_str}->{to_str}")
             else:
                 conn.state = 'DISCONNECTING'
                 logger.info(f"DISCONNECT  {from_str} -> {to_str}")
@@ -376,6 +409,10 @@ class AGWPEServerProtocol(asyncio.Protocol):
             raw = data[1:] if (data and data[0] == 0x00) else data
             logger.debug(f"Raw KISS frame, {len(raw)} bytes")
             if raw:
+                conn = self.bridge.get_connection(port, from_str, to_str)
+                if conn and conn.owner is not self:
+                    logger.warning(f"Rejecting non-owner 'K' for {from_str}->{to_str}")
+                    return
                 self.bridge.send_to_kiss(port, raw)
 
         elif datakind_bytes == b'k':
@@ -396,9 +433,14 @@ class AGWPEServerProtocol(asyncio.Protocol):
             # throttle sends (blocking at outstanding > maxFrame), so
             # Flush() only waits for the last batch — not the whole transfer.
             conn = self.bridge.get_connection(port, from_str, to_str)
-            unacked = conn.unacked if conn else 0
-            queued = len(conn.outbound_queue) if conn else 0
-            count = unacked + queued
+            if conn and conn.owner is not self:
+                unacked = 0
+                queued = 0
+                count = 0
+            else:
+                unacked = conn.unacked if conn else 0
+                queued = len(conn.outbound_queue) if conn else 0
+                count = unacked + queued
             logger.info(f"'Y' query {from_str!r}<->{to_str!r}: unacked={unacked}, queue={queued}, reported={count}")
             self.send_frame(port, ord(b'Y'), call_from, call_to, struct.pack('<I', count))
 
@@ -941,6 +983,8 @@ class Bridge:
         self.callsign = config.get('server', 'callsign', fallback='AGWPE')
         self.traffic_debug = traffic_debug
         self.verbose = verbose
+        self.max_clients = config.getint('server', 'max_clients', fallback=8)
+        self.idle_timeout = config.getint('server', 'idle_timeout', fallback=300)
         # TX echo detection: some TNCs (e.g. UV-Pro) echo transmitted frames
         # back via KISS. Track recently-sent raw bytes to discard them.
         self._sent_frames = collections.deque(maxlen=20)
@@ -1039,6 +1083,7 @@ class Bridge:
         )
 
         logger.info("Bridge running. Press Ctrl+C to stop.")
+        loop.call_later(30, self._sweep_idle_clients)
 
         try:
             async with server:
@@ -1049,9 +1094,38 @@ class Bridge:
     def add_client(self, client):
         self.clients.append(client)
 
+    def _sweep_idle_clients(self):
+        """Close AGWPE clients that have been idle beyond idle_timeout."""
+        if self.idle_timeout <= 0:
+            return
+        now = time.monotonic()
+        for client in list(self.clients):
+            if now - client.last_activity > self.idle_timeout:
+                logger.info(f"Closing idle AGWPE client "
+                            f"{client.transport.get_extra_info('peername')}")
+                client.transport.close()
+        loop = asyncio.get_running_loop()
+        loop.call_later(30, self._sweep_idle_clients)
+
     def remove_client(self, client):
         if client in self.clients:
             self.clients.remove(client)
+        # Clean up AX.25 connections owned by the departing client
+        to_remove = [(k, c) for k, c in self.connections.items() if c.owner is client]
+        for key, conn in to_remove:
+            self._cancel_t1(conn)
+            self._cancel_t2(conn)
+            self._cancel_t3(conn)
+            if conn.state in ('CONNECTED', 'CONNECTING'):
+                try:
+                    frame = _cmd_frame(conn.remote, conn.local, via=conn.via,
+                                       control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
+                    self._send_ax25(frame, conn.port)
+                except Exception:
+                    pass
+            del self.connections[key]
+        # Free registered callsigns
+        client.registered_calls.clear()
 
     def _conn_key(self, port, local, remote):
         return (port, local.strip().upper(), remote.strip().upper())
@@ -1738,9 +1812,9 @@ class Bridge:
                 pass
 
         msg = f'*** CONNECTED To Station {src}\r'.encode()
-        for client in self.clients:
+        if conn.owner:
             try:
-                client.send_frame(port, ord('C'), src.encode(), dst.encode(), msg)
+                conn.owner.send_frame(port, ord('C'), src.encode(), dst.encode(), msg)
             except Exception as e:
                 logger.error(f"Error sending 'C' notification: {e}")
 

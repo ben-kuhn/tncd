@@ -20,7 +20,6 @@ final: prev:
     ];
     installPhase = ''
       install -Dm755 tncd.py      $out/bin/tncd
-      install -Dm755 tncd-rfcomm  $out/bin/tncd-rfcomm
       install -Dm644 tncd.ini     $out/share/tncd/tncd.ini.example
     '';
     meta = with final.lib; {

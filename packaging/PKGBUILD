@@ -13,7 +13,6 @@ sha256sums=('d468da6145f04ee008bfb2d03f829af9fe86fa770080649e8a09ef6dd4b68bc0')
 package() {
     cd "$pkgname-$pkgver"
     install -Dm755 tncd.py             "$pkgdir/usr/bin/tncd"
-    install -Dm755 tncd-rfcomm         "$pkgdir/usr/bin/tncd-rfcomm"
     install -Dm644 tncd.ini            "$pkgdir/etc/tncd.ini.example"
     # Install service files then patch ExecStart/WorkingDirectory for packaged paths.
     install -Dm644 tncd.service        "$pkgdir/usr/lib/systemd/system/tncd.service"
@@ -21,9 +20,4 @@ package() {
         -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
         -e '/^WorkingDirectory=/d' \
         "$pkgdir/usr/lib/systemd/system/tncd.service"
-    install -Dm644 tncd-rfcomm.service "$pkgdir/usr/lib/systemd/system/tncd-rfcomm.service"
-    sed -i \
-        -e 's|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|' \
-        -e '/^WorkingDirectory=/d' \
-        "$pkgdir/usr/lib/systemd/system/tncd-rfcomm.service"
 }

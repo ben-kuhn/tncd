@@ -92,29 +92,18 @@ jobs:
           cp tncd.py staging/usr/lib/tncd/
           cp -r vendor/. staging/usr/lib/tncd/
 
-          # rfcomm manager (stdlib only, no vendored deps needed)
-          cp tncd-rfcomm staging/usr/lib/tncd/tncd-rfcomm
-          chmod 755 staging/usr/lib/tncd/tncd-rfcomm
-
-          # /usr/bin wrappers
+          # /usr/bin wrapper
           cp packaging/tncd-wrapper staging/usr/bin/tncd
           chmod 755 staging/usr/bin/tncd
-          printf '#!/bin/sh\nexec python3 /usr/lib/tncd/tncd-rfcomm "$@"\n' \
-            > staging/usr/bin/tncd-rfcomm
-          chmod 755 staging/usr/bin/tncd-rfcomm
 
           # Example config
           cp tncd.ini staging/etc/tncd.ini.example
 
-          # Systemd units — patch for installed paths
+          # Systemd unit — patch for installed paths
           sed \
             -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
             -e '/^WorkingDirectory=/d' \
             tncd.service > staging/lib/systemd/system/tncd.service
-          sed \
-            -e 's|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|' \
-            -e '/^WorkingDirectory=/d' \
-            tncd-rfcomm.service > staging/lib/systemd/system/tncd-rfcomm.service
 
       - name: Build .deb
         run: |

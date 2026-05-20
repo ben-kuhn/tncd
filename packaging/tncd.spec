@@ -32,7 +32,6 @@ SABM/UA handshake, I-frame sequencing, and RR acknowledgement.
 
 %install
 install -Dm755 tncd.py           %{buildroot}%{_bindir}/tncd
-install -Dm755 tncd-rfcomm       %{buildroot}%{_bindir}/tncd-rfcomm
 install -Dm644 tncd.ini          %{buildroot}%{_sysconfdir}/tncd.ini.example
 
 # Create the systemd unit directory before writing to it.
@@ -44,27 +43,20 @@ sed \
     -e '/^WorkingDirectory=/d' \
     tncd.service > %{buildroot}%{_unitdir}/tncd.service
 
-sed \
-    -e 's|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|' \
-    -e '/^WorkingDirectory=/d' \
-    tncd-rfcomm.service > %{buildroot}%{_unitdir}/tncd-rfcomm.service
-
 %post
-%systemd_post tncd.service tncd-rfcomm.service
+%systemd_post tncd.service
 
 %preun
-%systemd_preun tncd.service tncd-rfcomm.service
+%systemd_preun tncd.service
 
 %postun
-%systemd_postun_with_restart tncd.service tncd-rfcomm.service
+%systemd_postun_with_restart tncd.service
 
 %files
 %license COPYING
 %{_bindir}/tncd
-%{_bindir}/tncd-rfcomm
 %config(noreplace) %{_sysconfdir}/tncd.ini.example
 %{_unitdir}/tncd.service
-%{_unitdir}/tncd-rfcomm.service
 
 %changelog
 * Mon Apr 28 2026 tncd contributors <noreply@github.com> - 0.1-1

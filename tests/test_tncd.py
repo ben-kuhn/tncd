@@ -10,6 +10,7 @@ from unittest.mock import Mock, MagicMock, patch
 
 import os
 import tempfile
+import time
 
 from tncd import (
     AGWPEServerProtocol, BluetoothKISS, Bridge, Connection, KISSClient,
@@ -63,6 +64,8 @@ def make_protocol():
     bridge.config = config
     bridge.verbose = 0
     bridge.get_connection.return_value = None
+    bridge.clients = []
+    bridge.max_clients = 8
 
     protocol  = AGWPEServerProtocol(bridge)
     transport = Mock()
@@ -1009,9 +1012,10 @@ class TestConnectedModeReceivePath:
         assert str(ua.src) == 'W1ABC'
 
     def test_incoming_sabm_notifies_clients_with_C(self):
-        """Incoming SABM must send 'C' notification to all AGWPE clients."""
+        """Incoming SABM must send 'C' notification to the registered owner."""
         bridge = self._make_bridge()
         client = Mock()
+        client.registered_calls = {'W1ABC'}
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -1210,7 +1214,7 @@ class TestConnectedModeReceivePath:
         """Incoming SABM 'C' notification must use 'CONNECTED To' (not 'With')."""
         bridge = self._make_bridge()
         client = Mock()
-        client.registered_calls = set()
+        client.registered_calls = {'W1ABC'}
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -2453,6 +2457,395 @@ class TestSABMResetsBuffers:
         assert len(conn.retransmit_buf) == 0
         assert len(conn.outbound_queue) == 0
         assert conn.remote_busy is False
+
+
+class TestOwnerEnforcement:
+    """Security audit: non-owner clients must not operate on another client's session."""
+
+    def test_non_owner_D_rejected(self):
+        """Non-owner client cannot send data on another client's connection."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        bridge.kiss_client.send.reset_mock()
+        intruder.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'evil'))
+        # Non-owner must not transmit anything to the TNC
+        bridge.kiss_client.send.assert_not_called()
+
+    def test_owner_D_allowed(self):
+        """Owner client can still send data normally."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+
+        owner.data_received(make_frame(0, ord('D'), b'W1ABC', b'W2DEF', b'hello'))
+        assert len(conn.outbound_queue) > 0 or bridge.kiss_client.send.called
+
+    def test_non_owner_d_rejected(self):
+        """Non-owner client cannot disconnect another client's session."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        intruder.data_received(make_frame(0, ord('d'), b'W1ABC', b'W2DEF'))
+        assert conn.state == 'CONNECTED'
+
+    def test_owner_d_allowed(self):
+        """Owner client can disconnect their own session."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+
+        owner.data_received(make_frame(0, ord('d'), b'W1ABC', b'W2DEF'))
+        assert conn.state == 'DISCONNECTING'
+
+    def test_non_owner_K_rejected_when_connection_exists(self):
+        """Non-owner cannot send raw frames when a connection exists for callsign pair."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        bridge.kiss_client.send.reset_mock()
+        intruder.data_received(make_frame(0, ord('K'), b'W1ABC', b'W2DEF', b'\x00rawdata'))
+        bridge.kiss_client.send.assert_not_called()
+
+    def test_K_allowed_when_no_connection(self):
+        """K frame is allowed when no connection exists for the callsign pair."""
+        proto, _, bridge = make_real_protocol()
+        bridge.kiss_client.send.reset_mock()
+        proto.data_received(make_frame(0, ord('K'), b'W1ABC', b'W2DEF', b'\x00rawdata'))
+        bridge.kiss_client.send.assert_called_once()
+
+    def test_non_owner_C_on_active_session_gets_busy(self):
+        """Non-owner C on a CONNECTED session must return BUSY without disturbing it."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+        conn.send_seqno = 5
+        conn.recv_seqno = 3
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        intruder.data_received(make_frame(0, ord('C'), b'W1ABC', b'W2DEF'))
+
+        # Intruder should get a BUSY response
+        resp = parse_frame(intruder_transport.write.call_args[0][0])
+        assert resp['kind'] == 'd'
+        assert b'BUSY' in resp['data']
+
+        # Original connection must be undisturbed
+        assert conn.owner is owner
+        assert conn.state == 'CONNECTED'
+        assert conn.send_seqno == 5
+        assert conn.recv_seqno == 3
+
+    def test_owner_C_on_disconnected_session_allowed(self):
+        """Owner can reconnect a session that isn't CONNECTED."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'DISCONNECTED'
+        conn.owner = owner
+
+        owner.data_received(make_frame(0, ord('C'), b'W1ABC', b'W2DEF'))
+        assert conn.state == 'CONNECTING'
+        assert conn.owner is owner
+
+    def test_non_owner_Y_returns_zero(self):
+        """Non-owner Y query must return 0 outstanding frames."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+        conn.unacked = 5
+        conn.outbound_queue.append((b'data', 0xF0))
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        intruder.data_received(make_frame(0, ord('Y'), b'W1ABC', b'W2DEF'))
+        resp = parse_frame(intruder_transport.write.call_args[0][0])
+        assert resp['kind'] == 'Y'
+        count = struct.unpack('<I', resp['data'])[0]
+        assert count == 0
+
+
+class TestCallsignRegistration:
+    """Security audit: unique callsign registration and case normalization."""
+
+    def test_X_normalizes_case(self):
+        """Callsign registration normalizes to uppercase."""
+        proto, transport, bridge = make_real_protocol()
+        proto.data_received(make_frame(0, ord('X'), b'w1abc'))
+        assert 'W1ABC' in proto.registered_calls
+        assert 'w1abc' not in proto.registered_calls
+
+    def test_X_duplicate_from_second_client_rejected(self):
+        """Second client cannot register a callsign already held by another client."""
+        owner, _, bridge = make_real_protocol()
+        owner.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        assert 'W1ABC' in owner.registered_calls
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        intruder.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        assert 'W1ABC' not in intruder.registered_calls
+        resp = parse_frame(intruder_transport.write.call_args[0][0])
+        assert resp['kind'] == 'X'
+        assert resp['data'] == b'\x00'
+
+    def test_X_same_client_idempotent(self):
+        """Same client re-registering same callsign succeeds."""
+        proto, transport, bridge = make_real_protocol()
+        proto.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        transport.write.reset_mock()
+        proto.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        resp = parse_frame(transport.write.call_args[0][0])
+        assert resp['kind'] == 'X'
+        assert resp['data'] == b'\x01'
+
+    def test_X_case_insensitive_duplicate_rejected(self):
+        """Duplicate detection is case-insensitive."""
+        owner, _, bridge = make_real_protocol()
+        owner.data_received(make_frame(0, ord('X'), b'W1ABC'))
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        intruder.data_received(make_frame(0, ord('X'), b'w1abc'))
+        assert 'W1ABC' not in intruder.registered_calls
+        resp = parse_frame(intruder_transport.write.call_args[0][0])
+        assert resp['data'] == b'\x00'
+
+    def test_x_unregister_normalizes_case(self):
+        """Unregister normalizes case to match registration."""
+        proto, transport, bridge = make_real_protocol()
+        proto.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        assert 'W1ABC' in proto.registered_calls
+        proto.data_received(make_frame(0, ord('x'), b'w1abc'))
+        assert 'W1ABC' not in proto.registered_calls
+
+
+class TestIncomingSABMScoped:
+    """Security audit: incoming SABM notification goes only to the registered owner."""
+
+    def test_incoming_sabm_notifies_only_owner(self):
+        """Only the registered owner receives the incoming C notification."""
+        owner, owner_transport, bridge = make_real_protocol()
+        owner.data_received(make_frame(0, ord('X'), b'W1ABC'))
+
+        bystander = AGWPEServerProtocol(bridge)
+        bystander_transport = Mock()
+        bystander_transport.is_closing.return_value = False
+        bystander.connection_made(bystander_transport)
+
+        sabm = ax25.Frame(
+            dst=ax25.Address('W1ABC'),
+            src=ax25.Address('W2DEF'),
+            control=ax25.Control(ax25.FrameType.SABM, poll_final=True),
+        )
+        owner_transport.write.reset_mock()
+        bystander_transport.write.reset_mock()
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
+
+        owner_calls = [parse_frame(c[0][0]) for c in owner_transport.write.call_args_list]
+        c_frames = [f for f in owner_calls if f['kind'] == 'C']
+        assert len(c_frames) == 1
+        assert b'CONNECTED To Station W2DEF' in c_frames[0]['data']
+
+        if bystander_transport.write.called:
+            bystander_calls = [parse_frame(c[0][0]) for c in bystander_transport.write.call_args_list]
+            c_frames_bystander = [f for f in bystander_calls if f['kind'] == 'C']
+            assert len(c_frames_bystander) == 0
+
+    def test_incoming_sabm_no_owner_no_notification(self):
+        """If no client registered the callsign, no C notification is sent."""
+        proto, transport, bridge = make_real_protocol()
+
+        sabm = ax25.Frame(
+            dst=ax25.Address('W1ABC'),
+            src=ax25.Address('W2DEF'),
+            control=ax25.Control(ax25.FrameType.SABM, poll_final=True),
+        )
+        transport.write.reset_mock()
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
+
+        if transport.write.called:
+            calls = [parse_frame(c[0][0]) for c in transport.write.call_args_list]
+            c_frames = [f for f in calls if f['kind'] == 'C']
+            assert len(c_frames) == 0
+
+
+class TestClientCleanup:
+    """Security audit: client disconnect must clean up owned connections."""
+
+    def test_remove_client_sends_disc_and_removes_connection(self):
+        """When a client disconnects, owned connections are torn down with DISC."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTED'
+        conn.owner = owner
+
+        bridge.kiss_client.send.reset_mock()
+        bridge.remove_client(owner)
+
+        assert bridge.kiss_client.send.called
+        frame = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert frame.control.frame_type is ax25.FrameType.DISC
+
+        assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
+
+    def test_remove_client_clears_registered_calls(self):
+        """Client disconnect frees registered callsigns for other clients."""
+        owner, _, bridge = make_real_protocol()
+        owner.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        assert 'W1ABC' in owner.registered_calls
+
+        bridge.remove_client(owner)
+
+        new_client = AGWPEServerProtocol(bridge)
+        new_transport = Mock()
+        new_transport.is_closing.return_value = False
+        new_client.connection_made(new_transport)
+        new_client.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        assert 'W1ABC' in new_client.registered_calls
+
+    def test_remove_client_does_not_affect_other_owners(self):
+        """Removing one client does not disturb another client's connections."""
+        owner1, _, bridge = make_real_protocol()
+        conn1 = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn1.state = 'CONNECTED'
+        conn1.owner = owner1
+
+        owner2 = AGWPEServerProtocol(bridge)
+        t2 = Mock()
+        t2.is_closing.return_value = False
+        owner2.connection_made(t2)
+        conn2 = bridge.get_or_create_connection(0, 'W3GHI', 'W4JKL')
+        conn2.state = 'CONNECTED'
+        conn2.owner = owner2
+
+        bridge.remove_client(owner1)
+        assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
+        assert bridge.get_connection(0, 'W3GHI', 'W4JKL') is conn2
+
+
+class TestClientLimits:
+    """Security audit: configurable AGWPE client limits."""
+
+    def test_client_cap_rejects_excess_connections(self):
+        """New clients beyond max_clients are closed immediately."""
+        raw = configparser.ConfigParser()
+        raw['server'] = {
+            'listen_host': '0.0.0.0', 'listen_port': '8000',
+            'callsign': 'N0CALL', 'max_clients': '2',
+        }
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        raw['kiss.0'] = {'tx_delay': '40', 'persistence': '63',
+                         'slot_time': '20', 'tx_tail': '30'}
+        config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
+        bridge = Bridge(config)
+        mock_kc = Mock()
+        mock_kc.online = True
+        bridge.kiss_clients[0] = mock_kc
+        bridge.kiss_client = mock_kc
+
+        for _ in range(2):
+            proto = AGWPEServerProtocol(bridge)
+            t = Mock()
+            t.is_closing.return_value = False
+            proto.connection_made(t)
+        assert len(bridge.clients) == 2
+
+        rejected_proto = AGWPEServerProtocol(bridge)
+        rejected_transport = Mock()
+        rejected_transport.is_closing.return_value = False
+        rejected_proto.connection_made(rejected_transport)
+        rejected_transport.close.assert_called_once()
+        assert len(bridge.clients) == 2
+
+    def test_default_max_clients(self):
+        """Default max_clients is 8."""
+        _, _, bridge = make_real_protocol()
+        assert bridge.max_clients == 8
+
+
+class TestIdleTimeout:
+    """Security audit: idle AGWPE clients are disconnected."""
+
+    async def test_idle_client_closed(self):
+        """Client with no activity past idle_timeout is closed."""
+        raw = configparser.ConfigParser()
+        raw['server'] = {
+            'listen_host': '0.0.0.0', 'listen_port': '8000',
+            'callsign': 'N0CALL', 'idle_timeout': '10',
+        }
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        raw['kiss.0'] = {'tx_delay': '40', 'persistence': '63',
+                         'slot_time': '20', 'tx_tail': '30'}
+        config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
+        bridge = Bridge(config)
+        mock_kc = Mock()
+        mock_kc.online = True
+        bridge.kiss_clients[0] = mock_kc
+        bridge.kiss_client = mock_kc
+
+        proto = AGWPEServerProtocol(bridge)
+        transport = Mock()
+        transport.is_closing.return_value = False
+        proto.connection_made(transport)
+
+        # Simulate stale last_activity
+        proto.last_activity = time.monotonic() - 20
+        bridge._sweep_idle_clients()
+        transport.close.assert_called_once()
+
+    async def test_active_client_not_closed(self):
+        """Client with recent activity is not closed."""
+        _, _, bridge = make_real_protocol()
+        proto = bridge.clients[0]
+        proto.last_activity = time.monotonic()
+        transport = proto.transport
+        bridge._sweep_idle_clients()
+        transport.close.assert_not_called()
+
+    def test_default_idle_timeout(self):
+        """Default idle_timeout is 300."""
+        _, _, bridge = make_real_protocol()
+        assert bridge.idle_timeout == 300
 
 
 if __name__ == '__main__':
