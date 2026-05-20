@@ -195,6 +195,7 @@
       <button class="tab" data-tab="fedora">Fedora / RHEL</button>
       <button class="tab" data-tab="opensuse">openSUSE</button>
       <button class="tab" data-tab="arch">Arch Linux</button>
+      <button class="tab" data-tab="gentoo">Gentoo</button>
       <button class="tab" data-tab="nixos">NixOS</button>
       <button class="tab" data-tab="macos">macOS</button>
       <button class="tab" data-tab="windows">Windows</button>
@@ -237,6 +238,26 @@ curl -fsSL https://raw.githubusercontent.com/ben-kuhn/tncd/main/packaging/PKGBUI
 
 # Build and install
 makepkg -si</code></pre>
+    </div>
+
+    <div class="tab-content" id="tab-gentoo">
+      <p>tncd is available via a custom overlay that includes the package and its Python dependencies.</p>
+      <pre><code># Clone the overlay
+sudo mkdir -p /var/db/repos
+sudo git clone https://github.com/ben-kuhn/tncd.git \
+  /var/db/repos/tncd
+
+# Register the overlay
+cat &lt;&lt;'EOF' | sudo tee /etc/portage/repos.conf/tncd.conf
+[tncd]
+location = /var/db/repos/tncd/packaging/gentoo-overlay
+EOF
+
+# Install (add bluetooth USE flag for BT support)
+sudo emerge --ask net-misc/tncd</code></pre>
+      <p style="margin-top:1rem;">The overlay also provides ebuilds for
+        <code>dev-python/kiss3</code>, <code>dev-python/pyham-ax25</code>,
+        and <code>dev-python/ax253</code>.</p>
     </div>
 
     <div class="tab-content" id="tab-nixos">
