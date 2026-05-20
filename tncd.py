@@ -283,7 +283,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
                 return
-            if conn.state == 'CONNECTED' and conn.owner is not self:
+            if conn.state != 'DISCONNECTED' and conn.owner is not self:
                 logger.warning(f"Rejecting non-owner 'C' for active {from_str}->{to_str}")
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
@@ -309,7 +309,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
                 return
-            if conn.state == 'CONNECTED' and conn.owner is not self:
+            if conn.state != 'DISCONNECTED' and conn.owner is not self:
                 logger.warning(f"Rejecting non-owner 'c' for active {from_str}->{to_str}")
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
@@ -343,7 +343,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
                 return
-            if conn.state == 'CONNECTED' and conn.owner is not self:
+            if conn.state != 'DISCONNECTED' and conn.owner is not self:
                 logger.warning(f"Rejecting non-owner 'v' for active {from_str}->{to_str}")
                 busy_msg = f'*** BUSY From {from_str}\r'.encode()
                 self.send_frame(port, ord('d'), call_from, call_to, busy_msg)
@@ -406,6 +406,9 @@ class AGWPEServerProtocol(asyncio.Protocol):
 
         elif datakind_bytes == b'K':
             # Raw AX.25 frame. pe prepends a 0x00 byte (port indicator), strip it.
+            if not self.registered_calls:
+                logger.warning("Rejecting 'K' from unregistered client")
+                return
             raw = data[1:] if (data and data[0] == 0x00) else data
             logger.debug(f"Raw KISS frame, {len(raw)} bytes")
             if raw:

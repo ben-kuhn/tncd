@@ -367,6 +367,7 @@ class TestRawKissFrame:
     def test_K_raw_frame_strips_pe_prefix_byte(self):
         """'K' frame: pe prepends 0x00 port byte; must be stripped before KISS TX."""
         protocol, transport, bridge = make_protocol()
+        protocol.registered_calls = {'W1ABC'}
         raw_ax25 = b'\x82\xa0\xa4\xa6@@`\xaeb\x82\x84\x86@a\x03\xf0hello'
         # pe format: 0x00 + raw_ax25
         protocol.data_received(make_frame(0, ord('K'), b'', b'', b'\x00' + raw_ax25))
@@ -2530,9 +2531,10 @@ class TestOwnerEnforcement:
         intruder.data_received(make_frame(0, ord('K'), b'W1ABC', b'W2DEF', b'\x00rawdata'))
         bridge.kiss_client.send.assert_not_called()
 
-    def test_K_allowed_when_no_connection(self):
-        """K frame is allowed when no connection exists for the callsign pair."""
+    def test_K_allowed_with_registration(self):
+        """K frame allowed from client that has registered a callsign."""
         proto, _, bridge = make_real_protocol()
+        proto.registered_calls = {'W1ABC'}
         bridge.kiss_client.send.reset_mock()
         proto.data_received(make_frame(0, ord('K'), b'W1ABC', b'W2DEF', b'\x00rawdata'))
         bridge.kiss_client.send.assert_called_once()
@@ -2564,6 +2566,45 @@ class TestOwnerEnforcement:
         assert conn.send_seqno == 5
         assert conn.recv_seqno == 3
 
+    def test_non_owner_C_on_connecting_session_gets_busy(self):
+        """Non-owner C on a CONNECTING session must return BUSY."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'CONNECTING'
+        conn.owner = owner
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        intruder.data_received(make_frame(0, ord('C'), b'W1ABC', b'W2DEF'))
+
+        resp = parse_frame(intruder_transport.write.call_args[0][0])
+        assert resp['kind'] == 'd'
+        assert b'BUSY' in resp['data']
+        assert conn.owner is owner
+        assert conn.state == 'CONNECTING'
+
+    def test_non_owner_C_on_disconnecting_session_gets_busy(self):
+        """Non-owner C on a DISCONNECTING session must return BUSY."""
+        owner, _, bridge = make_real_protocol()
+        conn = bridge.get_or_create_connection(0, 'W1ABC', 'W2DEF')
+        conn.state = 'DISCONNECTING'
+        conn.owner = owner
+
+        intruder = AGWPEServerProtocol(bridge)
+        intruder_transport = Mock()
+        intruder_transport.is_closing.return_value = False
+        intruder.connection_made(intruder_transport)
+
+        intruder.data_received(make_frame(0, ord('C'), b'W1ABC', b'W2DEF'))
+
+        resp = parse_frame(intruder_transport.write.call_args[0][0])
+        assert resp['kind'] == 'd'
+        assert b'BUSY' in resp['data']
+        assert conn.owner is owner
+
     def test_owner_C_on_disconnected_session_allowed(self):
         """Owner can reconnect a session that isn't CONNECTED."""
         owner, _, bridge = make_real_protocol()
@@ -2574,6 +2615,22 @@ class TestOwnerEnforcement:
         owner.data_received(make_frame(0, ord('C'), b'W1ABC', b'W2DEF'))
         assert conn.state == 'CONNECTING'
         assert conn.owner is owner
+
+    def test_K_rejected_without_registration(self):
+        """K frame rejected from client with no registered callsigns."""
+        proto, _, bridge = make_real_protocol()
+        # proto has no registered callsigns
+        bridge.kiss_client.send.reset_mock()
+        proto.data_received(make_frame(0, ord('K'), b'W1ABC', b'W2DEF', b'\x00rawdata'))
+        bridge.kiss_client.send.assert_not_called()
+
+    def test_K_allowed_with_registration(self):
+        """K frame allowed from client that has registered a callsign."""
+        proto, _, bridge = make_real_protocol()
+        proto.data_received(make_frame(0, ord('X'), b'W1ABC'))
+        bridge.kiss_client.send.reset_mock()
+        proto.data_received(make_frame(0, ord('K'), b'W1ABC', b'W2DEF', b'\x00rawdata'))
+        bridge.kiss_client.send.assert_called_once()
 
     def test_non_owner_Y_returns_zero(self):
         """Non-owner Y query must return 0 outstanding frames."""
