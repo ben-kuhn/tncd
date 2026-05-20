@@ -2,7 +2,7 @@
 <!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
 <pkgmetadata>
 	<maintainer type="person">
-		<email>ku0hn@arrl.net</email>
+		<email>ku0hn@ku0hn.radio</email>
 		<name>Ben Kuhn</name>
 	</maintainer>
 	<upstream>

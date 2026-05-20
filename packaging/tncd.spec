@@ -1,9 +1,9 @@
 Name:           tncd
-Version:        0.11.1
+Version:        0.11.2
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
 License:        GPL-3.0-or-later
-URL:            https://github.com/ben-kuhn/tncd
+URL:            https://tncd.dev
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
@@ -59,5 +59,9 @@ sed \
 %{_unitdir}/tncd.service
 
 %changelog
-* Mon Apr 28 2026 tncd contributors <noreply@github.com> - 0.1-1
+* Tue May 20 2026 KU0HN <ku0hn@ku0hn.radio> - 0.11.2-1
+- Security hardening: AGWPE session ownership, client limits, idle timeout
+- Retire tncd-rfcomm standalone service
+
+* Mon Apr 28 2026 KU0HN <ku0hn@ku0hn.radio> - 0.1-1
 - Initial package

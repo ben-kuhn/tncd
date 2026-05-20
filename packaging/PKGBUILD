@@ -1,6 +1,6 @@
-# Maintainer: Your Callsign <callsign@example.com>
+# Maintainer: KU0HN <ku0hn@ku0hn.radio>
 pkgname=tncd
-pkgver=0.11.1-BETA
+pkgver=0.11.2-BETA
 pkgrel=1
 pkgdesc="AGWPE-to-KISS Translation Bridge"
 arch=('any')

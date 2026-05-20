@@ -9,7 +9,7 @@ final: prev:
 {
   tncd = final.python3.pkgs.buildPythonApplication {
     pname = "tncd";
-    version = "1.0.0";
+    version = "0.11.2-BETA";
     src = final.lib.cleanSource ../.;
     format = "other";
     disabled = final.python3.pkgs.pythonOlder "3.8";
@@ -28,7 +28,7 @@ final: prev:
         A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
         Supports both serial and TCP KISS connections, and full AX.25 connected mode.
       '';
-      homepage = "https://github.com/ben-kuhn/tncd";
+      homepage = "https://tncd.dev";
       license = final.lib.licenses.gpl3;
       platforms = final.lib.platforms.linux;
     };

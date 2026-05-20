@@ -114,7 +114,7 @@ jobs:
             --description "AGWPE-to-KISS Translation Bridge for packet radio" \
             --url "https://tncd.dev" \
             --license "GPL-3.0-only" \
-            --maintainer "tncd contributors <noreply@github.com>" \
+            --maintainer "KU0HN <ku0hn@ku0hn.radio>" \
             --depends python3 \
             --depends bluez \
             --config-files /etc/tncd.ini.example \
@@ -130,7 +130,7 @@ jobs:
             --description "AGWPE-to-KISS Translation Bridge for packet radio" \
             --url "https://tncd.dev" \
             --license "GPL-3.0-only" \
-            --maintainer "tncd contributors <noreply@github.com>" \
+            --maintainer "KU0HN <ku0hn@ku0hn.radio>" \
             --depends python3 \
             --depends bluez \
             --config-files /etc/tncd.ini.example \

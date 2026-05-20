@@ -7,7 +7,7 @@ PYTHON_COMPAT=( python3_{11..13} )
 inherit python-single-r1 systemd
 
 DESCRIPTION="AGWPE-to-KISS translation bridge for amateur radio"
-HOMEPAGE="https://github.com/ben-kuhn/tncd"
+HOMEPAGE="https://tncd.dev"
 
 MY_PV="${PV/_beta/-BETA}"
 SRC_URI="https://github.com/ben-kuhn/${PN}/archive/v${MY_PV}.tar.gz -> ${P}.tar.gz"
