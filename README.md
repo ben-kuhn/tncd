@@ -2,9 +2,15 @@
 
 A userspace bridge that lets AGWPE-compatible applications (PAT/Winlink, Paracon,
 Xastir) communicate with KISS TNCs, including full AX.25 connected-mode support.
-Tested over the air with real Winlink sessions at 1200 baud. Developed because
-Linux kernel 7.1 removed native AX.25 kernel support, breaking applications that
-previously relied on `AF_AX25` sockets.
+Tested over the air with real BBS andWinlink sessions at 1200 baud. Developed
+because Linux kernel 7.1 removed native AX.25 kernel support, breaking applications
+that previously relied on `AF_AX25` sockets.
+
+Bluetooth TNCs are first-class citizens and handled directly by tncd.  The old-
+fashoned workflow of running rfcomm, then kissattach, then starting your software
+was messy and prone to error (for me, forgetting various steps and which had to be
+elevated).  tncd just handles a paired and trusted Bluetooth TNC directly.  No
+rfcomm required.
 
 ## Purpose
 
