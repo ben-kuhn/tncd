@@ -559,18 +559,19 @@ ota_baudrate = 1200</code></pre>
       need a special command to switch into KISS mode. If your TNC requires this, add these
       lines under your <code>[client.N]</code> section:
     </p>
-    <pre><code># Kantronics KPC-3:
-init_string = INT KISS\r
-init_delay = 1.0
+    <pre><code># Kantronics KPC+ family (KPC-3+ / KPC-9612+) &mdash; OTA-verified:
+init_string = INTFACE KISS\r\nRESET\r
+init_delay = 2.0
 
 # Kenwood TH-D7 / TM-D700 / TM-D710:
 init_string = KISS ON\rRESTART\r
 init_delay = 1.0</code></pre>
     <p>
-      <code>\r</code> means "carriage return" (like pressing Enter). You can chain multiple
-      commands by putting <code>\r</code> between them. The <code>init_delay</code> is how
-      many seconds to wait after sending the command before tncd starts talking KISS. Check
-      your TNC's manual for the correct command.
+      <code>\r</code> means "carriage return" (like pressing Enter). Multiple commands can
+      be separated by <code>\n</code> and are sent sequentially with <code>init_delay</code>
+      seconds between them. tncd probes the serial port first &mdash; if the TNC is already
+      in KISS mode the init commands are skipped. Check your TNC's manual for the correct
+      command.
     </p>
 
     <h3>TCP TNC (Network)</h3>

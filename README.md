@@ -293,22 +293,27 @@ stopbits = 1
 
 ## KISS Mode Initialization
 
-Some serial TNCs (e.g. Kantronics KPC-3) power up in terminal mode and need a command
-to enter KISS mode. Configure under `[client.N]`:
+Some serial TNCs power up in terminal mode and need a command to enter KISS mode.
+Configure under `[client.N]`:
 
 ```ini
 [client.0]
 type = serial
-device = /dev/ttyUSB0
-serial_baudrate = 9600
-init_string = INT KISS\r   # \r and \n are interpreted as CR/LF
-init_delay = 1.0
+device = /dev/ttyUSB1
+serial_baudrate = 1200
+# Multi-step init is supported via \n between commands. \r and \n are interpreted as CR/LF.
+init_string = INTFACE KISS\r\nRESET\r   # Kantronics KPC+ family
+init_delay = 2.0
 ```
 
 `init_string` is sent to the serial port before KISS framing begins. Use `\r` for
 carriage return and `\n` for line feed — most TNCs expect `\r` to terminate a command.
-`init_delay` (default 1.0 s) is the wait after sending the string before the KISS
-connection opens.
+Multiple commands can be separated by `\n` and are sent sequentially with `init_delay`
+seconds between them. `init_delay` (default 1.0 s) is also the wait after the last
+command before the KISS connection opens. tncd probes the serial port first to detect
+whether the TNC is already in KISS mode; init commands are only sent if a command-mode
+prompt response is seen.
+
 
 ## Multiple TNCs (Multi-Port)
 
@@ -398,7 +403,7 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
-- [x] Kantronics KPC+ (Other Kantronics TNCs are also likely to work) 
+- [x] Kantronics KPC+ (KPC-3+ / KPC-9612+) — OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
 - [ ] AEA PK-232
 - [ ] AEA DSP-2232
 

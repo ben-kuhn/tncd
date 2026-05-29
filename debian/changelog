@@ -1,3 +1,10 @@
+tncd (1.0) UNRELEASED; urgency=medium
+
+  * First stable release; feature-complete AGWPE bridge and AX.25 v2.0 connected mode
+  * Kantronics KPC+ family (KPC-3+ / KPC-9612+) OTA-verified at 1200 baud
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Fri, 29 May 2026 00:00:00 +0000
+
 tncd (0.11.2) UNRELEASED; urgency=medium
 
   * Security hardening: AGWPE session ownership, client limits, idle timeout

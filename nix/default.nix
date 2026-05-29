@@ -5,7 +5,7 @@
 
 python3.pkgs.buildPythonApplication rec {
   pname = "tncd";
-  version = "0.11.2-BETA";
+  version = "1.0";
 
   src = lib.cleanSource ../.;
 
