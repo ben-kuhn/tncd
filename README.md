@@ -375,6 +375,8 @@ service is needed. Just ensure `bluetooth.service` is running.
 
 ## Compatibility
 
+Below is a list of hardware and software I have easily available to test with.  An Something that's unchecked is untested, not incompatible.
+
 ### Clients
 
 - [x] PAT (Winlink) — connected mode and UI frames, OTA-verified
