@@ -375,7 +375,7 @@ service is needed. Just ensure `bluetooth.service` is running.
 
 ## Compatibility
 
-Below is a list of hardware and software I have easily available to test with.  An Something that's unchecked is untested, not incompatible.
+Below is a list of hardware and software I have easily available to test with.  Something that's unchecked is untested, not incompatible.
 
 ### Clients
 
@@ -398,6 +398,7 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
+- [x] Kantronics KPC+ (Other Kantronics TNCs are also likely to work) 
 - [ ] AEA PK-232
 - [ ] AEA DSP-2232
 
