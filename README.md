@@ -403,7 +403,7 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
-- [x] Kantronics KPC+ (KPC-3+ / KPC-9612+) — OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
+- [x] Kantronics KPC3+ - OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
 - [x] AEA PK-232
 - [ ] AEA DSP-2232
 
