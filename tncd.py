@@ -728,10 +728,6 @@ class KISSClient:
                 self.online = True
                 logger.info(f"Port {self.port_num} ({self.name}) online — Bluetooth reconnected")
                 return
-            except RuntimeError:
-                # Previous ConnectProfile thread still in flight; don't penalise
-                # the backoff — this clears on its own once the thread exits.
-                logger.debug(f"Bluetooth reconnect: previous attempt still pending for {self._bt_bdaddr}")
             except Exception as e:
                 logger.warning(f"Bluetooth reconnect failed: {e}")
                 delay = min(delay * 2, max_delay)
@@ -775,51 +771,56 @@ class KISSClient:
             bus.get_object('org.bluez', device_path),
             'org.bluez.Device1')
 
-        # If the previous ConnectProfile thread is still running, starting
-        # another would cause BlueZ to return InProgress/br-connection-busy.
-        # Raise so the reconnect loop retries without doubling its backoff.
-        old_thread = _bt_active_threads.get(device_path)
-        if old_thread is not None and old_thread.is_alive():
-            raise RuntimeError(f"ConnectProfile still pending for {bdaddr}")
-
-        # Disconnect any existing connection (e.g. auto-connected BLE) so that
-        # ConnectProfile can establish a fresh BR/EDR link for SPP.
-        # We must call ConnectProfile immediately after disconnect — if the
-        # device is trusted, BlueZ will auto-reconnect via BLE within ~1s,
-        # which blocks BR/EDR paging.
-        # If the device has no BlueZ object yet (not yet seen/paired since
-        # daemon start), props.Get raises UnknownObject — skip disconnect.
-        try:
-            props = dbus_mod.Interface(
-                bus.get_object('org.bluez', device_path),
-                'org.freedesktop.DBus.Properties')
-            connected = props.Get('org.bluez.Device1', 'Connected')
-            if connected:
-                logger.info(f"Disconnecting existing connection to {bdaddr}")
-                device.Disconnect()
-        except dbus_mod.exceptions.DBusException:
-            pass  # device not yet visible to BlueZ; proceed to ConnectProfile
-
         # Register a future for this device so NewConnection can route to us
         fd_future = loop.create_future()
         _bt_pending[device_path] = fd_future
 
-        logger.info(f"Calling ConnectProfile on {device_path}")
+        # Schedule all dbus work on the GLib thread via idle_add, using
+        # async (reply_handler/error_handler) calls so the GLib loop keeps
+        # running and can process the NewConnection callback that delivers
+        # the fd.  Running a blocking ConnectProfile in a daemon thread
+        # triggers cross-thread memory ops inside libdbus that corrupt
+        # glibc's tcache on thread exit (SIGABRT).
+        def _on_cp_reply():
+            pass  # fd arrives via NewConnection, not here
 
-        def _connect_profile():
+        def _on_cp_error(e):
+            err = str(e)
+            # NoReply and InProgress are expected: BlueZ delivers the fd via
+            # NewConnection rather than a direct reply to ConnectProfile.
+            if ('NoReply' in err or 'Did not receive a reply' in err or
+                    'InProgress' in err or 'br-connection-busy' in err):
+                return
+            if not fd_future.done():
+                loop.call_soon_threadsafe(fd_future.set_exception, e)
+
+        def _do_connect_profile():
+            logger.info(f"Calling ConnectProfile on {device_path}")
+            device.ConnectProfile(SPP_UUID,
+                                  reply_handler=_on_cp_reply,
+                                  error_handler=_on_cp_error)
+
+        def _glib_connect():
+            # Disconnect any existing connection (e.g. auto-connected BLE)
+            # so ConnectProfile can establish a fresh BR/EDR link for SPP.
+            # If the device has no BlueZ object yet, props.Get raises
+            # UnknownObject — skip disconnect and go straight to ConnectProfile.
             try:
-                device.ConnectProfile(SPP_UUID)
-            except dbus_mod.exceptions.DBusException as e:
-                # NoReply is expected — BlueZ delivers the fd via our profile's
-                # NewConnection callback instead of replying to ConnectProfile.
-                if 'NoReply' not in str(e) and 'Did not receive a reply' not in str(e):
-                    if not fd_future.done():
-                        loop.call_soon_threadsafe(fd_future.set_exception, e)
+                props = dbus_mod.Interface(
+                    bus.get_object('org.bluez', device_path),
+                    'org.freedesktop.DBus.Properties')
+                connected = props.Get('org.bluez.Device1', 'Connected')
+                if connected:
+                    logger.info(f"Disconnecting existing connection to {bdaddr}")
+                    device.Disconnect(reply_handler=lambda: _do_connect_profile(),
+                                      error_handler=lambda e: _do_connect_profile())
+                else:
+                    _do_connect_profile()
+            except dbus_mod.exceptions.DBusException:
+                _do_connect_profile()
+            return False  # tell GLib not to repeat this idle callback
 
-        thread = threading.Thread(target=_connect_profile, daemon=True,
-                                  name='bt-connect')
-        _bt_active_threads[device_path] = thread
-        thread.start()
+        GLib.idle_add(_glib_connect)
 
         try:
             fd = await asyncio.wait_for(fd_future, timeout=30.0)
@@ -938,8 +939,7 @@ def _make_spp_profile(dbus_mod, pending_connections, loop):
 
 # Shared Bluetooth SPP profile state (one registration per process)
 _bt_profile = None
-_bt_pending = {}        # device_path -> asyncio.Future
-_bt_active_threads = {} # device_path -> Thread (ConnectProfile call still in flight)
+_bt_pending = {}  # device_path -> asyncio.Future
 
 
 class _BluetoothKISSProtocol(kiss.kiss.KISSProtocol):

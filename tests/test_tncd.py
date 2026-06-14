@@ -1491,14 +1491,18 @@ class TestBluetoothConfig:
 
 class TestBluetoothConnect:
     async def test_connect_calls_register_and_connect_profile(self):
-        """Verify D-Bus wiring: profile registered, ConnectProfile called."""
+        """Verify D-Bus wiring: profile registered, ConnectProfile scheduled via idle_add."""
         client = _make_kiss_client({'type': 'bluetooth', 'bdaddr': 'AA:BB:CC:DD:EE:FF',
                                     'ota_baudrate': '1200'})
 
         mock_dbus = MagicMock()
-        mock_glib = MagicMock()
         mock_bus = MagicMock()
         mock_dbus.SystemBus.return_value = mock_bus
+
+        # Capture the idle_add callback so we can invoke it manually
+        idle_callbacks = []
+        mock_glib = MagicMock()
+        mock_glib.idle_add.side_effect = lambda cb: idle_callbacks.append(cb)
 
         # Provide a base class that accepts (bus, path) args
         class FakeDbusObject:
@@ -1511,23 +1515,35 @@ class TestBluetoothConnect:
 
         loop = asyncio.get_running_loop()
 
-        # _bluetooth_connect will block on fd_future; timeout verifies
-        # that all D-Bus setup calls happen before the await.
+        # _bluetooth_connect blocks on fd_future; timeout shows setup ran before await.
         with pytest.raises((asyncio.TimeoutError, Exception)):
             await asyncio.wait_for(
                 client._bluetooth_connect(
                     mock_dbus, mock_glib, 'AA:BB:CC:DD:EE:FF', None, loop),
                 timeout=0.5)
 
-        # Verify D-Bus interactions happened in the right order
+        # Profile registration and device proxy setup happen before the await
         mock_bus.get_object.assert_any_call('org.bluez', '/org/bluez')
         mock_bus.get_object.assert_any_call(
             'org.bluez',
             '/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF')
-        # Properties.Get should have been called to check Connected status
+
+        # Connection work is scheduled on the GLib thread via idle_add
+        assert len(idle_callbacks) == 1, "expected exactly one idle_add callback"
+
+        # Invoking the callback should trigger props.Get and ConnectProfile.
+        # Return False for Connected so we skip the Disconnect() path and
+        # call ConnectProfile directly (mock Disconnect won't fire reply_handler).
+        mock_dbus.Interface.return_value.Get.return_value = False
+        idle_callbacks[0]()
         mock_dbus.Interface.assert_any_call(
             mock_bus.get_object.return_value,
             'org.freedesktop.DBus.Properties')
+        # ConnectProfile should be called with async handlers, not blocking
+        device_iface = mock_dbus.Interface.return_value
+        cp_calls = [c for c in device_iface.ConnectProfile.call_args_list
+                    if 'reply_handler' in (c.kwargs or {})]
+        assert cp_calls, "ConnectProfile should be called with reply_handler"
 
 
 class TestBluetoothFullFlow:
