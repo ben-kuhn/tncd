@@ -728,6 +728,10 @@ class KISSClient:
                 self.online = True
                 logger.info(f"Port {self.port_num} ({self.name}) online — Bluetooth reconnected")
                 return
+            except RuntimeError:
+                # Previous ConnectProfile thread still in flight; don't penalise
+                # the backoff — this clears on its own once the thread exits.
+                logger.debug(f"Bluetooth reconnect: previous attempt still pending for {self._bt_bdaddr}")
             except Exception as e:
                 logger.warning(f"Bluetooth reconnect failed: {e}")
                 delay = min(delay * 2, max_delay)
@@ -771,18 +775,30 @@ class KISSClient:
             bus.get_object('org.bluez', device_path),
             'org.bluez.Device1')
 
+        # If the previous ConnectProfile thread is still running, starting
+        # another would cause BlueZ to return InProgress/br-connection-busy.
+        # Raise so the reconnect loop retries without doubling its backoff.
+        old_thread = _bt_active_threads.get(device_path)
+        if old_thread is not None and old_thread.is_alive():
+            raise RuntimeError(f"ConnectProfile still pending for {bdaddr}")
+
         # Disconnect any existing connection (e.g. auto-connected BLE) so that
         # ConnectProfile can establish a fresh BR/EDR link for SPP.
         # We must call ConnectProfile immediately after disconnect — if the
         # device is trusted, BlueZ will auto-reconnect via BLE within ~1s,
         # which blocks BR/EDR paging.
-        props = dbus_mod.Interface(
-            bus.get_object('org.bluez', device_path),
-            'org.freedesktop.DBus.Properties')
-        connected = props.Get('org.bluez.Device1', 'Connected')
-        if connected:
-            logger.info(f"Disconnecting existing connection to {bdaddr}")
-            device.Disconnect()
+        # If the device has no BlueZ object yet (not yet seen/paired since
+        # daemon start), props.Get raises UnknownObject — skip disconnect.
+        try:
+            props = dbus_mod.Interface(
+                bus.get_object('org.bluez', device_path),
+                'org.freedesktop.DBus.Properties')
+            connected = props.Get('org.bluez.Device1', 'Connected')
+            if connected:
+                logger.info(f"Disconnecting existing connection to {bdaddr}")
+                device.Disconnect()
+        except dbus_mod.exceptions.DBusException:
+            pass  # device not yet visible to BlueZ; proceed to ConnectProfile
 
         # Register a future for this device so NewConnection can route to us
         fd_future = loop.create_future()
@@ -800,8 +816,10 @@ class KISSClient:
                     if not fd_future.done():
                         loop.call_soon_threadsafe(fd_future.set_exception, e)
 
-        threading.Thread(target=_connect_profile, daemon=True,
-                         name='bt-connect').start()
+        thread = threading.Thread(target=_connect_profile, daemon=True,
+                                  name='bt-connect')
+        _bt_active_threads[device_path] = thread
+        thread.start()
 
         try:
             fd = await asyncio.wait_for(fd_future, timeout=30.0)
@@ -920,7 +938,8 @@ def _make_spp_profile(dbus_mod, pending_connections, loop):
 
 # Shared Bluetooth SPP profile state (one registration per process)
 _bt_profile = None
-_bt_pending = {}   # device_path -> asyncio.Future
+_bt_pending = {}        # device_path -> asyncio.Future
+_bt_active_threads = {} # device_path -> Thread (ConnectProfile call still in flight)
 
 
 class _BluetoothKISSProtocol(kiss.kiss.KISSProtocol):
@@ -1053,10 +1072,21 @@ class Bridge:
     async def start(self):
         loop = asyncio.get_running_loop()
 
-        # Connect ports sequentially; kiss3's blocking start() uses its own
-        # event loop internally and doesn't play well with parallel execution.
-        # Failures log and leave port offline (don't crash the bridge).
-        for kc in self.kiss_clients:
+        server_cfg = self.config['server']
+        host = server_cfg.get('listen_host', '0.0.0.0')
+        port = server_cfg.getint('listen_port', 8000)
+
+        logger.info(f"Starting AGWPE server on {host}:{port}")
+
+        server = await loop.create_server(
+            lambda: AGWPEServerProtocol(self, self.traffic_debug),
+            host, port
+        )
+
+        # Connect ports as independent background tasks so a slow or failing
+        # port (e.g. a Bluetooth TNC that is off) does not delay the AGWPE
+        # server or prevent other ports from coming online.
+        async def _connect_port(kc):
             try:
                 await kc.connect()
                 if hasattr(kc, '_deferred_kiss_params'):
@@ -1074,16 +1104,8 @@ class Bridge:
                 if getattr(kc, '_bt_reconnect', False):
                     asyncio.ensure_future(kc._bt_reconnect_loop())
 
-        server_cfg = self.config['server']
-        host = server_cfg.get('listen_host', '0.0.0.0')
-        port = server_cfg.getint('listen_port', 8000)
-
-        logger.info(f"Starting AGWPE server on {host}:{port}")
-
-        server = await loop.create_server(
-            lambda: AGWPEServerProtocol(self, self.traffic_debug),
-            host, port
-        )
+        for kc in self.kiss_clients:
+            asyncio.ensure_future(_connect_port(kc))
 
         logger.info("Bridge running. Press Ctrl+C to stop.")
         loop.call_later(30, self._sweep_idle_clients)
