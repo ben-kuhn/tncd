@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>ku0hn@ku0hn.radio</email>
+		<name>Ben Kuhn</name>
+	</maintainer>
+	<longdescription>
+		tncd is a bridge allowing AGWPE-compatible client applications (PAT/Winlink,
+		Paracon, Xastir) to communicate with KISS TNCs over serial, TCP, or Bluetooth.
+		It implements AX.25 layer 2 connected mode with support for multiple simultaneous
+		TNC ports.
+	</longdescription>
+	<use>
+		<flag name="bluetooth">Enable Bluetooth SPP support via D-Bus (dbus-python, PyGObject)</flag>
+	</use>
+	<upstream>
+		<remote-id type="github">ben-kuhn/tncd</remote-id>
+	</upstream>
+</pkgmetadata>

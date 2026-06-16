@@ -1,9 +1,16 @@
 # tncd — AGWPE-to-KISS Bridge
 
-A userspace bridge that allows AGWPE-compatible client applications to communicate
-with KISS TNCs (Terminal Node Controllers), including full AX.25 connected-mode
-support. Developed because Linux kernel 7.1 removed native AX.25 kernel support,
-breaking applications that previously relied on `AF_AX25` sockets.
+A userspace bridge that lets AGWPE-compatible applications (PAT/Winlink, Paracon,
+Xastir) communicate with KISS TNCs, including full AX.25 connected-mode support.
+Tested over the air with real BBS andWinlink sessions at 1200 baud. Developed
+because Linux kernel 7.1 removed native AX.25 kernel support, breaking applications
+that previously relied on `AF_AX25` sockets.
+
+Bluetooth TNCs are first-class citizens and handled directly by tncd.  The old-
+fashoned workflow of running rfcomm, then kissattach, then starting your software
+was messy and prone to error (for me, forgetting various steps and which had to be
+elevated).  tncd just handles a paired and trusted Bluetooth TNC directly.  No
+rfcomm required.
 
 ## Purpose
 
@@ -41,6 +48,7 @@ sequencing, RR acknowledgement, duplicate detection, and clean DISC handling.
 | `k`  | RX    | Raw KISS mode toggle |
 | `M`  | RX    | Send UI (unproto) frame |
 | `V`  | RX    | Send UI frame via digipeaters |
+| `v`  | RX    | Connect via digipeaters |
 | `C`  | RX/TX | Connect / connected notification |
 | `D`  | RX/TX | Send / receive connected data |
 | `d`  | RX/TX | Disconnect / disconnected notification |
@@ -67,15 +75,30 @@ The bridge fully implements AX.25 v2.0 connected mode for KISS TNCs:
 
 - **SABM/UA handshake** — outgoing connections (PAT/Winlink) and incoming
 - **I-frame sequencing** — N(S)/N(R) send/receive sequence numbers, mod 8 window
-- **RR acknowledgement** — sends RR only when remote polls (P=1); does not flood
-  the channel with unsolicited RRs
+- **RR acknowledgement** — T2 delayed ACK batches acknowledgments for burst
+  I-frames; immediate response to polls (P=1)
+- **Piggybacked N(R)** — outgoing and retransmitted I-frames carry the current
+  receive sequence number, so data transfer implicitly acknowledges received frames
 - **Duplicate detection** — retransmitted I-frames from the remote are silently
   discarded; only in-sequence frames are forwarded to the AGWPE client
 - **AGWPE flow control** — `Y` (outstanding frames) accurately reflects unacked
   I-frames so clients like PAT know when it is safe to send the next data block
+- **Digipeater support** — `v` (connect via digipeaters) stores the via path and
+  includes it on all subsequent frames (I, RR, REJ, DISC, UA) for the connection;
+  incoming digipeated connections reverse the path automatically
 - **TX echo suppression** — some TNCs (e.g. BTECH UV-Pro) echo transmitted frames
-  back via KISS; these are detected and discarded
-- **DISC/DM handling** — clean disconnect in both directions
+  back via KISS; these are detected and discarded, including digipeated echoes
+  where the H-bit differs from the original
+- **Adaptive T1 (Karn's algorithm)** — round-trip time measured from I-frame
+  acknowledgments; SRTT/RTTVAR updated per RFC 2988; exponential backoff on
+  timeout; retransmit RTT samples excluded
+- **T3 inactive link timer** — polls idle connections every 180 s with RR P=1;
+  T1 handles retries if the remote doesn't respond
+- **REJ gap detection** — out-of-sequence I-frames trigger REJ to request
+  retransmission from V(R), improving recovery on lossy links
+- **Dynamic T1/T2 timers** — retransmit and delayed-ACK timeouts calculated from
+  the configured over-the-air baud rate and window size
+- **DISC/DM handling** — clean disconnect in both directions; F-bit echoed per spec
 
 ## Supported TNC Connections
 
@@ -85,13 +108,16 @@ Direct serial connection to a TNC via USB or RS-232.
 
 ### Network KISS (TCP)
 
-Connects to a KISS-over-TCP server (e.g. Dire Wolf, YAAC).
+Connects to a KISS-over-TCP server (e.g. Dire Wolf, QtSoundModem).
 
-### Bluetooth TNC (RFCOMM)
+### Bluetooth TNC
 
-Use `tncd-rfcomm` to manage the Bluetooth connection. It disconnects any active
-audio profile before connecting so the serial channel is available, and releases
-the rfcomm binding on exit. Point the bridge at the resulting `/dev/rfcomm0` device.
+On Linux, tncd connects to Bluetooth TNCs natively using the BlueZ D-Bus
+Profile API. Set `type = bluetooth` in the config — no external tools needed.
+
+On macOS and Windows, the OS exposes paired Bluetooth SPP devices as serial
+ports (`/dev/tty.*` on macOS, `COMx` on Windows). Use `type = serial` with
+the device path.
 
 ## Installation
 
@@ -133,6 +159,7 @@ pip install -r requirements.txt
 
 ### Via Nix (NixOS)
 
+tncd is packaged in [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages).
 See [`nix/README.md`](nix/README.md) for the full NixOS module with service options,
 automatic config generation, and Bluetooth support.
 
@@ -142,24 +169,28 @@ Copy `tncd.ini` and adjust for your setup:
 
 ```ini
 [server]
-listen_host = 0.0.0.0
+listen_host = 127.0.0.1
 listen_port = 8000
 callsign = AGWPE
 
-[client]
-# type = serial or tcp
+# Each TNC is numbered: [client.0] = AGWPE port 0, [client.1] = port 1, etc.
+[client.0]
+# type = serial, tcp, or bluetooth
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600
-# parity = N       # N=none, O=odd, E=even, M=mark, S=space (default: N)
-# stopbits = 1     # 1, 1.5, or 2 (default: 1)
-# rtscts = false   # RTS/CTS hardware flow control (default: false)
+serial_baudrate = 9600
+ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
+# name = My TNC         # human-readable name shown to AGWPE clients
+# parity = N            # N=none, O=odd, E=even, M=mark, S=space (default: N)
+# stopbits = 1          # 1, 1.5, or 2 (default: 1)
+# rtscts = false        # RTS/CTS hardware flow control (default: false)
 
 # KISS mode initialization (for TNCs that need a command to enter KISS mode)
 # init_string = INT KISS\r   # \r = CR, \n = LF
 # init_delay = 1.0
 
-# Optional KISS timing parameters (values in 10ms units)
+# Per-port KISS timing parameters (values in 10ms units)
+[kiss.0]
 # tx_delay = 40
 # persistence = 63
 # slot_time = 20
@@ -167,20 +198,45 @@ baudrate = 9600
 # full_duplex = 0
 ```
 
-### Bluetooth TNC
+### Bluetooth TNC (Linux)
+
+First, pair and trust your TNC using `bluetoothctl`:
+
+```bash
+bluetoothctl
+scan on                        # find your TNC
+pair AA:BB:CC:DD:EE:FF         # pair with the TNC
+trust AA:BB:CC:DD:EE:FF        # trust for auto-reconnect
+exit
+```
+
+Then configure tncd:
 
 ```ini
-[client]
-type = serial
-device = /dev/rfcomm0
-
-[bluetooth]
-enabled = true
-bind_dev = /dev/rfcomm0
+[client.0]
+type = bluetooth
 bdaddr = AA:BB:CC:DD:EE:FF
-channel = 1
-mode = watch        # auto-reconnect on drop
-retry_delay = 5
+ota_baudrate = 1200
+# channel = 6             # optional, auto-detected via SDP
+# reconnect = true        # auto-reconnect on drop (default)
+# reconnect_delay = 5     # initial delay seconds (default)
+# reconnect_max_delay = 60  # max delay seconds (default)
+```
+
+Requires `dbus-python` and `PyGObject` (included in packaged installs).
+
+### Bluetooth TNC (macOS / Windows)
+
+After pairing in system Bluetooth settings, the OS creates a virtual serial
+port. Use `type = serial` with the device path:
+
+```ini
+[client.0]
+type = serial
+device = /dev/tty.BluetoothTNC    # macOS
+# device = COM5                    # Windows
+serial_baudrate = 9600
+ota_baudrate = 1200
 ```
 
 ## Usage
@@ -197,14 +253,14 @@ tncd -c /etc/tncd.ini -v    # frame types
 tncd -c /etc/tncd.ini -vv   # + data content
 tncd -c /etc/tncd.ini -vvv  # + AGWPE internals
 
-# Bluetooth TNC — run rfcomm manager first (in a separate terminal or as a service)
-sudo tncd-rfcomm -c /etc/tncd.ini   # stays running, auto-reconnects
+# Bluetooth TNC (Linux) — automatic, no separate tool needed
 tncd -c /etc/tncd.ini
 ```
 
 ## KISS Parameters
 
-Configured under `[client]` in the INI file. All values are in 10ms units.
+Configured under `[kiss.N]` in the INI file (matching the TNC number, e.g. `[kiss.0]`
+for `[client.0]`). All values are in 10ms units.
 
 | Parameter    | Default | Description                      |
 |--------------|---------|----------------------------------|
@@ -216,7 +272,7 @@ Configured under `[client]` in the INI file. All values are in 10ms units.
 
 ## Serial Port Parameters
 
-Some TNCs require non-standard serial settings. Configure under `[client]`:
+Some TNCs require non-standard serial settings. Configure under `[client.N]`:
 
 | Parameter | Default | Description                                  |
 |-----------|---------|----------------------------------------------|
@@ -227,32 +283,73 @@ Some TNCs require non-standard serial settings. Configure under `[client]`:
 Example for AEA TNCs that use odd parity:
 
 ```ini
-[client]
+[client.0]
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600
+serial_baudrate = 9600
 parity = O
 stopbits = 1
 ```
 
 ## KISS Mode Initialization
 
-Some serial TNCs (e.g. Kantronics KPC-3) power up in terminal mode and need a command
-to enter KISS mode. Configure under `[client]`:
+Some serial TNCs power up in terminal mode and need a command to enter KISS mode.
+Configure under `[client.N]`:
 
 ```ini
-[client]
+[client.0]
 type = serial
-device = /dev/ttyUSB0
-baudrate = 9600
-init_string = INT KISS\r   # \r and \n are interpreted as CR/LF
-init_delay = 1.0
+device = /dev/ttyUSB1
+serial_baudrate = 1200
+# Multi-step init is supported via \n between commands. \r and \n are interpreted as CR/LF.
+init_string = INTFACE KISS\r\nRESET\r   # Kantronics KPC+ family
+init_delay = 2.0
 ```
 
 `init_string` is sent to the serial port before KISS framing begins. Use `\r` for
 carriage return and `\n` for line feed — most TNCs expect `\r` to terminate a command.
-`init_delay` (default 1.0 s) is the wait after sending the string before the KISS
-connection opens.
+Multiple commands can be separated by `\n` and are sent sequentially with `init_delay`
+seconds between them. `init_delay` (default 1.0 s) is also the wait after the last
+command before the KISS connection opens. tncd probes the serial port first to detect
+whether the TNC is already in KISS mode; init commands are only sent if a command-mode
+prompt response is seen.
+
+
+## Multiple TNCs (Multi-Port)
+
+tncd can connect to multiple TNCs simultaneously. Each `[client.N]` section defines an
+AGWPE port numbered to match (port 0, port 1, etc.). Port numbers must be contiguous
+starting at 0. Each port can use any connection type independently.
+
+```ini
+[server]
+listen_host = 127.0.0.1
+listen_port = 8000
+callsign = N0CALL
+
+[client.0]
+name = VHF Serial TNC
+type = serial
+device = /dev/ttyUSB0
+serial_baudrate = 9600
+ota_baudrate = 1200
+
+[client.1]
+name = Mobilinkd TNC3 (BT)
+type = bluetooth
+bdaddr = AA:BB:CC:DD:EE:FF
+ota_baudrate = 1200
+
+[kiss.1]
+tx_delay = 50
+```
+
+AGWPE clients select a TNC by port number. The optional `name` field provides a
+human-readable label shown in the AGWPE port list. Each port can have its own
+`[kiss.N]` section for KISS timing parameters.
+
+When multiple TNCs share the same frequency, tncd automatically suppresses overheard
+frames — packets received by the wrong TNC are silently dropped.
 
 ## systemd Service
 
@@ -266,11 +363,9 @@ $EDITOR /etc/tncd.ini
 sudo systemctl enable --now tncd
 ```
 
-For Bluetooth, also enable the rfcomm manager:
-
-```bash
-sudo systemctl enable --now tncd-rfcomm
-```
+For Bluetooth TNCs, ensure the BlueZ service is running and the TNC is
+paired/trusted. tncd handles the Bluetooth connection directly — no
+separate service needed.
 
 ### Manual / source install
 
@@ -280,26 +375,35 @@ systemctl daemon-reload
 systemctl enable --now tncd
 ```
 
-When using Bluetooth, uncomment the `After=tncd-rfcomm.service` lines in
-`tncd.service` so the bridge starts after the rfcomm device is ready.
+For Bluetooth TNCs, tncd handles the connection directly — no separate
+service is needed. Just ensure `bluetooth.service` is running.
 
 ## Compatibility
 
+Below is a list of hardware and software I have easily available to test with.  Something that's unchecked is untested, not incompatible.
+
 ### Clients
 
-- [x] PAT (Winlink)
-- [x] Paracon
+- [x] PAT (Winlink) — connected mode and UI frames, OTA-verified
+- [x] Paracon - connected mode verified OTA
 - [ ] QTTermTCP
 - [ ] Xastir
 
-### Hardware
+### Software TNCs
 
-- [x] BTECH UV-Pro (Bluetooth)
-- [ ] Mobilinkd TNC4 (Bluetooth)
-- [ ] Mobilinkd TNC3 (Bluetooth)
-- [ ] Mobilinkd TNC2 (Bluetooth)
-- [ ] Kenwood TH-D7
-- [ ] Kenwood TS-2000
+- [x] Dire Wolf — KISS over TCP and PTY serial, OTA-verified at 1200 baud.  Direwolf has a native AGWPE interface so this test is only for validation and debugging puposes.  Please use the native interface in production.
+- [ ] QTSoundModem - Supports KISS over TCP (Also supports AGWPE so use that directly instead :-) )
+
+### Hardware TNCs
+These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
+
+- [x] BTECH UV-Pro/Radioddity GA-5WB/Vero NR N76 (Bluetooth)
+- [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A
+- [x] Mobilinkd TNC3 (Bluetooth SPP) — OTA-verified at 1200 baud via native D-Bus SPP, full Winlink CMS round-trip with 10KB attachment; 2-hop digipeater verified
+- [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
+- [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
+- [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
+- [x] Kantronics KPC+ (KPC-3+ / KPC-9612+) — OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
 - [ ] AEA PK-232
 - [ ] AEA DSP-2232
 

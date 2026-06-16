@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: tncd
-Upstream-Contact: noreply@github.com
-Source: https://github.com/ben-kuhn/tncd
+Upstream-Contact: ku0hn@ku0hn.radio
+Source: https://tncd.dev
 
 Files: *
 Copyright: 2024 tncd contributors

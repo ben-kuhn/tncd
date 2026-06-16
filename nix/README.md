@@ -1,20 +1,24 @@
 # Nix / NixOS support
 
-Two files are provided:
+tncd is packaged in [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages),
+which provides the `tncd` package and all its dependencies (`kiss3`, `pyham-ax25`, etc.)
+as a nixpkgs overlay.
 
-| File | Purpose |
-|------|---------|
-| `overlay.nix` | Adds `pkgs.tncd` to nixpkgs |
-| `module.nix` | NixOS module: `services.tncd.*` options + systemd services |
+The NixOS service module is also in
+[nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) and provides
+`services.tncd.*` options and systemd services.
 
 ## Quick start (NixOS)
 
 ```nix
 # configuration.nix
 { config, pkgs, ... }:
-{
-  nixpkgs.overlays = [ (import /path/to/tncd/nix/overlay.nix) ];
-  imports = [ /path/to/tncd/nix/module.nix ];
+let
+  ham = builtins.fetchTarball
+    "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz";
+in {
+  nixpkgs.overlays = [ (import ham) ];
+  imports = [ "${ham}/tncd/module.nix" ];
 
   services.tncd = {
     enable = true;
@@ -24,10 +28,11 @@ Two files are provided:
         listen_port = 8000;
         callsign = "N0CALL";
       };
-      client = {
+      "client.0" = {
         type = "serial";
         device = "/dev/ttyUSB0";
-        baudrate = 9600;
+        serial_baudrate = 9600;
+        ota_baudrate = 1200;
       };
     };
   };
@@ -39,36 +44,41 @@ This creates a `tncd` system user (with `dialout` group access), generates
 
 ## Bluetooth TNC
 
-Enable the rfcomm manager alongside the main bridge:
+Enable Bluetooth support to pull in `dbus-python` and `PyGObject` and add
+the service user to the `bluetooth` group:
 
 ```nix
 services.tncd = {
   enable = true;
-  bluetooth.enable = true;   # also starts tncd-rfcomm.service
+  bluetooth.enable = true;   # adds D-Bus/GLib deps, bluetooth group
   settings = {
     server = {
       listen_host = "0.0.0.0";
       listen_port = 8000;
       callsign = "N0CALL";
     };
-    client = {
-      type = "serial";
-      device = "/dev/rfcomm0";
-    };
-    bluetooth = {
-      enabled = true;
-      bind_dev = "/dev/rfcomm0";
+    "client.0" = {
+      type = "bluetooth";
       bdaddr = "AA:BB:CC:DD:EE:FF";
-      channel = 1;
-      mode = "watch";
-      retry_delay = 5;
+      ota_baudrate = 1200;
+      # channel = 6;            # optional, auto-detected via SDP
+      # reconnect = true;       # auto-reconnect (default)
+      # reconnect_delay = 5;    # initial delay seconds (default)
+      # reconnect_max_delay = 60;  # max delay seconds (default)
     };
   };
 };
 ```
 
-`tncd-rfcomm.service` runs as root (required for `rfcomm` commands) and will
-start before `tncd.service`.
+Pair and trust the TNC before starting the service:
+
+```bash
+bluetoothctl pair AA:BB:CC:DD:EE:FF
+bluetoothctl trust AA:BB:CC:DD:EE:FF
+```
+
+tncd connects to the TNC directly via the BlueZ D-Bus Profile API — no
+external tools like `rfcomm` needed.
 
 ## Existing config file
 
@@ -82,15 +92,58 @@ services.tncd = {
 };
 ```
 
+## Multi-port configuration
+
+Configure multiple TNCs and select the active one from your AGWPE client:
+
+```nix
+services.tncd = {
+  enable = true;
+  bluetooth.enable = true;
+  settings = {
+    server = {
+      listen_host = "0.0.0.0";
+      listen_port = 8000;
+      callsign = "N0CALL";
+    };
+    "client.0" = {
+      name = "TNC3 Mobilinkd (2m)";
+      type = "bluetooth";
+      bdaddr = "34:81:F4:3D:98:4B";
+      ota_baudrate = 1200;
+    };
+    "client.1" = {
+      name = "TS-2000 (HF)";
+      type = "serial";
+      device = "/dev/ttyUSB0";
+      serial_baudrate = 57600;
+      ota_baudrate = 1200;
+    };
+    "client.2" = {
+      name = "Direwolf (testing)";
+      type = "tcp";
+      host = "127.0.0.1";
+      port = 8001;
+      ota_baudrate = 1200;
+    };
+    "kiss.1".tx_delay = 80;
+  };
+};
+```
+
+Ports are numbered starting at 0 and must be contiguous. Each port appears
+in the AGWPE client's port selector with its configured `name`.
+
 ## KISS mode init string (serial TNCs)
 
 For TNCs that need a command to enter KISS mode (e.g. Kantronics KPC-3):
 
 ```nix
-services.tncd.settings.client = {
+services.tncd.settings."client.0" = {
   type = "serial";
   device = "/dev/ttyUSB0";
-  baudrate = 9600;
+  serial_baudrate = 9600;
+  ota_baudrate = 1200;
   init_string = "INT KISS\\r";
   init_delay = "1.0";
 };
@@ -106,10 +159,4 @@ services.tncd.settings.client = {
 | `services.tncd.settings` | `{}` | Nix-generated INI config |
 | `services.tncd.user` | `"tncd"` | Service user |
 | `services.tncd.group` | `"tncd"` | Service group |
-| `services.tncd.bluetooth.enable` | `false` | Also run rfcomm manager |
-
-## Standalone nix-build
-
-```bash
-nix-build -I nixpkgs=/path/to/nixpkgs -f overlay.nix -A tncd
-```
+| `services.tncd.bluetooth.enable` | `false` | Add Bluetooth SPP deps and bluetooth group |

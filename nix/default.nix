@@ -1,10 +1,11 @@
 { lib
 , python3
+, bluetoothSupport ? false
 }:
 
 python3.pkgs.buildPythonApplication rec {
   pname = "tncd";
-  version = "1.0.0";
+  version = "1.1";
 
   src = lib.cleanSource ../.;
 
@@ -16,11 +17,13 @@ python3.pkgs.buildPythonApplication rec {
     pyserial
     # kiss3 and pyham-ax25 must be provided as custom derivations
     # if not yet available in the nixpkgs channel being used.
-  ];
+  ] ++ lib.optionals bluetoothSupport (with python3.pkgs; [
+    dbus-python
+    pygobject3
+  ]);
 
   installPhase = ''
     install -Dm755 tncd.py      $out/bin/tncd
-    install -Dm755 tncd-rfcomm  $out/bin/tncd-rfcomm
     install -Dm644 tncd.ini     $out/share/tncd/tncd.ini.example
   '';
 
@@ -30,7 +33,7 @@ python3.pkgs.buildPythonApplication rec {
       A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
       Supports both serial and TCP KISS connections.
     '';
-    homepage = "https://github.com/ben-kuhn/tncd";
+    homepage = "https://tncd.dev";
     license = lib.licenses.gpl3;
     maintainers = [ ];
     platforms = lib.platforms.linux;

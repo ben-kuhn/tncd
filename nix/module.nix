@@ -40,7 +40,8 @@ in {
           client = {
             type = "serial";
             device = "/dev/ttyUSB0";
-            baudrate = 9600;
+            serial_baudrate = 9600;
+            ota_baudrate = 1200;    # over-the-air baud rate (for T1/T2 timers)
             # Optional serial port settings
             # parity = "N";      # N=none O=odd E=even M=mark S=space
             # stopbits = 1;      # 1, 1.5, or 2
@@ -65,7 +66,7 @@ in {
     };
 
     bluetooth = {
-      enable = lib.mkEnableOption "Bluetooth rfcomm manager (tncd-rfcomm)";
+      enable = lib.mkEnableOption "Bluetooth SPP support (adds dbus-python and PyGObject)";
     };
 
   };
@@ -77,7 +78,8 @@ in {
         isSystemUser = true;
         group = cfg.group;
         # dialout allows access to serial/rfcomm devices without root.
-        extraGroups = [ "dialout" ];
+        extraGroups = [ "dialout" ]
+          ++ lib.optionals cfg.bluetooth.enable [ "bluetooth" ];
         description = "tncd service user";
       };
     };
@@ -86,18 +88,17 @@ in {
       tncd = {};
     };
 
+    # Override the package to include bluetooth deps when enabled
+    services.tncd.package = lib.mkIf cfg.bluetooth.enable (
+      lib.mkDefault (cfg.package.override { bluetoothSupport = true; })
+    );
+
     systemd.services.tncd = {
       description = "AGWPE-to-KISS Translation Bridge";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ]
-        ++ lib.optionals cfg.bluetooth.enable [
-             "bluetooth.service"
-             "tncd-rfcomm.service"
-           ];
-      wants = lib.optionals cfg.bluetooth.enable [
-        "bluetooth.service"
-        "tncd-rfcomm.service"
-      ];
+        ++ lib.optionals cfg.bluetooth.enable [ "bluetooth.service" ];
+      wants = lib.optionals cfg.bluetooth.enable [ "bluetooth.service" ];
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
@@ -105,21 +106,6 @@ in {
         ExecStart = "${cfg.package}/bin/tncd -c ${configFile}";
         Restart = "on-failure";
         RestartSec = 5;
-      };
-    };
-
-    systemd.services.tncd-rfcomm = lib.mkIf cfg.bluetooth.enable {
-      description = "AGWPE-to-KISS Bridge: Bluetooth rfcomm Manager";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "bluetooth.service" ];
-      requires = [ "bluetooth.service" ];
-      serviceConfig = {
-        Type = "simple";
-        # rfcomm bind/connect requires root.
-        User = "root";
-        ExecStart = "${cfg.package}/bin/tncd-rfcomm -c ${configFile} -m watch";
-        Restart = "on-failure";
-        RestartSec = 10;
       };
     };
 

@@ -1,5 +1,30 @@
+tncd (1.1) UNRELEASED; urgency=medium
+
+  * Parallel Bluetooth port startup — AGWPE server now starts immediately
+    regardless of how many ports are still connecting
+  * Fix SIGABRT crash: replaced blocking dbus ConnectProfile thread with
+    async GLib.idle_add call, eliminating cross-thread libdbus heap corruption
+  * Fix UnknownObject on props.Get for devices not yet visible to BlueZ
+  * Fix br-connection-busy noise: InProgress silently ignored in error handler
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Sun, 15 Jun 2026 00:00:00 +0000
+
+tncd (1.0) UNRELEASED; urgency=medium
+
+  * First stable release; feature-complete AGWPE bridge and AX.25 v2.0 connected mode
+  * Kantronics KPC+ family (KPC-3+ / KPC-9612+) OTA-verified at 1200 baud
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Fri, 29 May 2026 00:00:00 +0000
+
+tncd (0.11.2) UNRELEASED; urgency=medium
+
+  * Security hardening: AGWPE session ownership, client limits, idle timeout
+  * Retire tncd-rfcomm standalone service
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Tue, 20 May 2026 00:00:00 +0000
+
 tncd (0.2) UNRELEASED; urgency=medium
 
   * Initial release.
 
- -- tncd contributors <noreply@github.com>  Mon, 28 Apr 2026 00:00:00 +0000
+ -- KU0HN <ku0hn@ku0hn.radio>  Mon, 28 Apr 2026 00:00:00 +0000

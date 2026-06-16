@@ -160,6 +160,7 @@
     <a href="https://github.com/ben-kuhn/tncd">GitHub</a>
     <a href="https://github.com/ben-kuhn/tncd/releases">Releases</a>
     <a href="/docs.html">Documentation</a>
+    <a href="/changelog.html">Changelog</a>
     <a href="https://github.com/ben-kuhn/tncd/blob/main/COPYING">GPL-3.0</a>
   </div>
 </header>
@@ -171,10 +172,11 @@
     <p>
       <code>tncd</code> is a userspace bridge that lets AGWPE-compatible applications (Winlink,
       Xastir, APRSIS32, etc.) talk to KISS TNCs — serial, TCP, or Bluetooth.
+      Tested over the air with real Winlink sessions at 1200 baud.
     </p>
     <p>
       It implements full AX.25 connected mode including SABM/UA handshake, I-frame sequencing,
-      and RR acknowledgement, with no kernel AX.25 stack required.
+      delayed acknowledgement, and dynamic T1/T2 timers — with no kernel AX.25 stack required.
     </p>
     <div class="arch-list">
       <span class="arch-tag">x86_64</span>
@@ -193,6 +195,7 @@
       <button class="tab" data-tab="fedora">Fedora / RHEL</button>
       <button class="tab" data-tab="opensuse">openSUSE</button>
       <button class="tab" data-tab="arch">Arch Linux</button>
+      <button class="tab" data-tab="gentoo">Gentoo</button>
       <button class="tab" data-tab="nixos">NixOS</button>
       <button class="tab" data-tab="macos">macOS</button>
       <button class="tab" data-tab="windows">Windows</button>
@@ -237,31 +240,53 @@ curl -fsSL https://raw.githubusercontent.com/ben-kuhn/tncd/main/packaging/PKGBUI
 makepkg -si</code></pre>
     </div>
 
-    <div class="tab-content" id="tab-nixos">
-      <p>Add the tncd overlay to your NixOS configuration:</p>
-      <pre><code># flake.nix or configuration.nix
-{
-  nixpkgs.overlays = [
-    (import (builtins.fetchTarball
-      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
-    ) + "/nix/overlay.nix")
-  ];
+    <div class="tab-content" id="tab-gentoo">
+      <p>tncd is available via a custom overlay that includes the package and its Python dependencies.</p>
+      <pre><code># Clone the overlay
+sudo mkdir -p /var/db/repos
+sudo git clone https://github.com/ben-kuhn/tncd.git \
+  /var/db/repos/tncd
 
-  environment.systemPackages = [ pkgs.tncd ];
-}</code></pre>
-      <p style="margin-top:1rem;">Or use the NixOS service module for managed operation:</p>
-      <pre><code>{
-  imports = [
-    ((builtins.fetchTarball
-      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
-    ) + "/nix/module.nix")
-  ];
+# Register the overlay
+cat &lt;&lt;'EOF' | sudo tee /etc/portage/repos.conf/tncd.conf
+[tncd]
+location = /var/db/repos/tncd/packaging/gentoo-overlay
+EOF
+
+# Install (add bluetooth USE flag for BT support)
+sudo emerge --ask net-misc/tncd</code></pre>
+      <p style="margin-top:1rem;">The overlay also provides ebuilds for
+        <code>dev-python/kiss3</code>, <code>dev-python/pyham-ax25</code>,
+        and <code>dev-python/ax253</code>.</p>
+    </div>
+
+    <div class="tab-content" id="tab-nixos">
+      <p>tncd is packaged in
+        <a href="https://github.com/ben-kuhn/nix-ham-packages">nix-ham-packages</a>.
+        Add the overlay and service module to your NixOS configuration:</p>
+      <pre><code>let
+  ham = builtins.fetchTarball
+    "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz";
+in {
+  nixpkgs.overlays = [ (import ham) ];
+  imports = [ "${ham}/tncd/module.nix" ];
 
   services.tncd = {
     enable = true;
-    configFile = ./tncd.ini;
+    settings = {
+      server.callsign = "N0CALL";
+      client = {
+        type = "serial";
+        device = "/dev/ttyUSB0";
+        serial_baudrate = 9600;
+        ota_baudrate = 1200;
+      };
+    };
   };
 }</code></pre>
+      <p style="margin-top:1rem;">See the
+        <a href="https://github.com/ben-kuhn/tncd/blob/main/nix/README.md">Nix README</a>
+        for Bluetooth setup and all module options.</p>
     </div>
 
     <div class="tab-content" id="tab-macos">
@@ -304,9 +329,6 @@ sudo $EDITOR /etc/tncd.ini</code></pre>
 
     <p style="margin-top:1rem;">Enable and start the service:</p>
     <pre><code>sudo systemctl enable --now tncd</code></pre>
-
-    <p style="margin-top:1rem;">For a Bluetooth TNC, also start the rfcomm manager:</p>
-    <pre><code>sudo systemctl enable --now tncd-rfcomm</code></pre>
 
     <p style="margin-top:1rem;">
       See the <a href="https://github.com/ben-kuhn/tncd/blob/main/README.md">README</a>

@@ -1,9 +1,9 @@
 Name:           tncd
-Version:        0.2
+Version:        1.1
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
 License:        GPL-3.0-or-later
-URL:            https://github.com/ben-kuhn/tncd
+URL:            https://tncd.dev
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
@@ -32,7 +32,6 @@ SABM/UA handshake, I-frame sequencing, and RR acknowledgement.
 
 %install
 install -Dm755 tncd.py           %{buildroot}%{_bindir}/tncd
-install -Dm755 tncd-rfcomm       %{buildroot}%{_bindir}/tncd-rfcomm
 install -Dm644 tncd.ini          %{buildroot}%{_sysconfdir}/tncd.ini.example
 
 # Create the systemd unit directory before writing to it.
@@ -44,28 +43,35 @@ sed \
     -e '/^WorkingDirectory=/d' \
     tncd.service > %{buildroot}%{_unitdir}/tncd.service
 
-sed \
-    -e 's|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|' \
-    -e '/^WorkingDirectory=/d' \
-    tncd-rfcomm.service > %{buildroot}%{_unitdir}/tncd-rfcomm.service
-
 %post
-%systemd_post tncd.service tncd-rfcomm.service
+%systemd_post tncd.service
 
 %preun
-%systemd_preun tncd.service tncd-rfcomm.service
+%systemd_preun tncd.service
 
 %postun
-%systemd_postun_with_restart tncd.service tncd-rfcomm.service
+%systemd_postun_with_restart tncd.service
 
 %files
 %license COPYING
 %{_bindir}/tncd
-%{_bindir}/tncd-rfcomm
 %config(noreplace) %{_sysconfdir}/tncd.ini.example
 %{_unitdir}/tncd.service
-%{_unitdir}/tncd-rfcomm.service
 
 %changelog
-* Mon Apr 28 2026 tncd contributors <noreply@github.com> - 0.1-1
+* Sun Jun 15 2026 KU0HN <ku0hn@ku0hn.radio> - 1.1-1
+- Parallel Bluetooth port startup; AGWPE server no longer blocked by offline ports
+- Fix SIGABRT crash from blocking dbus ConnectProfile thread (cross-thread heap corruption)
+- Fix UnknownObject on props.Get for devices not yet visible to BlueZ
+- Fix br-connection-busy noise; InProgress silently ignored in error handler
+
+* Fri May 29 2026 KU0HN <ku0hn@ku0hn.radio> - 1.0-1
+- First stable release; feature-complete AGWPE bridge and AX.25 v2.0 connected mode
+- Kantronics KPC+ family (KPC-3+ / KPC-9612+) OTA-verified at 1200 baud
+
+* Tue May 20 2026 KU0HN <ku0hn@ku0hn.radio> - 0.11.2-1
+- Security hardening: AGWPE session ownership, client limits, idle timeout
+- Retire tncd-rfcomm standalone service
+
+* Mon Apr 28 2026 KU0HN <ku0hn@ku0hn.radio> - 0.1-1
 - Initial package

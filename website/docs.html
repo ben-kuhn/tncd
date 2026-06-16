@@ -210,6 +210,7 @@
     <a href="/">Home</a>
     <a href="https://github.com/ben-kuhn/tncd">GitHub</a>
     <a href="https://github.com/ben-kuhn/tncd/releases">Releases</a>
+    <a href="/changelog.html">Changelog</a>
     <a href="https://github.com/ben-kuhn/tncd/blob/main/COPYING">GPL-3.0</a>
   </div>
 </header>
@@ -244,6 +245,8 @@
       <code>tncd</code> sits in the middle and translates between the two. It also handles
       the AX.25 "connected mode" handshaking that KISS TNCs don't do on their own &mdash;
       this is what makes Winlink and other connection-based applications work.
+      Connections through digipeaters are fully supported: the via path is stored and
+      included on every frame for the duration of the session.
     </p>
     <p>
       You can connect your TNC to <code>tncd</code> over a USB serial cable, a TCP network
@@ -269,6 +272,7 @@
       <button class="tab" data-tab="opensuse">openSUSE</button>
       <button class="tab" data-tab="arch">Arch Linux</button>
       <button class="tab" data-tab="nixos">NixOS</button>
+      <button class="tab" data-tab="gentoo">Gentoo</button>
       <button class="tab" data-tab="macos">macOS</button>
       <button class="tab" data-tab="windows">Windows</button>
     </div>
@@ -336,32 +340,71 @@ sudo pacman -U tncd-*.pkg.tar.zst</code></pre>
     </div>
 
     <div class="tab-content" id="tab-nixos">
-      <p>Add the tncd overlay to your NixOS configuration:</p>
-      <pre><code># In your configuration.nix or flake.nix
-{
-  nixpkgs.overlays = [
-    (import (builtins.fetchTarball
-      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
-    ) + "/nix/overlay.nix")
-  ];
-
-  environment.systemPackages = [ pkgs.tncd ];
-}</code></pre>
-      <p>Or use the NixOS service module for a fully managed setup:</p>
-      <pre><code>{
-  imports = [
-    ((builtins.fetchTarball
-      "https://github.com/ben-kuhn/tncd/archive/main.tar.gz"
-    ) + "/nix/module.nix")
-  ];
+      <p>tncd is packaged in
+        <a href="https://github.com/ben-kuhn/nix-ham-packages">nix-ham-packages</a>.
+        Add the overlay and service module to your NixOS configuration:</p>
+      <pre><code># configuration.nix
+let
+  ham = builtins.fetchTarball
+    "https://github.com/ben-kuhn/nix-ham-packages/archive/main.tar.gz";
+in {
+  nixpkgs.overlays = [ (import ham) ];
+  imports = [ "${ham}/tncd/module.nix" ];
 
   services.tncd = {
     enable = true;
-    configFile = ./tncd.ini;
+    settings = {
+      server.callsign = "N0CALL";
+      "client.0" = {
+        type = "serial";
+        device = "/dev/ttyUSB0";
+        serial_baudrate = 9600;
+        ota_baudrate = 1200;
+      };
+    };
   };
 }</code></pre>
       <p>After editing your configuration, rebuild with
-        <code>sudo nixos-rebuild switch</code>.</p>
+        <code>sudo nixos-rebuild switch</code>. See the
+        <a href="https://github.com/ben-kuhn/tncd/blob/main/nix/README.md">Nix README</a>
+        for Bluetooth setup and all module options.</p>
+    </div>
+
+    <div class="tab-content" id="tab-gentoo">
+      <p>tncd is available via a Gentoo overlay that includes the package and its dependencies
+        (<code>kiss3</code>, <code>ax253</code>, <code>pyham-ax25</code>). The overlay is in the
+        <code>packaging/gentoo-overlay/</code> subdirectory of the tncd repository.</p>
+
+      <p>Create a repos.conf entry for the overlay:</p>
+      <pre><code># /etc/portage/repos.conf/ham-radio.conf
+[ham-radio]
+location = /var/db/repos/ham-radio
+sync-type = git
+sync-uri = https://github.com/ben-kuhn/tncd.git
+sync-depth = 1
+auto-sync = yes</code></pre>
+      <p>Since the overlay is in a subdirectory, set up a symlink after syncing:</p>
+      <pre><code># Initial sync to clone the repo
+sudo emaint sync -r ham-radio
+
+# Point Portage at the overlay subdirectory
+sudo mv /var/db/repos/ham-radio /var/db/repos/ham-radio-repo
+sudo ln -s /var/db/repos/ham-radio-repo/packaging/gentoo-overlay \
+  /var/db/repos/ham-radio
+
+# Install tncd
+sudo emerge --ask net-misc/tncd</code></pre>
+      <p>To enable Bluetooth SPP support, set the <code>bluetooth</code> USE flag:</p>
+      <pre><code># /etc/portage/package.use
+net-misc/tncd bluetooth</code></pre>
+      <p>After installation, copy the example config and edit it:</p>
+      <pre><code>sudo cp /etc/tncd.ini.example /etc/tncd.ini
+sudo nano /etc/tncd.ini</code></pre>
+      <div class="note">
+        The overlay provides ebuilds for <code>dev-python/kiss3</code>,
+        <code>dev-python/ax253</code>, and <code>dev-python/pyham-ax25</code> since these
+        are not yet in the main Gentoo repository.
+      </div>
     </div>
 
     <div class="tab-content" id="tab-macos">
@@ -409,9 +452,12 @@ python tncd.py -c tncd.ini</code></pre>
     </p>
     <pre><code>sudo nano /etc/tncd.ini</code></pre>
     <p>
-      The file has three sections: <code>[server]</code>, <code>[client]</code>, and
-      <code>[bluetooth]</code>. Lines starting with <code>#</code> are comments and are
-      ignored &mdash; remove the <code>#</code> to enable a setting.
+      The file has a <code>[server]</code> section for the AGWPE listener, and one or more
+      numbered TNC sections: <code>[client.0]</code>, <code>[client.1]</code>, etc. Each TNC
+      gets its own AGWPE port number matching the section number. Optional
+      <code>[kiss.0]</code>, <code>[kiss.1]</code>, ... sections set per-TNC KISS timing
+      parameters. Lines starting with <code>#</code> are comments and are ignored &mdash;
+      remove the <code>#</code> to enable a setting.
     </p>
 
     <h3>[server] &mdash; AGWPE Server Settings</h3>
@@ -443,17 +489,26 @@ callsign = N0CALL</code></pre>
       </tr>
     </table>
 
-    <h3>[client] &mdash; TNC Connection</h3>
-    <p>This tells tncd how to talk to your TNC. There are two connection types:
-      serial (USB cable) and TCP (network).</p>
+    <h3>[client.0] &mdash; TNC Connection</h3>
+    <p>Each TNC is configured in a numbered section: <code>[client.0]</code> for AGWPE port 0,
+      <code>[client.1]</code> for port 1, and so on. Most setups only need one TNC
+      (<code>[client.0]</code>). There are three connection types:
+      serial (USB cable), TCP (network), and Bluetooth.</p>
 
     <h3>Serial TNC (USB)</h3>
     <p>This is the most common setup. Your TNC is plugged into a USB port and shows up as
       a serial device like <code>/dev/ttyUSB0</code> or <code>/dev/ttyACM0</code>.</p>
-    <pre><code>[client]
+    <pre><code>[client.0]
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600</code></pre>
+serial_baudrate = 9600
+ota_baudrate = 1200</code></pre>
+    <p>
+      <code>serial_baudrate</code> is the speed of the serial connection between your computer
+      and TNC (usually 9600). <code>ota_baudrate</code> is the over-the-air baud rate of your
+      radio link (typically 1200 for VHF packet) &mdash; tncd uses this to calculate retransmit
+      and acknowledgement timeouts.
+    </p>
     <p>
       To find your device name, plug in your TNC and run <code>ls /dev/ttyUSB*
       /dev/ttyACM*</code> in a terminal. If you see multiple devices, unplug the TNC and
@@ -468,6 +523,18 @@ baudrate = 9600</code></pre>
     <p>Some TNCs need non-standard serial settings. Most users can skip these:</p>
     <table>
       <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
+      <tr>
+        <td><code>serial_baudrate</code></td>
+        <td>Serial port speed between your computer and TNC.</td>
+        <td><code>9600</code></td>
+      </tr>
+      <tr>
+        <td><code>ota_baudrate</code></td>
+        <td>Over-the-air baud rate. Used to calculate T1 retransmit and T2 delayed-ACK
+          timeouts. Use <code>1200</code> for VHF packet, <code>9600</code> for 9600-baud
+          packet, or <code>300</code> for HF.</td>
+        <td><code>1200</code></td>
+      </tr>
       <tr>
         <td><code>parity</code></td>
         <td>Error-checking mode. <code>N</code>=none, <code>O</code>=odd,
@@ -490,39 +557,49 @@ baudrate = 9600</code></pre>
     <p>
       Some older serial TNCs (like the Kantronics KPC-3) start up in "terminal mode" and
       need a special command to switch into KISS mode. If your TNC requires this, add these
-      lines under <code>[client]</code>:
+      lines under your <code>[client.N]</code> section:
     </p>
-    <pre><code># Kantronics KPC-3:
-init_string = INT KISS\r
-init_delay = 1.0
+    <pre><code># Kantronics KPC+ family (KPC-3+ / KPC-9612+) &mdash; OTA-verified:
+init_string = INTFACE KISS\r\nRESET\r
+init_delay = 2.0
 
 # Kenwood TH-D7 / TM-D700 / TM-D710:
 init_string = KISS ON\rRESTART\r
 init_delay = 1.0</code></pre>
     <p>
-      <code>\r</code> means "carriage return" (like pressing Enter). You can chain multiple
-      commands by putting <code>\r</code> between them. The <code>init_delay</code> is how
-      many seconds to wait after sending the command before tncd starts talking KISS. Check
-      your TNC's manual for the correct command.
+      <code>\r</code> means "carriage return" (like pressing Enter). Multiple commands can
+      be separated by <code>\n</code> and are sent sequentially with <code>init_delay</code>
+      seconds between them. tncd probes the serial port first &mdash; if the TNC is already
+      in KISS mode the init commands are skipped. Check your TNC's manual for the correct
+      command.
     </p>
 
     <h3>TCP TNC (Network)</h3>
     <p>
-      If your TNC is connected over the network (for example,
-      <a href="https://github.com/wb2osz/direwolf">Dire Wolf</a> running on another
-      computer), use the TCP connection type instead:
+      If your TNC is connected over the network &mdash; for example,
+      <a href="https://github.com/wb2osz/direwolf">Dire Wolf</a> running on the same or
+      another computer &mdash; use the TCP connection type. Dire Wolf is fully tested with
+      tncd over both KISS-over-TCP and PTY serial modes, including connected-mode Winlink
+      sessions over the air at 1200 baud.
     </p>
-    <pre><code>[client]
+    <pre><code>[client.0]
 type = tcp
 host = 192.168.1.50
-port = 8001</code></pre>
-    <p>Replace the host and port with the address of your KISS TCP server.</p>
+port = 8001
+ota_baudrate = 1200</code></pre>
+    <p>Replace the host and port with the address of your KISS TCP server.
+      For Dire Wolf on the same machine, use <code>host = 127.0.0.1</code> and the
+      port configured with Dire Wolf's <code>KISSPORT</code> directive (default 8001).</p>
+    <p>You can also use Dire Wolf's PTY mode, where it creates a virtual serial port.
+      In that case, use <code>type = serial</code> and point <code>device</code> at the
+      PTY path shown in Dire Wolf's startup output (e.g., <code>/dev/pts/1</code>).</p>
 
-    <h3>KISS Parameters</h3>
+    <h3>[kiss.0] &mdash; KISS Parameters</h3>
     <p>
-      These control the timing of your radio transmissions. The defaults work well for most
-      setups. Only change these if you know what you're doing or if you're troubleshooting
-      transmission problems.
+      These control the timing of your radio transmissions. Configure them under a
+      <code>[kiss.N]</code> section matching the TNC number (e.g., <code>[kiss.0]</code>
+      for <code>[client.0]</code>). The defaults work well for most setups. Only change
+      these if you know what you're doing or if you're troubleshooting transmission problems.
     </p>
     <table>
       <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
@@ -555,6 +632,45 @@ port = 8001</code></pre>
         <td><code>0</code></td>
       </tr>
     </table>
+
+    <h3>Multiple TNCs (Multi-Port)</h3>
+    <p>
+      tncd can connect to multiple TNCs at the same time. Each TNC is a separate AGWPE port,
+      numbered to match the config section: <code>[client.0]</code> is port 0,
+      <code>[client.1]</code> is port 1, and so on. Your AGWPE client application selects
+      which TNC to use by specifying the port number.
+    </p>
+    <p>
+      Each TNC section can use any connection type (serial, TCP, or Bluetooth) independently.
+      You can optionally give each port a human-readable <code>name</code> that AGWPE clients
+      can display, and each port can have its own <code>[kiss.N]</code> section for KISS
+      timing parameters.
+    </p>
+    <pre><code>[server]
+listen_host = 127.0.0.1
+listen_port = 8000
+callsign = N0CALL
+
+[client.0]
+name = VHF Serial TNC
+type = serial
+device = /dev/ttyUSB0
+serial_baudrate = 9600
+ota_baudrate = 1200
+
+[client.1]
+name = Mobilinkd TNC3 (BT)
+type = bluetooth
+bdaddr = AA:BB:CC:DD:EE:FF
+ota_baudrate = 1200
+
+[kiss.1]
+tx_delay = 50</code></pre>
+    <div class="note">
+      If two TNCs are on the same frequency, tncd automatically suppresses "overheard"
+      frames &mdash; packets received by the wrong TNC are silently dropped rather than
+      causing duplicate connections or spurious responses.
+    </div>
   </section>
 
   <!-- ============================================================ -->
@@ -607,14 +723,22 @@ python tncd.py -c tncd.ini</code></pre>
     <h2>Bluetooth TNC Setup</h2>
 
     <p>
-      If your TNC connects over Bluetooth (like the BTECH UV-Pro or Mobilinkd), there's an
-      extra step: you need to set up an RFCOMM serial connection before tncd can talk to it.
-      The <code>tncd-rfcomm</code> helper handles this for you.
+      If your TNC connects over Bluetooth (like the Mobilinkd TNC3/TNC4), tncd can connect
+      to it directly using the BlueZ D-Bus Profile API &mdash; no external tools like
+      <code>rfcomm</code> needed. tncd handles the SPP (Serial Port Profile) connection,
+      auto-detects the RFCOMM channel via SDP, and reconnects automatically if the link drops.
     </p>
+
+    <div class="note">
+      <strong>Linux only:</strong> Native Bluetooth support uses the BlueZ D-Bus API, which is
+      Linux-specific. On macOS, Bluetooth TNCs appear as <code>/dev/tty.*</code> serial devices
+      &mdash; use <code>type = serial</code> instead. On Windows (WSL), use the COM port
+      assigned by Windows.
+    </div>
 
     <h3>Step 1: Pair your TNC</h3>
     <p>
-      First, make sure your TNC is paired with your computer. Turn on the TNC and put it in
+      First, make sure your TNC is paired and trusted. Turn on the TNC and put it in
       pairing mode (check your TNC's manual), then pair it from your Linux system:
     </p>
     <pre><code># Open the Bluetooth control tool
@@ -632,79 +756,78 @@ trust AA:BB:CC:DD:EE:FF
 exit</code></pre>
     <p>
       Replace <code>AA:BB:CC:DD:EE:FF</code> throughout this guide with your TNC's actual
-      Bluetooth address. You only need to pair once &mdash; your system will remember the
-      device.
+      Bluetooth address. You only need to pair and trust once &mdash; your system will
+      remember the device.
     </p>
     <p>
       If you've already paired but don't remember the address, you can list paired devices:
     </p>
     <pre><code>bluetoothctl devices</code></pre>
 
-    <h3>Step 2: Configure the Bluetooth section</h3>
-    <p>Add these settings to your <code>tncd.ini</code>, replacing
-      <code>AA:BB:CC:DD:EE:FF</code> with the Bluetooth address you found in Step 1:</p>
-    <pre><code>[client]
-type = serial
-device = /dev/rfcomm0
+    <h3>Step 2: Configure Bluetooth in tncd.ini</h3>
+    <p>Set <code>type = bluetooth</code> and provide the Bluetooth address:</p>
+    <pre><code>[server]
+listen_host = 127.0.0.1
+listen_port = 8000
+callsign = N0CALL
 
-[bluetooth]
-enabled = true
-bind_dev = /dev/rfcomm0
+[client.0]
+type = bluetooth
 bdaddr = AA:BB:CC:DD:EE:FF
-channel = 1
-mode = watch
-retry_delay = 5</code></pre>
+ota_baudrate = 1200</code></pre>
     <table>
-      <tr><th>Setting</th><th>What it does</th></tr>
-      <tr>
-        <td><code>enabled</code></td>
-        <td>Set to <code>true</code> to enable Bluetooth management.</td>
-      </tr>
-      <tr>
-        <td><code>bind_dev</code></td>
-        <td>The RFCOMM device that will be created. <code>/dev/rfcomm0</code> is standard.</td>
-      </tr>
+      <tr><th>Setting</th><th>What it does</th><th>Default</th></tr>
       <tr>
         <td><code>bdaddr</code></td>
-        <td>Your TNC's Bluetooth address.</td>
+        <td>Your TNC's Bluetooth address (required).</td>
+        <td>&mdash;</td>
       </tr>
       <tr>
-        <td><code>channel</code></td>
-        <td>RFCOMM channel number. Most TNCs use <code>1</code>. Mobilinkd TNC3 and
-          TNC4 use channel <code>2</code>.</td>
+        <td><code>ota_baudrate</code></td>
+        <td>Over-the-air baud rate for T1/T2 timer calculation.</td>
+        <td><code>1200</code></td>
       </tr>
       <tr>
-        <td><code>mode</code></td>
-        <td><code>watch</code> automatically reconnects if the Bluetooth link drops.
-          Use <code>connect</code> for a one-shot connection.</td>
+        <td><code>reconnect</code></td>
+        <td>Auto-reconnect if the Bluetooth link drops.</td>
+        <td><code>true</code></td>
       </tr>
       <tr>
-        <td><code>retry_delay</code></td>
-        <td>Seconds to wait before reconnecting after a drop (only in watch mode).</td>
+        <td><code>reconnect_delay</code></td>
+        <td>Initial delay (seconds) before reconnecting.</td>
+        <td><code>5</code></td>
+      </tr>
+      <tr>
+        <td><code>reconnect_max_delay</code></td>
+        <td>Maximum delay with exponential backoff.</td>
+        <td><code>60</code></td>
       </tr>
     </table>
     <p>
-      Notice that <code>[client]</code> still says <code>type = serial</code> and points at
-      <code>/dev/rfcomm0</code>. That's because the Bluetooth RFCOMM connection looks like a
-      regular serial port to tncd.
+      The RFCOMM channel is auto-detected via SDP. If your TNC requires a specific channel,
+      you can set <code>channel = 6</code> (e.g. Mobilinkd TNC3 uses channel 6).
     </p>
 
-    <h3>Step 3: Start the rfcomm manager</h3>
+    <h3>Step 3: Install Bluetooth dependencies</h3>
     <p>
-      The rfcomm manager needs to run <strong>before</strong> tncd, because it creates the
-      <code>/dev/rfcomm0</code> device that tncd connects to. It also disconnects any
-      Bluetooth audio profiles first (some TNCs connect as audio devices by default, which
-      blocks the serial channel).
+      The Bluetooth feature requires <code>dbus-python</code> and <code>PyGObject</code>.
+      These are included automatically when installing from packages. If running from source:
     </p>
-    <pre><code># Start the rfcomm manager (needs root for Bluetooth access)
-sudo tncd-rfcomm -c /etc/tncd.ini
-
-# In another terminal, start tncd
-tncd -c /etc/tncd.ini</code></pre>
+    <pre><code>pip install dbus-python PyGObject</code></pre>
     <p>
-      In <code>watch</code> mode, <code>tncd-rfcomm</code> stays running and automatically
-      reconnects if the TNC turns off or goes out of range. For long-term use, run both as
-      services (see below).
+      Your user also needs to be in the <code>bluetooth</code> group:
+    </p>
+    <pre><code>sudo gpasswd -a $USER bluetooth</code></pre>
+    <p>Log out and back in for the group change to take effect.</p>
+
+    <h3>Step 4: Run tncd</h3>
+    <p>
+      Just start tncd normally &mdash; it handles the Bluetooth connection directly:
+    </p>
+    <pre><code>tncd -c /etc/tncd.ini</code></pre>
+    <p>
+      You should see log messages confirming the SPP profile was registered and the connection
+      established. If the TNC is off or out of range, tncd will retry automatically.
     </p>
   </section>
 
@@ -739,18 +862,13 @@ sudo systemctl enable tncd</code></pre>
     <p>Or do both at once:</p>
     <pre><code>sudo systemctl enable --now tncd</code></pre>
 
-    <h3>Bluetooth Service</h3>
+    <h3>Bluetooth</h3>
     <p>
-      If you're using a Bluetooth TNC, you also need to run the rfcomm manager service.
-      It must start before tncd so the Bluetooth serial device is ready:
+      No extra service is needed for Bluetooth TNCs &mdash; tncd handles the connection
+      directly. Just make sure Bluetooth is enabled on your system:
     </p>
-    <pre><code># Enable and start both services
-sudo systemctl enable --now tncd-rfcomm
+    <pre><code>sudo systemctl enable --now bluetooth
 sudo systemctl enable --now tncd</code></pre>
-    <p>
-      The package already configures tncd to wait for the rfcomm manager, so they'll start
-      in the right order.
-    </p>
 
     <h3>Checking Status</h3>
     <p>To see if tncd is running and whether there are any errors:</p>
@@ -769,10 +887,7 @@ sudo systemctl enable --now tncd</code></pre>
 sudo journalctl -u tncd --no-pager -n 50
 
 # Follow the log in real time (like tail -f)
-sudo journalctl -u tncd -f
-
-# Show rfcomm manager logs
-sudo journalctl -u tncd-rfcomm --no-pager -n 50</code></pre>
+sudo journalctl -u tncd -f</code></pre>
     <p>
       The <code>-u tncd</code> part filters the log to only show tncd output. The
       <code>-n 50</code> shows the last 50 lines. Press <code>Ctrl+C</code> to stop
@@ -832,13 +947,17 @@ sudo systemctl disable tncd</code></pre>
     <h3>Bluetooth TNC won't connect</h3>
     <ul>
       <li>Make sure the TNC is powered on and in range.</li>
-      <li>Check that it's paired: run <code>bluetoothctl info AA:BB:CC:DD:EE:FF</code> and
-        look for "Paired: yes".</li>
-      <li>Check the rfcomm manager logs:
-        <code>sudo journalctl -u tncd-rfcomm --no-pager -n 20</code></li>
-      <li>Some TNCs connect as an audio device first. The rfcomm manager handles this
-        automatically, but if you're having trouble, try manually disconnecting first:
-        <code>bluetoothctl disconnect AA:BB:CC:DD:EE:FF</code></li>
+      <li>Check that it's paired <strong>and trusted</strong>: run
+        <code>bluetoothctl info AA:BB:CC:DD:EE:FF</code> and look for "Paired: yes" and
+        "Trusted: yes".</li>
+      <li>Check tncd logs: <code>sudo journalctl -u tncd --no-pager -n 20</code></li>
+      <li>If you see <code>br-connection-page-timeout</code>, the TNC may have auto-connected
+        via BLE. tncd handles this automatically, but you can also try:
+        <code>bluetoothctl disconnect AA:BB:CC:DD:EE:FF</code> then restart tncd.</li>
+      <li>If you see <code>br-connection-key-missing</code>, re-pair the device:
+        <code>bluetoothctl remove AA:BB:CC:DD:EE:FF</code> then pair and trust again.</li>
+      <li>Make sure your user is in the <code>bluetooth</code> group:
+        <code>groups | grep bluetooth</code></li>
     </ul>
 
     <h3>Client application can't connect to tncd</h3>

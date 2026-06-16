@@ -1,7 +1,7 @@
 Source: tncd
 Section: hamradio
 Priority: optional
-Maintainer: tncd contributors <noreply@github.com>
+Maintainer: KU0HN <ku0hn@ku0hn.radio>
 Build-Depends: debhelper-compat (= 13), python3
 Standards-Version: 4.6.2
 Rules-Requires-Root: no

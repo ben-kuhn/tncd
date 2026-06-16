@@ -1,19 +1,18 @@
-# Maintainer: Your Callsign <callsign@example.com>
+# Maintainer: KU0HN <ku0hn@ku0hn.radio>
 pkgname=tncd
-pkgver=0.3-Alpha
+pkgver=1.1
 pkgrel=1
 pkgdesc="AGWPE-to-KISS Translation Bridge"
 arch=('any')
 url="https://github.com/ben-kuhn/tncd"
 license=('GPL-3.0-only')
-depends=('python' 'python-pyserial' 'python-kiss3' 'python-pyham-ax25' 'bluez-utils')
+depends=('python' 'python-pyserial' 'python-kiss3' 'python-pyham-ax25' 'python-dbus' 'python-gobject')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('bf953df3ff5068d97fd30861a4f39406193ac7501056dfb2bd15d99fd401fd15')
+sha256sums=('b8278e0f6233767b3f3bc0ac05430c432cd21f717cdeba48e98e0f9e818e8e21')
 
 package() {
     cd "$pkgname-$pkgver"
     install -Dm755 tncd.py             "$pkgdir/usr/bin/tncd"
-    install -Dm755 tncd-rfcomm         "$pkgdir/usr/bin/tncd-rfcomm"
     install -Dm644 tncd.ini            "$pkgdir/etc/tncd.ini.example"
     # Install service files then patch ExecStart/WorkingDirectory for packaged paths.
     install -Dm644 tncd.service        "$pkgdir/usr/lib/systemd/system/tncd.service"
@@ -21,9 +20,4 @@ package() {
         -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
         -e '/^WorkingDirectory=/d' \
         "$pkgdir/usr/lib/systemd/system/tncd.service"
-    install -Dm644 tncd-rfcomm.service "$pkgdir/usr/lib/systemd/system/tncd-rfcomm.service"
-    sed -i \
-        -e 's|ExecStart=.*tncd-rfcomm.*|ExecStart=/usr/bin/tncd-rfcomm -c /etc/tncd.ini -m watch|' \
-        -e '/^WorkingDirectory=/d' \
-        "$pkgdir/usr/lib/systemd/system/tncd-rfcomm.service"
 }

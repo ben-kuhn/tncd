@@ -9,7 +9,7 @@ final: prev:
 {
   tncd = final.python3.pkgs.buildPythonApplication {
     pname = "tncd";
-    version = "1.0.0";
+    version = "1.1";
     src = final.lib.cleanSource ../.;
     format = "other";
     disabled = final.python3.pkgs.pythonOlder "3.8";
@@ -20,7 +20,6 @@ final: prev:
     ];
     installPhase = ''
       install -Dm755 tncd.py      $out/bin/tncd
-      install -Dm755 tncd-rfcomm  $out/bin/tncd-rfcomm
       install -Dm644 tncd.ini     $out/share/tncd/tncd.ini.example
     '';
     meta = with final.lib; {
@@ -29,7 +28,7 @@ final: prev:
         A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
         Supports both serial and TCP KISS connections, and full AX.25 connected mode.
       '';
-      homepage = "https://github.com/ben-kuhn/tncd";
+      homepage = "https://tncd.dev";
       license = final.lib.licenses.gpl3;
       platforms = final.lib.platforms.linux;
     };

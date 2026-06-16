@@ -1,3 +1,7 @@
 kiss3>=8.0.0
 pyham-ax25>=1.0.0
 pyserial>=3.5
+
+# Bluetooth support (Linux only)
+dbus-python>=1.2.0; sys_platform == 'linux'
+PyGObject>=3.40.0; sys_platform == 'linux'

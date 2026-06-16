@@ -74,9 +74,30 @@ Tests use pytest with pytest-asyncio (`asyncio_mode = auto`). Tests mock the Bri
 
 - **Nix**: `nix/overlay.nix` (package), `nix/module.nix` (NixOS service module with `services.tncd.*` options)
 - **Arch**: `packaging/PKGBUILD`
-- **OBS dependency packages**: `packaging/obs/` contains RPM specs and Debian packaging for `python-kiss3`, `python-pyham-ax25`, `python-ax253`
 - **Release workflow**: `.github/workflows/release.yml` — triggers on `v*` tags. Builds self-contained .deb and .rpm packages (with vendored Python deps via fpm) for amd64, i386, armhf, arm64, riscv64 using QEMU cross-compilation in Docker. Publishes signed APT and RPM repos plus a static website to Cloudflare Pages (tncd.dev), updates PKGBUILD for AUR, and creates a GitHub Release with all artifacts.
 
 ## Protocol Notes
 
 AGWPE frames use a fixed 36-byte header (little-endian) with 10-byte null-padded callsign fields. The `pyham-pe` library is the reference implementation for AGWPE protocol compatibility — tests verify that responses match what pe expects (e.g., exact payload sizes for R, g frames).
+
+## Release / Deployment Checklist
+
+When cutting a release, follow this order:
+
+1. **Run unit tests**: `pytest` — all must pass
+2. **Run e2e tests**: `pytest tests/test_e2e.py` — validates serial/PTY/TCP regressions
+3. **OTA test** (if hardware changes): connect PAT via tncd to a real TNC and complete a Winlink CMS round-trip
+4. **Commit** all changes on the feature branch
+5. **Merge to main**: `git checkout main && git merge --no-ff feature/branch-name`
+6. **Bump version** in `packaging/PKGBUILD` and `nix/default.nix`, commit
+7. **Tag**: `git tag -a vX.Y-BETA -m "description"`
+8. **Push**: `git push origin main --tags` (rebase if remote is ahead, re-tag after rebase)
+9. **Update nix-ham-packages** (`/home/ku0hn/dev/nix-ham-packages/tncd/`):
+   - Update `version` and `rev` in `default.nix`
+   - Get new hash: `nix-prefetch-url --unpack "https://github.com/ben-kuhn/tncd/archive/vX.Y-BETA.tar.gz"` then `nix hash convert --hash-algo sha256 --to sri <hash>`
+   - Update `module.nix` if module options changed
+   - Commit and push
+10. **Update website** (`website/`): changelog, docs, index as needed — commit and push
+11. **Update docs**: README.md, nix/README.md, tncd.service, PLAN.md as needed
+
+The `v*` tag triggers `.github/workflows/release.yml` which builds .deb/.rpm packages, publishes to Cloudflare Pages (tncd.dev), updates AUR PKGBUILD, and creates the GitHub Release.

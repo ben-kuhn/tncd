@@ -29,7 +29,8 @@ listen_port = 8000
 [client]
 type = serial
 device = /dev/ttyUSB0
-baudrate = 9600
+serial_baudrate = 9600
+ota_baudrate = 1200
 ```
 
 ## Milestones
@@ -41,12 +42,9 @@ baudrate = 9600
 - Config via CLI args OR config file
 - systemd service ready
 
-### Milestone 2: Bluetooth rfcomm Management (COMPLETE)
-- `tncd-rfcomm` script to manage Bluetooth rfcomm bindings
-- Disconnects audio profiles before connecting serial channel
-- Auto-reconnect (`watch` mode) on connection drop
-- Cleans up rfcomm binding on exit (SIGINT/SIGTERM)
-- Config options for device, bdaddr, channel, retry delay
+### Milestone 2: Bluetooth rfcomm Management (RETIRED)
+- `tncd-rfcomm` standalone script has been removed; superseded by Milestone 4
+- Bluetooth SPP is now handled in-process via BlueZ D-Bus Profile API in `tncd.py`
 
 ### Milestone 3: AX.25 Connected Mode (COMPLETE)
 Full AX.25 layer 2 implementation for KISS TNCs:
@@ -60,6 +58,29 @@ Full AX.25 layer 2 implementation for KISS TNCs:
   so clients (PAT/Winlink) know when to send the next data block
 - DISC/DM handling in both directions
 - Correct AX.25 C/R (command/response) bits on all frame types
+
+### Milestone 4: Native Bluetooth SPP (COMPLETE)
+Direct Bluetooth SPP connection via BlueZ D-Bus Profile API:
+
+- Register SPP profile via `ProfileManager1`, receive connected fd via `NewConnection`
+- Auto-detect RFCOMM channel via SDP (no manual configuration needed)
+- Disconnect existing BLE auto-connection before SPP connect (dual-mode devices)
+- Auto-reconnect with configurable exponential backoff
+- SABM retransmission via T1 timer during connection setup (AX.25 6.3.1)
+- Optional `dbus-python`/`PyGObject` import (only when `type = bluetooth`)
+- Deprecates `tncd-rfcomm` helper
+
+### Milestone 5: Multi-Port / Multi-Modem Support (COMPLETE)
+Multiple KISS TNC connections managed simultaneously:
+
+- `[client.N]` numbered port sections with per-port config
+- `[kiss.N]` per-port KISS parameters (defaults if no section)
+- Per-port AX.25 state (connections, T1/T2 timers, window size derived from `ota_baudrate`)
+- AGWPE `G` frame reports port count and human-readable names
+- AGWPE `g` frame returns per-port KISS capabilities
+- Ports connect in parallel at startup; offline ports return BUSY for `C` frames
+- Port going offline disconnects active sessions with notification
+- Backward compatible: bare `[client]`/`[kiss]` treated as port 0 with deprecation warning
 
 ## systemd Service
 Type: `simple`
