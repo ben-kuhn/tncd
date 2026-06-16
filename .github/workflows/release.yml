@@ -232,22 +232,17 @@ jobs:
           cp pkgs/tncd.pub repo/tncd.pub
           cp -r website/. repo/
 
-      - name: Update PKGBUILD version for AUR
+      - name: Commit PKGBUILD version bump to main
         run: |
           SHA256=$(curl -sL \
             "https://github.com/ben-kuhn/tncd/archive/v${VERSION}.tar.gz" \
             | sha256sum | cut -d' ' -f1)
-          sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/PKGBUILD
-          sed -i "s/sha256sums=.*/sha256sums=('$SHA256')/" packaging/PKGBUILD
-
-      - name: Commit version bump
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git stash
           git fetch origin main
           git checkout main
-          git stash pop
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/PKGBUILD
+          sed -i "s/sha256sums=.*/sha256sums=('$SHA256')/" packaging/PKGBUILD
           git add packaging/PKGBUILD
           git diff --cached --quiet || \
             git commit -m "chore: bump PKGBUILD to $VERSION [skip ci]"
