@@ -9,7 +9,7 @@ final: prev:
 {
   tncd = final.python3.pkgs.buildPythonApplication {
     pname = "tncd";
-    version = "1.0";
+    version = "1.1";
     src = final.lib.cleanSource ../.;
     format = "other";
     disabled = final.python3.pkgs.pythonOlder "3.8";

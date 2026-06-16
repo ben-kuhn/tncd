@@ -1,5 +1,5 @@
 Name:           tncd
-Version:        1.0
+Version:        1.1
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
 License:        GPL-3.0-or-later
@@ -59,6 +59,12 @@ sed \
 %{_unitdir}/tncd.service
 
 %changelog
+* Sun Jun 15 2026 KU0HN <ku0hn@ku0hn.radio> - 1.1-1
+- Parallel Bluetooth port startup; AGWPE server no longer blocked by offline ports
+- Fix SIGABRT crash from blocking dbus ConnectProfile thread (cross-thread heap corruption)
+- Fix UnknownObject on props.Get for devices not yet visible to BlueZ
+- Fix br-connection-busy noise; InProgress silently ignored in error handler
+
 * Fri May 29 2026 KU0HN <ku0hn@ku0hn.radio> - 1.0-1
 - First stable release; feature-complete AGWPE bridge and AX.25 v2.0 connected mode
 - Kantronics KPC+ family (KPC-3+ / KPC-9612+) OTA-verified at 1200 baud

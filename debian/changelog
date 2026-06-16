@@ -1,3 +1,14 @@
+tncd (1.1) UNRELEASED; urgency=medium
+
+  * Parallel Bluetooth port startup — AGWPE server now starts immediately
+    regardless of how many ports are still connecting
+  * Fix SIGABRT crash: replaced blocking dbus ConnectProfile thread with
+    async GLib.idle_add call, eliminating cross-thread libdbus heap corruption
+  * Fix UnknownObject on props.Get for devices not yet visible to BlueZ
+  * Fix br-connection-busy noise: InProgress silently ignored in error handler
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Sun, 15 Jun 2026 00:00:00 +0000
+
 tncd (1.0) UNRELEASED; urgency=medium
 
   * First stable release; feature-complete AGWPE bridge and AX.25 v2.0 connected mode
