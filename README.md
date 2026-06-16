@@ -386,13 +386,13 @@ Below is a list of hardware and software I have easily available to test with.  
 
 - [x] PAT (Winlink) — connected mode and UI frames, OTA-verified
 - [x] Paracon - connected mode verified OTA
-- [ ] QTTermTCP
+- [x] QTTermTCP
 - [ ] Xastir
 
 ### Software TNCs
 
 - [x] Dire Wolf — KISS over TCP and PTY serial, OTA-verified at 1200 baud.  Direwolf has a native AGWPE interface so this test is only for validation and debugging puposes.  Please use the native interface in production.
-- [ ] QTSoundModem - Supports KISS over TCP (Also supports AGWPE so use that directly instead :-) )
+- [x] QTSoundModem - Supports KISS over TCP (Also supports AGWPE so use that directly instead :-) )
 
 ### Hardware TNCs
 These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
@@ -403,8 +403,8 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
-- [x] Kantronics KPC+ (KPC-3+ / KPC-9612+) — OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
-- [ ] AEA PK-232
+- [x] Kantronics KPC3+ - OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
+- [x] AEA PK-232
 - [ ] AEA DSP-2232
 
 ## Running Tests
