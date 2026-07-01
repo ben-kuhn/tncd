@@ -1993,12 +1993,6 @@ class Bridge:
         if conn.state != 'CONNECTED':
             return
         self._send_rr_guarded(conn, src_str, dst_str, 'poll response')
-        # The remote is polling us — if we have unacked I-frames,
-        # retransmit from where the remote left off.
-        if conn.retransmit_buf:
-            logger.info(f"Retransmitting {len(conn.retransmit_buf)} I-frames "
-                        f"from seq {conn.last_acked}")
-            self._retransmit_from(conn, conn.last_acked)
 
     def _dispatch_s(self, frame, src, dst, port=0):
         """Handle received S (supervisory) frame: respond to polls, forward to monitors."""
