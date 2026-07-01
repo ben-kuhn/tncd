@@ -1491,15 +1491,16 @@ class Bridge:
             return
 
         retransmit = conn.t1_polls > 1
-        logger.debug(f"T1 expired for {conn.local}<->{conn.remote}, "
-                     f"{conn.unacked} unacked, poll #{conn.t1_polls}/{n2_retry}"
-                     f"{' + retransmit' if retransmit else ''}")
+        logger.info(f"T1 expired for {conn.local}<->{conn.remote}, "
+                    f"{conn.unacked} unacked, poll #{conn.t1_polls}/{n2_retry}"
+                    f"{' + retransmit from seq {}'.format(conn.last_acked) if retransmit else ''}")
         try:
             rr = _cmd_frame(conn.remote, conn.local, via=conn.via,
                             control=ax25.Control(ax25.FrameType.RR,
                                                  poll_final=True,
                                                  recv_seqno=conn.recv_seqno))
             self._send_ax25(rr, conn.port)
+            logger.info(f"TX RR(n(r)={conn.recv_seqno}, p=1) to {conn.remote} [T1 poll]")
         except Exception as e:
             logger.error(f"Failed to send T1 poll: {e}")
         if retransmit:
@@ -2037,12 +2038,21 @@ class Bridge:
         # Defer via call_soon so that any I-frames already queued on the
         # event loop (from the same KISS burst) are processed first,
         # advancing recv_seqno before we build the response.
+        #
+        # Exception: REJ already triggered _retransmit_from() above.
+        # Scheduling _send_poll_response would call _retransmit_from()
+        # a second time, flooding the TNC with duplicate frames.
+        # For REJ P=1, send RR F=1 immediately without a second retransmit.
         if frame.control.poll_final:
             conn = self.get_connection(port, dst, src)
             if conn and conn.state == 'CONNECTED':
-                loop = asyncio.get_running_loop()
-                loop.call_soon(self._send_poll_response, conn,
-                               str(src), str(dst))
+                if ft is ax25.FrameType.REJ:
+                    self._send_rr_guarded(conn, str(src), str(dst),
+                                          'REJ poll response')
+                else:
+                    loop = asyncio.get_running_loop()
+                    loop.call_soon(self._send_poll_response, conn,
+                                   str(src), str(dst))
 
         # Forward to monitoring clients as 'S'
         ts = datetime.now().strftime('%H:%M:%S')
