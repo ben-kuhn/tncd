@@ -8,7 +8,7 @@ url="https://github.com/ben-kuhn/tncd"
 license=('GPL-3.0-only')
 depends=('python' 'python-pyserial' 'python-kiss3' 'python-pyham-ax25' 'python-dbus' 'python-gobject')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('a16fd68cd5fc02bf270573429740463281347dcb9f97f52ac116b7b0b5c67476')
+sha256sums=('77e99809becc1badc238216898a54710af31e0199ad624eafe2428845698d0fa')
 
 package() {
     cd "$pkgname-$pkgver"
