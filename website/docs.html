@@ -575,6 +575,28 @@ init_delay = 1.0</code></pre>
       command.
     </p>
 
+    <h3>KISS Exit on Shutdown</h3>
+    <p>
+      On graceful shutdown tncd sends the standard KISS exit sequence
+      (<code>C0 FF C0</code>) to serial TNCs so they return to command mode. This is
+      enabled by default and harmless for always-KISS TNCs; disable it with
+      <code>send_kiss_exit = false</code> under the <code>[client.N]</code> section.
+    </p>
+    <p>
+      Some TNCs store the KISS flag in NVRAM and come back up in KISS mode even after
+      the exit sequence (notably the AEA PK-232MBX). For these, set a
+      <code>host_exit_string</code> &mdash; a command sent in command mode after the KISS
+      exit &mdash; to clear the persistent flag:
+    </p>
+    <pre><code># AEA PK-232MBX:
+host_exit_string = KISS OFF\r
+# seconds between the KISS exit sequence and host_exit_string
+exit_delay = 1.0</code></pre>
+    <p>
+      <code>host_exit_string</code> uses the same <code>\r</code> / <code>\n</code> escape
+      rules as <code>init_string</code>.
+    </p>
+
     <h3>TCP TNC (Network)</h3>
     <p>
       If your TNC is connected over the network &mdash; for example,

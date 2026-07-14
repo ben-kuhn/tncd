@@ -154,6 +154,86 @@
 
 <main>
 
+  <!-- v1.3.1 -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.3.1</h2>
+      <span class="date">July 2026</span>
+      <a class="tag" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.3.1">release</a>
+    </div>
+    <div class="release-body">
+      <h3>New Features</h3>
+      <ul>
+        <li>KISS exit on shutdown &mdash; tncd now sends the standard KISS exit sequence
+          (<code>C0 FF C0</code>) to serial TNCs on graceful shutdown so they return to
+          command mode. Enabled by default; disable with <code>send_kiss_exit = false</code>.</li>
+        <li>New <code>host_exit_string</code> option (sent after <code>exit_delay</code>,
+          default 1.0s) for TNCs that persist KISS mode in NVRAM &mdash; e.g. set
+          <code>host_exit_string = KISS OFF\r</code> for the AEA PK-232MBX.</li>
+      </ul>
+      <h3>Tested</h3>
+      <ul>
+        <li>AEA PK-232 &mdash; OTA-verified at 1200 baud; programmatic KISS init via
+          <code>KISS ON\r</code> + <code>RESTART\r</code>. Note: ships from the factory at
+          1200&nbsp;7E1 &mdash; normalize to 8N1 before enabling KISS.</li>
+        <li>QtTermTCP &mdash; OTA-verified</li>
+        <li>AEA DSP-2232 &mdash; KISS init verified (same sequence as the PK-232); OTA
+          untested due to station audio limitations</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- v1.3 -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.3</h2>
+      <span class="date">July 2026</span>
+      <a class="tag" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.3">release</a>
+    </div>
+    <div class="release-body">
+      <h3>Bug Fixes</h3>
+      <ul>
+        <li>Stop retransmitting I-frames on receipt of an RR(P=1) poll &mdash; respond with
+          RR(F=1) only, letting the remote's N(R) drive retransmission</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- v1.2 -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.2</h2>
+      <span class="date">June 2026</span>
+      <a class="tag" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.2">release</a>
+    </div>
+    <div class="release-body">
+      <h3>Bug Fixes</h3>
+      <ul>
+        <li>Eliminate double retransmit on REJ P=1</li>
+        <li>Promote T1 retransmission logging to INFO for easier field debugging</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- v1.1 -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.1</h2>
+      <span class="date">June 2026</span>
+      <a class="tag" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.1">release</a>
+    </div>
+    <div class="release-body">
+      <h3>Bug Fixes</h3>
+      <ul>
+        <li>Parallel Bluetooth startup &mdash; multiple BT TNCs now connect concurrently
+          instead of serially blocking each other</li>
+        <li>Eliminate SIGABRT on shutdown by replacing the blocking D-Bus thread with an
+          async call</li>
+        <li>Handle D-Bus UnknownObject errors during Bluetooth reconnect</li>
+      </ul>
+    </div>
+  </div>
+
   <!-- v1.0 -->
   <div class="release">
     <div class="release-header">
