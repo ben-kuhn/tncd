@@ -314,6 +314,32 @@ command before the KISS connection opens. tncd probes the serial port first to d
 whether the TNC is already in KISS mode; init commands are only sent if a command-mode
 prompt response is seen.
 
+### KISS Exit on Shutdown
+
+On graceful shutdown tncd sends the standard KISS exit byte sequence (`C0 FF C0`)
+to serial TNCs so they return to host/command mode. This is enabled by default and
+harmless for always-KISS TNCs (Dire Wolf, Mobilinkd). To disable:
+
+```ini
+send_kiss_exit = false
+```
+
+Some TNCs persist KISS state in NVRAM and come back up in KISS even after the exit
+byte is sent (notably the AEA PK-232MBX). For these, set a `host_exit_string` that
+clears the persistent flag in command mode:
+
+```ini
+[client.0]
+type = serial
+device = /dev/ttyUSB1
+init_string = KISS ON\rRESTART\r       # PK-232MBX
+host_exit_string = KISS OFF\r           # clears NVRAM flag on shutdown
+exit_delay = 1.0                        # seconds between KISS exit and host_exit_string
+```
+
+`host_exit_string` is sent as raw bytes (with the same `\r` / `\n` escape rules as
+`init_string`) after a settle delay following the KISS exit byte.
+
 
 ## Multiple TNCs (Multi-Port)
 
@@ -385,8 +411,8 @@ Below is a list of hardware and software I have easily available to test with.  
 ### Clients
 
 - [x] PAT (Winlink) — connected mode and UI frames, OTA-verified
-- [x] Paracon - connected mode verified OTA
-- [x] QTTermTCP
+- [x] Paracon — connected mode OTA-verified
+- [x] QtTermTCP — OTA-verified
 - [ ] Xastir
 
 ### Software TNCs
@@ -403,9 +429,9 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 - [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
-- [x] Kantronics KPC3+ - OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
-- [x] AEA PK-232
-- [ ] AEA DSP-2232
+- [x] Kantronics KPC+ (KPC-3+ / KPC-9612+) — OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
+- [x] AEA PK-232 — OTA-verified at 1200 baud, host serial 9600 8N1, programmatic KISS init via `KISS ON\r` + `RESTART\r`. Note the PK-232 ships from the factory at **1200 7E1** — connect with 7E1 first, then normalize to 8N1 (`AWLEN 8`, `PARITY n`, `PERM`) before flipping to KISS, since KISS framing requires 8-bit clean.
+- [~] AEA DSP-2232 — KISS init verified (same `KISS ON\r` + `RESTART\r` as the PK-232, host serial 9600 8N1). OTA blocked at this station: the DSP-2232's DCD chokes on unsquelched discriminator audio and never keys PTT. Should work with a properly squelched audio feed; not retesting since modern TNCs are strictly better.
 
 ## Running Tests
 

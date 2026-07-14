@@ -615,6 +615,62 @@ class TestKISSClient:
             mock_instance.stop.assert_called_once()
             assert client.connection is None
 
+    @pytest.mark.asyncio
+    async def test_close_sends_kiss_exit_by_default(self):
+        with patch('tncd.kiss.SerialKISS') as mock_kiss:
+            mock_instance = MagicMock()
+            mock_kiss.return_value = mock_instance
+            client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
+            await client.connect()
+            ser = mock_instance.protocol.transport.serial
+            client.close()
+            ser.write.assert_any_call(b'\xc0\xff\xc0')
+
+    @pytest.mark.asyncio
+    async def test_close_skips_kiss_exit_when_disabled(self):
+        with patch('tncd.kiss.SerialKISS') as mock_kiss:
+            mock_instance = MagicMock()
+            mock_kiss.return_value = mock_instance
+            client = _make_kiss_client({
+                'type': 'serial', 'device': '/dev/ttyUSB0',
+                'baudrate': '9600', 'send_kiss_exit': 'false',
+            })
+            await client.connect()
+            ser = mock_instance.protocol.transport.serial
+            client.close()
+            for call in ser.write.call_args_list:
+                assert call.args[0] != b'\xc0\xff\xc0'
+
+    @pytest.mark.asyncio
+    async def test_close_sends_host_exit_string_after_kiss_exit(self):
+        with patch('tncd.kiss.SerialKISS') as mock_kiss, \
+             patch('tncd.time.sleep'):
+            mock_instance = MagicMock()
+            mock_kiss.return_value = mock_instance
+            client = _make_kiss_client({
+                'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600',
+                'host_exit_string': r'KISS OFF\r',
+            })
+            await client.connect()
+            ser = mock_instance.protocol.transport.serial
+            client.close()
+            writes = [c.args[0] for c in ser.write.call_args_list]
+            assert b'\xc0\xff\xc0' in writes
+            assert b'KISS OFF\r' in writes
+            # KISS exit must come before host_exit_string
+            assert writes.index(b'\xc0\xff\xc0') < writes.index(b'KISS OFF\r')
+
+    @pytest.mark.asyncio
+    async def test_close_tcp_does_not_touch_serial(self):
+        with patch('tncd.kiss.TCPKISS') as mock_kiss:
+            mock_instance = MagicMock()
+            mock_kiss.return_value = mock_instance
+            client = _make_kiss_client({'type': 'tcp', 'host': 'localhost', 'port': '8001'})
+            await client.connect()
+            client.close()
+            # TCP path must not try to write the KISS exit to a serial port
+            mock_instance.protocol.transport.serial.write.assert_not_called()
+
     def test_send_no_connection_is_noop(self):
         client = _make_kiss_client({'type': 'serial', 'device': '/dev/ttyUSB0', 'baudrate': '9600'})
         client.send(b'\x00\x01\x02')  # must not raise

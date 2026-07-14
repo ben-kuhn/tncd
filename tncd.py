@@ -16,6 +16,7 @@ import configparser
 import functools
 import logging
 import os
+import signal
 import socket as socket_mod
 import struct
 import sys
@@ -558,6 +559,14 @@ class KISSClient:
         init_str = self.config.get(ps, 'init_string', fallback=None)
         init_delay = self.config.getfloat(ps, 'init_delay', fallback=1.0)
 
+        # Shutdown options — stash for close() to use.
+        self._send_kiss_exit = self.config.getboolean(ps, 'send_kiss_exit',
+                                                     fallback=True)
+        self._host_exit_string = self.config.get(ps, 'host_exit_string',
+                                                 fallback=None)
+        self._exit_delay = self.config.getfloat(ps, 'exit_delay', fallback=1.0)
+        self._conn_type = conn_type
+
         if conn_type == 'tcp':
             host = self.config.get(ps, 'host', fallback='localhost')
             port = self.config.getint(ps, 'port', fallback=8001)
@@ -896,9 +905,34 @@ class KISSClient:
             self.connection.write(data)
 
     def close(self):
-        if self.connection:
-            self.connection.stop()
-            self.connection = None
+        if not self.connection:
+            return
+
+        # Best-effort: return the TNC to host mode before tearing down.
+        # KISS exit byte (KA9Q standard: FEND, 0xFF, FEND) is harmless to TNCs
+        # that are always-KISS (Dire Wolf, Mobilinkd) and required for ones
+        # that have a host mode (PK-232, KPC+).  host_exit_string is for TNCs
+        # like the PK-232MBX that also need a command to clear KISS in NVRAM.
+        if getattr(self, '_conn_type', None) == 'serial':
+            try:
+                ser = self.connection.protocol.transport.serial
+                if getattr(self, '_send_kiss_exit', False):
+                    logger.info("Sending KISS exit (C0 FF C0)")
+                    ser.write(b'\xc0\xff\xc0')
+                    ser.flush()
+                host_exit = getattr(self, '_host_exit_string', None)
+                if host_exit:
+                    time.sleep(getattr(self, '_exit_delay', 1.0))
+                    for line in host_exit.split('\\n'):
+                        cmd = line.replace('\\r', '\r').replace('\\n', '\n').encode()
+                        logger.info(f"TNC host exit: {line!r}")
+                        ser.write(cmd)
+                        time.sleep(getattr(self, '_exit_delay', 1.0))
+            except Exception as e:
+                logger.warning(f"Error sending TNC exit sequence: {e}")
+
+        self.connection.stop()
+        self.connection = None
 
 
 SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb'
@@ -1110,11 +1144,44 @@ class Bridge:
         logger.info("Bridge running. Press Ctrl+C to stop.")
         loop.call_later(30, self._sweep_idle_clients)
 
+        shutdown = asyncio.Event()
+
+        def _request_shutdown(signame):
+            logger.info(f"Received {signame}, shutting down...")
+            shutdown.set()
+
+        for sig, name in ((signal.SIGINT, 'SIGINT'), (signal.SIGTERM, 'SIGTERM')):
+            try:
+                loop.add_signal_handler(sig, _request_shutdown, name)
+            except NotImplementedError:
+                pass  # Windows / unusual environments
+
         try:
             async with server:
-                await server.serve_forever()
+                serve_task = asyncio.create_task(server.serve_forever())
+                shutdown_task = asyncio.create_task(shutdown.wait())
+                await asyncio.wait(
+                    [serve_task, shutdown_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # Drop AGWPE client transports before cancelling serve_task,
+                # otherwise serve_forever's cancellation path awaits
+                # server.wait_closed() which blocks on open clients.
+                for client in list(self.clients):
+                    try:
+                        client.transport.close()
+                    except Exception:
+                        pass
+                shutdown_task.cancel()
+                serve_task.cancel()
         except KeyboardInterrupt:
             logger.info("Shutting down...")
+        finally:
+            for kc in self.kiss_clients:
+                try:
+                    kc.close()
+                except Exception as e:
+                    logger.warning(f"Error closing port {kc.port_num}: {e}")
 
     def add_client(self, client):
         self.clients.append(client)
