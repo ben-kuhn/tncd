@@ -13,3 +13,5 @@ venv/
 tncd_personal.ini
 README.html
 *_test*.ini
+/tncd
+/tncd.exe
