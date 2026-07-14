@@ -1,0 +1,369 @@
+[
+ {
+  "name": "ui_cq",
+  "hex": "86a240404040e096aa60909c406303f068656c6c6f",
+  "type": "UI",
+  "dst": "CQ",
+  "src": "KU0HN-1",
+  "pid": 240,
+  "info": "hello"
+ },
+ {
+  "name": "ui_via_two",
+  "hex": "82a0a4a64040e096aa60909c4072ae92888a624062ae92888a64406303f0706f73",
+  "type": "UI",
+  "dst": "APRS",
+  "src": "KU0HN-9",
+  "via": [
+   "WIDE1-1",
+   "WIDE2-1"
+  ],
+  "pid": 240,
+  "info": "pos"
+ },
+ {
+  "name": "sabm_p1",
+  "hex": "9c6086829898e496aa60909c40753f",
+  "type": "SABM",
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pf": true,
+  "command": true
+ },
+ {
+  "name": "sabme_p1",
+  "hex": "9c6086829898e496aa60909c40757f",
+  "type": "SABME",
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pf": true,
+  "command": true
+ },
+ {
+  "name": "ua_f1",
+  "hex": "9c60868298986496aa60909c40f573",
+  "type": "UA",
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pf": true,
+  "command": false
+ },
+ {
+  "name": "dm_f1",
+  "hex": "9c60868298986496aa60909c40f51f",
+  "type": "DM",
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pf": true,
+  "command": false
+ },
+ {
+  "name": "disc_p1",
+  "hex": "9c6086829898e496aa60909c407553",
+  "type": "DISC",
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pf": true,
+  "command": true
+ },
+ {
+  "name": "rr_cmd_p1_nr0",
+  "hex": "9c6086829898e496aa60909c407511",
+  "type": "RR",
+  "nr": 0,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr0",
+  "hex": "9c60868298986496aa60909c40f501",
+  "type": "RR",
+  "nr": 0,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_cmd_p1_nr1",
+  "hex": "9c6086829898e496aa60909c407531",
+  "type": "RR",
+  "nr": 1,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr1",
+  "hex": "9c60868298986496aa60909c40f521",
+  "type": "RR",
+  "nr": 1,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_cmd_p1_nr2",
+  "hex": "9c6086829898e496aa60909c407551",
+  "type": "RR",
+  "nr": 2,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr2",
+  "hex": "9c60868298986496aa60909c40f541",
+  "type": "RR",
+  "nr": 2,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_cmd_p1_nr3",
+  "hex": "9c6086829898e496aa60909c407571",
+  "type": "RR",
+  "nr": 3,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr3",
+  "hex": "9c60868298986496aa60909c40f561",
+  "type": "RR",
+  "nr": 3,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_cmd_p1_nr4",
+  "hex": "9c6086829898e496aa60909c407591",
+  "type": "RR",
+  "nr": 4,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr4",
+  "hex": "9c60868298986496aa60909c40f581",
+  "type": "RR",
+  "nr": 4,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_cmd_p1_nr5",
+  "hex": "9c6086829898e496aa60909c4075b1",
+  "type": "RR",
+  "nr": 5,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr5",
+  "hex": "9c60868298986496aa60909c40f5a1",
+  "type": "RR",
+  "nr": 5,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_cmd_p1_nr6",
+  "hex": "9c6086829898e496aa60909c4075d1",
+  "type": "RR",
+  "nr": 6,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr6",
+  "hex": "9c60868298986496aa60909c40f5c1",
+  "type": "RR",
+  "nr": 6,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_cmd_p1_nr7",
+  "hex": "9c6086829898e496aa60909c4075f1",
+  "type": "RR",
+  "nr": 7,
+  "pf": true,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rr_resp_nr7",
+  "hex": "9c60868298986496aa60909c40f5e1",
+  "type": "RR",
+  "nr": 7,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rnr_nr3",
+  "hex": "9c60868298986496aa60909c40f565",
+  "type": "RNR",
+  "nr": 3,
+  "pf": false,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "rej_f1_nr5",
+  "hex": "9c60868298986496aa60909c40f5b9",
+  "type": "REJ",
+  "nr": 5,
+  "pf": true,
+  "command": false,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10"
+ },
+ {
+  "name": "i_ns0_nr2",
+  "hex": "9c6086829898e496aa60909c407540f04441544130",
+  "type": "I",
+  "ns": 0,
+  "nr": 2,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA0"
+ },
+ {
+  "name": "i_ns1_nr3",
+  "hex": "9c6086829898e496aa60909c407562f04441544131",
+  "type": "I",
+  "ns": 1,
+  "nr": 3,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA1"
+ },
+ {
+  "name": "i_ns2_nr4",
+  "hex": "9c6086829898e496aa60909c407584f04441544132",
+  "type": "I",
+  "ns": 2,
+  "nr": 4,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA2"
+ },
+ {
+  "name": "i_ns3_nr5",
+  "hex": "9c6086829898e496aa60909c4075a6f04441544133",
+  "type": "I",
+  "ns": 3,
+  "nr": 5,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA3"
+ },
+ {
+  "name": "i_ns4_nr6",
+  "hex": "9c6086829898e496aa60909c4075c8f04441544134",
+  "type": "I",
+  "ns": 4,
+  "nr": 6,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA4"
+ },
+ {
+  "name": "i_ns5_nr7",
+  "hex": "9c6086829898e496aa60909c4075eaf04441544135",
+  "type": "I",
+  "ns": 5,
+  "nr": 7,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA5"
+ },
+ {
+  "name": "i_ns6_nr0",
+  "hex": "9c6086829898e496aa60909c40750cf04441544136",
+  "type": "I",
+  "ns": 6,
+  "nr": 0,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA6"
+ },
+ {
+  "name": "i_ns7_nr1",
+  "hex": "9c6086829898e496aa60909c40752ef04441544137",
+  "type": "I",
+  "ns": 7,
+  "nr": 1,
+  "pf": false,
+  "command": true,
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "DATA7"
+ },
+ {
+  "name": "i_p1_via",
+  "hex": "9c6086829898e496aa60909c407488928e9240406392f078787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
+  "type": "I",
+  "ns": 1,
+  "nr": 4,
+  "pf": true,
+  "command": true,
+  "via": [
+   "DIGI-1"
+  ],
+  "dst": "N0CALL-2",
+  "src": "KU0HN-10",
+  "pid": 240,
+  "info": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+ }
+]
