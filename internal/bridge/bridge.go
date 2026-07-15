@@ -7,7 +7,9 @@ package bridge
 
 import (
 	"bytes"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/ben-kuhn/tncd/v2/agwpe"
@@ -53,6 +55,12 @@ type Bridge struct {
 
 	// idleSweepTimer is held so we can cancel it on Shutdown.
 	idleSweepTimer *engine.Timer
+
+	// verbose and traffic mirror the -v and -t CLI flag counts.
+	// verbose >= 1: per-frame AX.25 log line; verbose >= 2: data preview.
+	// traffic >= 1: hex dump of raw KISS RX/TX bytes.
+	verbose int
+	traffic int
 }
 
 // New creates a Bridge. Call Start to connect ports and wire L2 hooks.
@@ -60,6 +68,89 @@ func New(eng *engine.Engine, cfg *config.Config) *Bridge {
 	return &Bridge{
 		eng: eng,
 		cfg: cfg,
+	}
+}
+
+// SetVerbosity sets the -v and -t counts. Typically called once from main
+// after bridge.New and before bridge.Start.
+func (b *Bridge) SetVerbosity(verbose, traffic int) {
+	b.verbose = verbose
+	b.traffic = traffic
+}
+
+// logAX25 prints a per-frame line to stdout when verbose >= 1.
+// Mirrors tncd.py:1266-1300 (_log_ax25).
+// Format: "  HH:MM:SS.mmm [DIR] TYPE  src -> dst  N bytes"
+func (b *Bridge) logAX25(f *ax25.Frame, dir string) {
+	if b.verbose < 1 {
+		return
+	}
+	var typeStr string
+	switch {
+	case f.Type.IsI():
+		typeStr = fmt.Sprintf("I[%d/%d]", f.NS, f.NR)
+	case f.Type.IsS():
+		typeStr = fmt.Sprintf("%s[%d]", f.Type, f.NR)
+	default:
+		typeStr = f.Type.String()
+	}
+
+	viaStr := ""
+	if len(f.Via) > 0 {
+		parts := make([]string, len(f.Via))
+		for i, v := range f.Via {
+			parts[i] = v.String()
+		}
+		viaStr = " via " + strings.Join(parts, ",")
+	}
+
+	sizeStr := ""
+	if len(f.Info) > 0 {
+		sizeStr = fmt.Sprintf("  %d bytes", len(f.Info))
+	}
+
+	ts := time.Now().Format("15:04:05.000")
+	fmt.Printf("  %s [%s] %-12s %s -> %s%s%s\n",
+		ts, dir, typeStr, f.Src, f.Dst, viaStr, sizeStr)
+
+	if b.verbose >= 2 && len(f.Info) > 0 {
+		text := strings.ReplaceAll(string(f.Info), "\r", "\n")
+		lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+		for i, line := range lines {
+			if i >= 3 {
+				fmt.Printf("      ... (%d more lines)\n", len(lines)-3)
+				break
+			}
+			fmt.Printf("      %q\n", line)
+		}
+	}
+}
+
+// hexDump prints a hex+ASCII dump to stdout prefixed by prefix.
+// Mirrors tncd.py:57-67 (hex_dump).
+func hexDump(data []byte, prefix string) {
+	if len(data) == 0 {
+		fmt.Printf("%s(empty)\n", prefix)
+		return
+	}
+	const width = 16
+	for i := 0; i < len(data); i += width {
+		chunk := data[i:]
+		if len(chunk) > width {
+			chunk = chunk[:width]
+		}
+		hexParts := make([]string, len(chunk))
+		asciiParts := make([]byte, len(chunk))
+		for j, b := range chunk {
+			hexParts[j] = fmt.Sprintf("%02x", b)
+			if b >= 32 && b < 127 {
+				asciiParts[j] = b
+			} else {
+				asciiParts[j] = '.'
+			}
+		}
+		hexStr := strings.Join(hexParts, " ")
+		fmt.Printf("%s%04x: %-*s %s\n", prefix, i, width*3-1, hexStr, asciiParts)
 	}
 }
 
@@ -135,7 +226,12 @@ func (b *Bridge) SendToKISS(port int, raw []byte) {
 // SendAX25 serialises a frame and sends it to the given KISS port.
 // Must be called on the engine loop.
 func (b *Bridge) SendAX25(port int, f *ax25.Frame) {
-	b.SendToKISS(port, f.Bytes())
+	raw := f.Bytes()
+	if b.traffic >= 1 {
+		hexDump(raw, "KISS TX: ")
+	}
+	b.logAX25(f, "TX")
+	b.SendToKISS(port, raw)
 }
 
 // trackSent appends a normalised frame to the echo ring, evicting oldest if
@@ -164,6 +260,10 @@ func (b *Bridge) isEcho(norm []byte) bool {
 func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 	raw := f.Data // cmd byte already stripped by kiss.Port
 
+	if b.traffic >= 1 {
+		hexDump(raw, "KISS RX: ")
+	}
+
 	// Echo suppression: discard frames that are our own transmissions,
 	// normalising H-bits so digipeated echoes also match.
 	norm := normalizeHBits(raw)
@@ -179,6 +279,8 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 			f.Port, err, len(raw), raw[:min(len(raw), 32)])
 		return
 	}
+
+	b.logAX25(frame, "RX")
 
 	// Forward to L2 state machine (handles SABM/UA/DM/DISC/FRMR/I/RR/RNR/REJ).
 	b.l2.OnFrame(f.Port, frame)

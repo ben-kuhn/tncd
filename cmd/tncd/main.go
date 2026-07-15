@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
@@ -28,6 +29,53 @@ func (c *verboseCounter) Set(_ string) error {
 }
 func (c *verboseCounter) IsBoolFlag() bool { return true }
 
+// expandCountFlags pre-processes os.Args so that collapsed count flags like
+// -vvv or -tt are expanded to multiple single flags (-v -v -v, -t -t).
+// countNames is the set of single-letter flag names that use verboseCounter.
+// All other args (long flags, values, subcommands) are left untouched.
+func expandCountFlags(args []string, countNames map[string]bool) []string {
+	out := make([]string, 0, len(args)+4)
+	for _, arg := range args {
+		// Must start with '-' but not '--' to be a short flag cluster.
+		if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+			out = append(out, arg)
+			continue
+		}
+		body := arg[1:] // strip leading '-'
+		// A pure count cluster is entirely composed of count-flag letters, e.g. "vvv" or "tt".
+		// If any character is not in countNames, or if the cluster contains mixed names,
+		// leave the arg untouched so stdlib flag can handle it.
+		if len(body) < 2 {
+			// Single-char short flag — nothing to expand.
+			out = append(out, arg)
+			continue
+		}
+		// Check whether the cluster is all the same count-flag letter (e.g. vvv, tt).
+		// Mixed clusters like -vt are not expanded (unusual, leave to flag parser).
+		first := string(body[0])
+		if !countNames[first] {
+			out = append(out, arg)
+			continue
+		}
+		allSame := true
+		for _, ch := range body[1:] {
+			if string(ch) != first {
+				allSame = false
+				break
+			}
+		}
+		if !allSame {
+			out = append(out, arg)
+			continue
+		}
+		// Expand: -vvv → -v -v -v
+		for range body {
+			out = append(out, "-"+first)
+		}
+	}
+	return out
+}
+
 func main() {
 	// Check for subcommands before flag parsing.
 	if len(os.Args) > 1 {
@@ -43,6 +91,10 @@ func main() {
 			return
 		}
 	}
+
+	// Pre-expand collapsed count flags (-vvv → -v -v -v, -tt → -t -t).
+	countNames := map[string]bool{"v": true, "t": true}
+	expandedArgs := expandCountFlags(os.Args[1:], countNames)
 
 	// --- Flag parsing ---
 	fs := flag.NewFlagSet("tncd", flag.ExitOnError)
@@ -74,9 +126,11 @@ func main() {
 	fs.Int("baudrate", 0, "Serial baud rate (long form of -b)")
 	otaBaudrate := fs.Int("ota-baudrate", 0, "Over-the-air baud rate for T1 calculation (default: 1200)")
 
-	// Verbosity: custom counter flags
+	// Verbosity: custom counter flags.
+	// -v / --verbose count AX.25 frame verbosity; -t / --traffic-debug count hex dump verbosity.
 	vCount := &verboseCounter{}
 	fs.Var(vCount, "v", "-v: AX.25 frame type/src/dst; -vv: also data; -vvv: AGWPE detail")
+	fs.Var(vCount, "verbose", "Verbose (long form of -v; repeatable)")
 
 	tCount := &verboseCounter{}
 	fs.Var(tCount, "t", "Enable raw hex dumps (use -tt for more detail) (short form of --traffic-debug)")
@@ -84,7 +138,7 @@ func main() {
 
 	logLevel := fs.String("log-level", "", "Log level: debug, info, warn, error")
 
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(expandedArgs); err != nil {
 		os.Exit(1)
 	}
 
@@ -102,6 +156,8 @@ func main() {
 	switch *logLevel {
 	case "debug":
 		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
 	case "warn":
 		level = slog.LevelWarn
 	case "error":
@@ -167,6 +223,7 @@ func main() {
 	// --- Build runtime ---
 	eng := engine.New()
 	b := bridge.New(eng, cfg)
+	b.SetVerbosity(vCount.n, tCount.n)
 
 	if err := b.Start(); err != nil {
 		slog.Error("bridge start failed", "err", err)
