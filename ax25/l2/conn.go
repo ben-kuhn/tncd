@@ -65,7 +65,11 @@ type Conn struct {
 	// RNR/flow control
 	remoteBusy bool
 
-	// Duplicate RR suppression (Task 9)
+	// T2 delayed ACK state (Task 10)
+	t2Src string
+	t2Dst string
+
+	// Duplicate RR suppression (Task 9/10)
 	lastRRTime time.Time
 	lastRRNR   uint8
 

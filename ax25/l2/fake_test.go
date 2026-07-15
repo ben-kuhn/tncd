@@ -1,6 +1,7 @@
 package l2
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -29,7 +30,16 @@ func (c *fakeClock) After(d time.Duration, fn func()) *engine.Timer {
 }
 func (c *fakeClock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
-	for _, ft := range c.timers {
+	// Sort by deadline so timers fire in chronological order.  Without this,
+	// T3 (registered before T1) could cancel T1 before T1 fires, even when T1
+	// has an earlier deadline — producing incorrect test results once T3 was
+	// introduced in Task 10.
+	sorted := make([]*fakeTimer, len(c.timers))
+	copy(sorted, c.timers)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].at.Before(sorted[j].at)
+	})
+	for _, ft := range sorted {
 		if !ft.cancelled && !ft.at.After(c.now) {
 			ft.cancelled = true // fire once
 			ft.fn()

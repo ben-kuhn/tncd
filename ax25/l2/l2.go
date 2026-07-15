@@ -61,6 +61,11 @@ type Hooks struct {
 	ConnectFailed func(c *Conn)                         // SABM gave up → 'd'
 	Data          func(c *Conn, pid uint8, data []byte) // → AGWPE 'D'
 	Disconnected  func(c *Conn)                         // → AGWPE 'd'
+	// Defer posts fn so that any frames already queued on the event loop are
+	// processed before fn runs — mirrors asyncio loop.call_soon.
+	// Bridge wires this to engine.Do. When nil, fn is called synchronously
+	// (useful in tests that want predictable ordering without a real loop).
+	Defer func(fn func())
 }
 
 // connKey is the map key for the connection table.
@@ -96,6 +101,12 @@ func NewTable(clock engine.Clock, hooks Hooks, params []PortParams) *Table {
 		conns:     make(map[connKey]*Conn),
 		portCount: len(params),
 	}
+}
+
+// Hooks returns a pointer to the table's Hooks struct so tests can mutate
+// individual fields (e.g. set Defer) after construction.
+func (t *Table) Hooks() *Hooks {
+	return &t.hooks
 }
 
 // portParams returns the PortParams for the given port (clamped to last if out of range).
@@ -164,6 +175,88 @@ func (t *Table) startT1(c *Conn) {
 // cancelT1 stops the T1 timer if running.
 func cancelT1(c *Conn) {
 	c.t1 = cancelTimer(c.t1)
+}
+
+// scheduleT2 schedules a delayed RR (T2 timer), resetting any existing timer.
+// A burst of in-sequence I-frames results in a single RR after the last frame.
+// Mirrors tncd.py:1423-1436 (_schedule_t2).
+func (t *Table) scheduleT2(c *Conn, src, dst string) {
+	c.t2 = cancelTimer(c.t2)
+	c.t2Src = src
+	c.t2Dst = dst
+	pp := t.portParams(c.Port)
+	conn := c
+	c.t2 = t.clock.After(pp.T2, func() { t.t2Expired(conn) })
+}
+
+// cancelT2 cancels the T2 delayed ACK timer.
+func cancelT2(c *Conn) {
+	c.t2 = cancelTimer(c.t2)
+}
+
+// t2Expired fires the delayed RR: send RR F=0 with current recvSeq.
+// Mirrors tncd.py:1445-1498 (_t2_expired, _send_delayed_rr).
+func (t *Table) t2Expired(c *Conn) {
+	c.t2 = nil
+	if c.State != Connected {
+		return
+	}
+	// Send RR response F=0 with current V(R).
+	rr := respFrame(c.t2Src, c.t2Dst, c.Via, ax25.RR, false)
+	rr.NR = c.recvSeq
+	t.sendFrame(c.Port, rr)
+}
+
+// startT3 starts (or restarts) the T3 inactive link timer.
+// Mirrors tncd.py:1453-1463 (_start_t3).
+func (t *Table) startT3(c *Conn) {
+	c.t3 = cancelTimer(c.t3)
+	pp := t.portParams(c.Port)
+	if pp.T3 <= 0 {
+		return
+	}
+	conn := c
+	c.t3 = t.clock.After(pp.T3, func() { t.t3Expired(conn) })
+}
+
+// t3Expired fires the T3 liveness poll: sends RR P=1 command and starts T1.
+// Mirrors tncd.py:1471-1487 (_t3_expired).
+func (t *Table) t3Expired(c *Conn) {
+	c.t3 = nil
+	if c.State != Connected {
+		return
+	}
+	// Send RR P=1 command (liveness poll).
+	rr := cmdFrame(c.Remote, c.Local, c.Via, ax25.RR, true)
+	rr.NR = c.recvSeq
+	t.sendFrame(c.Port, rr)
+	t.startT1(c)
+}
+
+// sendRRGuarded sends RR F=1 (response, PF=true) with conn.recvSeq, but
+// suppresses duplicates sent within 3.0s with the same N(R).
+// Mirrors tncd.py:2034-2055 (_send_rr_guarded).
+func (t *Table) sendRRGuarded(c *Conn, src, dst string) {
+	now := t.clock.Now()
+	nr := c.recvSeq
+	if nr == c.lastRRNR && !c.lastRRTime.IsZero() && now.Sub(c.lastRRTime) < 3*time.Second {
+		return // suppress duplicate
+	}
+	c.lastRRTime = now
+	c.lastRRNR = nr
+	rr := respFrame(src, dst, c.Via, ax25.RR, true)
+	rr.NR = nr
+	t.sendFrame(c.Port, rr)
+}
+
+// defer_ posts fn via Hooks.Defer (mirrors asyncio loop.call_soon). If
+// Hooks.Defer is nil, fn is called synchronously (test default).
+func (t *Table) defer_(fn func()) {
+	if t.hooks.Defer != nil {
+		t.hooks.Defer(fn)
+	} else {
+		fn()
+	}
 }
 
 // t1Expired handles T1 timer expiry (tncd.py:1500-1539 for CONNECTING case,
@@ -573,9 +666,15 @@ func (t *Table) OnFrame(port int, f *ax25.Frame) {
 	case ax25.FRMR:
 		t.dispatchFRMR(port, f, src, dst)
 	case ax25.I:
-		// TODO Task 10: I-frame handling
+		t.dispatchI(port, f, src, dst)
 	case ax25.RR, ax25.RNR, ax25.REJ:
 		t.dispatchS(port, f, src, dst)
+	}
+
+	// Reset T3 inactive link timer on any received frame for a Connected conn.
+	// Mirrors tncd.py:1707-1711 (on_kiss_frame level, after dispatch).
+	if c := t.Get(port, dst, src); c != nil && c.State == Connected {
+		t.startT3(c)
 	}
 }
 
@@ -600,9 +699,25 @@ func (t *Table) RemoveOwned(owner any) {
 	}
 }
 
-// PortOffline handles a port going offline. Task 10.
+// PortOffline handles a port going offline: cancels all timers, fires
+// Disconnected for Connected/Connecting conns on that port, and removes them.
+// Mirrors tncd.py:1246-1264 (_port_went_offline).
 func (t *Table) PortOffline(port int) {
-	// TODO Task 10
+	var toRemove []*Conn
+	for _, c := range t.conns {
+		if c.Port == port && (c.State == Connected || c.State == Connecting) {
+			toRemove = append(toRemove, c)
+		}
+	}
+	for _, c := range toRemove {
+		c.t1 = cancelTimer(c.t1)
+		c.t2 = cancelTimer(c.t2)
+		c.t3 = cancelTimer(c.t3)
+		if t.hooks.Disconnected != nil {
+			t.hooks.Disconnected(c)
+		}
+		t.removeConn(c)
+	}
 }
 
 // --- Frame dispatch handlers ---
@@ -762,6 +877,91 @@ func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	t.startT1(c)
 }
 
+// dispatchI handles a received I-frame.
+// Mirrors tncd.py:1735-1832 (_dispatch_i).
+func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
+	// Find connection: local=dst (frame addressed to us), remote=src.
+	c := t.Get(port, dst, src)
+
+	// I-frame while CONNECTING: UA was lost OTA but remote accepted our SABM.
+	// Promote to CONNECTED so the I-frame is processed normally below.
+	// Mirrors tncd.py:1749-1759.
+	if c != nil && c.State == Connecting {
+		c.State = Connected
+		c.sendSeq = 0
+		c.recvSeq = 0
+		if t.hooks.Connected != nil {
+			t.hooks.Connected(c, false) // outgoing — we initiated
+		}
+	}
+
+	if c == nil || c.State != Connected {
+		// Check if this connection exists on a different port (overheard frame).
+		// If so, silently drop. Mirrors tncd.py:1764-1770.
+		for otherPort, oc := range t.connsByPair(dst, src) {
+			if otherPort != port && (oc.State == Connecting || oc.State == Connected) {
+				return
+			}
+		}
+		// No active connection on any port — send DM if P=1 so remote knows.
+		// Mirrors tncd.py:1771-1781.
+		if f.PF {
+			dm := respFrame(src, dst, nil, ax25.DM, true)
+			t.sendFrame(port, dm)
+		}
+		return
+	}
+
+	// I-frames carry N(R) which implicitly ACKs our sent frames (always first).
+	// Mirrors tncd.py:1783-1784.
+	t.ackFrames(c, f.NR)
+
+	pp := t.portParams(port)
+	expectedNS := c.recvSeq
+	if f.NS != expectedNS {
+		// Out-of-sequence or duplicate frame.
+		gap := (f.NS - expectedNS) % 8
+		if gap > 0 && int(gap) <= pp.MaxWindow {
+			// Gap within window: send REJ with V(R) = expected, echoing P/F.
+			// Mirrors tncd.py:1791-1805.
+			cancelT2(c)
+			rej := respFrame(src, dst, c.Via, ax25.REJ, f.PF)
+			rej.NR = expectedNS
+			t.sendFrame(port, rej)
+		} else {
+			// True duplicate (or gap > window): discard data.
+			// Mirrors tncd.py:1806-1815.
+			if f.PF {
+				cancelT2(c)
+				t.sendRRGuarded(c, src, dst)
+			} else {
+				t.scheduleT2(c, src, dst)
+			}
+		}
+		return
+	}
+
+	// In-sequence frame: advance V(R) and schedule delayed ACK.
+	// Mirrors tncd.py:1816-1832.
+	c.recvSeq = (f.NS + 1) % 8
+	if f.PF {
+		// Poll requires immediate response.
+		cancelT2(c)
+		t.sendRRGuarded(c, src, dst)
+	} else {
+		// Delay the RR to batch-acknowledge a burst.
+		t.scheduleT2(c, src, dst)
+	}
+	// Deliver data to connection owner.
+	if t.hooks.Data != nil {
+		data := f.Info
+		if data == nil {
+			data = []byte{}
+		}
+		t.hooks.Data(c, f.PID, data)
+	}
+}
+
 // dispatchS handles received S-frames (RR, RNR, REJ).
 // Order: ackFrames first, then RNR/RR busy-flag, then REJ retransmit.
 // Mirrors tncd.py:2064-2096. The poll-response side (P=1 → deferred RR F=1)
@@ -793,7 +993,32 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 		t.retransmitFrom(c, f.NR)
 	}
 
-	// TODO Task 10: poll-response side — if f.PF && !f.Command, send RR F=1.
+	// Poll-response side: if P=1, respond with RR F=1.
+	// Defer via Hooks.Defer so that any I-frames already queued on the event
+	// loop (from the same KISS burst) are processed first, advancing recvSeq
+	// before we build the response.
+	// Exception: REJ P=1 responds immediately — a deferred call_soon would
+	// invoke _retransmit_from a second time, flooding the TNC with duplicates.
+	// Mirrors tncd.py:2098-2116 (_dispatch_s poll-response block).
+	if f.PF {
+		// Re-lookup in case state changed above (tncd.py:2108).
+		conn2 := t.Get(port, dst, src)
+		if conn2 != nil && conn2.State == Connected {
+			if f.Type == ax25.REJ {
+				// Immediate: avoid double retransmit.
+				t.sendRRGuarded(conn2, src, dst)
+			} else {
+				// Deferred: let queued I-frames advance recvSeq first.
+				c2 := conn2
+				s, d := src, dst
+				t.defer_(func() {
+					if c2.State == Connected {
+						t.sendRRGuarded(c2, s, d)
+					}
+				})
+			}
+		}
+	}
 }
 
 // --- helpers ---
