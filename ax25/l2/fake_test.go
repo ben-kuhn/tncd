@@ -68,7 +68,7 @@ func newHarness(otaBaud int) (*Table, *recorder, *fakeClock) {
 			}
 			rec.connected = append(rec.connected, c.Remote+":"+dir)
 		},
-		ConnectFailed: func(c *Conn) { rec.failed++ },
+		ConnectFailed: func(c *Conn, _ FailReason) { rec.failed++ },
 		Data:          func(c *Conn, pid uint8, d []byte) { rec.data = append(rec.data, d) },
 		Disconnected:  func(c *Conn) { rec.disconnected++ },
 	}

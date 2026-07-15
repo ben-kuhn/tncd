@@ -53,12 +53,25 @@ func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
 	}
 }
 
+// FailReason distinguishes why a connection attempt failed.
+// Used by the bridge to choose between "BUSY" and "failed" AGWPE messages.
+type FailReason int
+
+const (
+	// FailTimeout means SABM was sent N2 times with no UA response.
+	// Bridge sends: *** BUSY From {remote}\r  (tncd.py:1519)
+	FailTimeout FailReason = iota
+	// FailDM means a DM frame was received while in Connecting state.
+	// Bridge sends: *** CONNECTED With {remote} failed\r  (tncd.py:1953)
+	FailDM
+)
+
 // Hooks are the callbacks l2 fires when state changes. All hooks are called
 // synchronously on the engine loop (or the caller's goroutine in tests).
 type Hooks struct {
 	SendAX25      func(port int, f *ax25.Frame)         // → KISS TX
 	Connected     func(c *Conn, incoming bool)          // → AGWPE 'C'
-	ConnectFailed func(c *Conn)                         // SABM gave up → 'd'
+	ConnectFailed func(c *Conn, reason FailReason)      // SABM gave up → 'd'
 	Data          func(c *Conn, pid uint8, data []byte) // → AGWPE 'D'
 	Disconnected  func(c *Conn)                         // → AGWPE 'd'
 	// Defer posts fn so that any frames already queued on the event loop are
@@ -273,7 +286,7 @@ func (t *Table) t1Expired(c *Conn) {
 			// N2 exhausted — give up
 			c.State = Disconnected
 			if t.hooks.ConnectFailed != nil {
-				t.hooks.ConnectFailed(c)
+				t.hooks.ConnectFailed(c, FailTimeout)
 			}
 			t.removeConn(c)
 			return
@@ -806,7 +819,7 @@ func (t *Table) dispatchDM(port int, f *ax25.Frame, src, dst string) {
 	}
 	if c.State == Connecting {
 		if t.hooks.ConnectFailed != nil {
-			t.hooks.ConnectFailed(c)
+			t.hooks.ConnectFailed(c, FailDM)
 		}
 	} else {
 		if t.hooks.Disconnected != nil {
