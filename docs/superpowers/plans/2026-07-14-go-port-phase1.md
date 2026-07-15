@@ -6,7 +6,7 @@
 
 **Architecture:** Single engine goroutine owns all mutable L2/bridge state (mirrors asyncio serialization — `engine.Do(fn)` ≡ `call_soon_threadsafe`, `engine.After(d, fn)` ≡ `call_later`). Exported reusable packages `ax25/`, `kiss/`, `agwpe/`; policy in `internal/`. The Python implementation stays in-tree as the behavioral reference; **when a task says "port tncd.py:N–M", open those lines and translate the logic exactly — every guard, every log-worthy state transition.**
 
-**Tech Stack:** Go ≥ 1.22, `go.bug.st/serial`, `github.com/godbus/dbus/v5`, `gopkg.in/ini.v1`. Tests: standard `testing` package. E2E: existing pytest suite.
+**Tech Stack:** Go ≥ 1.25 (raised from 1.22 during Task 12: go.bug.st/serial v1.8.0 requires go 1.25.0), `go.bug.st/serial`, `github.com/godbus/dbus/v5`, `gopkg.in/ini.v1`. Tests: standard `testing` package. E2E: existing pytest suite.
 
 ## Global Constraints
 
