@@ -166,7 +166,8 @@ func cancelT1(c *Conn) {
 	c.t1 = cancelTimer(c.t1)
 }
 
-// t1Expired handles T1 timer expiry (tncd.py:1500-1539 for CONNECTING case).
+// t1Expired handles T1 timer expiry (tncd.py:1500-1539 for CONNECTING case,
+// tncd.py:1541-1579 for Connected state).
 func (t *Table) t1Expired(c *Conn) {
 	c.t1 = nil
 	pp := t.portParams(c.Port)
@@ -184,14 +185,59 @@ func (t *Table) t1Expired(c *Conn) {
 			t.removeConn(c)
 			return
 		}
-		// Retransmit SABM (with T1 backoff — Karn arrives in Task 9;
-		// for now just use the default T1 so tests are deterministic)
+		// Retransmit SABM with exponential backoff (Karn, tncd.py:1536-1538).
+		if c.t1Value > 0 {
+			c.t1Value *= 2
+			const t1Ceil = 60 * time.Second
+			if c.t1Value > t1Ceil {
+				c.t1Value = t1Ceil
+			}
+		}
 		t.sendSABM(c)
 		t.startT1(c)
 		return
 	}
 
-	// TODO Task 9: Connected-state T1 handling (RR poll + I-frame retransmit)
+	// Connected state: data-phase T1 (tncd.py:1541-1579).
+	if c.State != Connected || len(c.retransmitBuf) == 0 {
+		return
+	}
+	c.t1Polls++
+
+	// N2 retry limit: disconnect after too many unanswered polls.
+	if c.t1Polls > pp.N2Retry {
+		c.State = Disconnected
+		if t.hooks.Disconnected != nil {
+			t.hooks.Disconnected(c)
+		}
+		t.removeConn(c)
+		return
+	}
+
+	// Poll #1: send RR P=1 only; poll #2+: also retransmit.
+	rr := &ax25.Frame{
+		Dst:     mustParseAddr(c.Remote),
+		Src:     mustParseAddr(c.Local),
+		Type:    ax25.RR,
+		NR:      c.recvSeq,
+		PF:      true,
+		Command: true,
+	}
+	t.sendFrame(c.Port, rr)
+
+	if c.t1Polls > 1 {
+		t.retransmitFrom(c, c.lastAcked)
+	}
+
+	// Karn: exponential backoff on timeout (tncd.py:1575-1578).
+	if c.t1Value > 0 {
+		c.t1Value *= 2
+		const t1Ceil = 60 * time.Second
+		if c.t1Value > t1Ceil {
+			c.t1Value = t1Ceil
+		}
+	}
+	t.startT1(c)
 }
 
 // sendFrame is a helper that calls hooks.SendAX25.
@@ -274,15 +320,235 @@ func (t *Table) Disconnect(c *Conn) {
 	t.startT1(c)
 }
 
-// SendData queues an I-frame for transmission. Implemented in Task 9.
+// maxOutboundQueue is the maximum number of frames in the outbound queue
+// before drops occur (tncd.py MAX_OUTBOUND_QUEUE = 512).
+const maxOutboundQueue = 512
+
+// maxIFrameInfo is the maximum info field size for an I-frame (tncd.py: 256 bytes).
+const maxIFrameInfo = 256
+
+// SendData fragments payload into ≤256-byte chunks, queues (chunk, pid),
+// drops when queue ≥ 512 with warning, then calls drainOutbound.
+// Mirrors tncd.py:366-389 ('D' handler).
 func (t *Table) SendData(c *Conn, pid uint8, data []byte) {
-	// TODO Task 9
+	if len(data) == 0 {
+		data = []byte{}
+	}
+	// Fragment into 256-byte chunks.
+	chunks := make([][]byte, 0, (len(data)+maxIFrameInfo-1)/maxIFrameInfo)
+	if len(data) == 0 {
+		chunks = append(chunks, []byte{})
+	} else {
+		for i := 0; i < len(data); i += maxIFrameInfo {
+			end := i + maxIFrameInfo
+			if end > len(data) {
+				end = len(data)
+			}
+			chunks = append(chunks, data[i:end])
+		}
+	}
+
+	for _, chunk := range chunks {
+		if len(c.outQueue) >= maxOutboundQueue {
+			// Queue full — drop remaining chunks.
+			break
+		}
+		c.outQueue = append(c.outQueue, outEntry{pid: pid, data: chunk})
+	}
+	t.drainOutbound(c)
 }
 
-// Outstanding returns the number of unacknowledged + queued frames. Task 9.
+// Outstanding returns unacked + len(outQueue), the Y-frame fix.
+// Mirrors tncd.py:432-449.
 func (t *Table) Outstanding(c *Conn) int {
-	// TODO Task 9
-	return 0
+	return int(c.unacked) + len(c.outQueue)
+}
+
+// drainOutbound sends queued I-frames while the outbound window has space.
+// Coalesces adjacent same-PID chunks up to 256 bytes.
+// Mirrors tncd.py:1339-1385.
+func (t *Table) drainOutbound(c *Conn) {
+	if c.remoteBusy {
+		return
+	}
+	pp := t.portParams(c.Port)
+	sentAny := false
+	for len(c.outQueue) > 0 && int(c.unacked) < pp.MaxWindow {
+		// Pop first entry.
+		entry := c.outQueue[0]
+		c.outQueue = c.outQueue[1:]
+		chunk := entry.data
+		pid := entry.pid
+
+		// Coalesce adjacent entries with the same PID up to 256 bytes.
+		for len(c.outQueue) > 0 && len(chunk) < maxIFrameInfo {
+			next := c.outQueue[0]
+			if next.pid != pid || len(chunk)+len(next.data) > maxIFrameInfo {
+				break
+			}
+			c.outQueue = c.outQueue[1:]
+			chunk = append(chunk, next.data...)
+		}
+
+		// Build the I-frame.
+		ns := c.sendSeq
+		f := &ax25.Frame{
+			Dst:     mustParseAddr(c.Remote),
+			Src:     mustParseAddr(c.Local),
+			Type:    ax25.I,
+			NS:      ns,
+			NR:      c.recvSeq,
+			PF:      false,
+			Command: true,
+			PID:     pid,
+			Info:    chunk,
+		}
+		for _, v := range c.Via {
+			a, _ := ax25.ParseAddress(v)
+			f.Via = append(f.Via, a)
+		}
+
+		// Store raw bytes in retransmitBuf, record first-TX timestamp.
+		raw := f.Bytes()
+		c.retransmitBuf[ns] = raw
+		c.iframeTimestamps[ns] = t.clock.Now()
+		c.sendSeq = (ns + 1) % 8
+		c.unacked++
+		sentAny = true
+
+		t.sendFrame(c.Port, f)
+	}
+	if sentAny {
+		// Outgoing I-frames piggyback N(R): cancel T2 delayed ACK, start T1.
+		c.t2 = cancelTimer(c.t2)
+		t.startT1(c)
+	}
+}
+
+// ackFrames processes a cumulative ACK: purge retransmit buffer, update SRTT,
+// restart or cancel T1, then drain outbound queue.
+// Mirrors tncd.py:1581-1616.
+func (t *Table) ackFrames(c *Conn, nr uint8) {
+	pp := t.portParams(c.Port)
+	newlyAcked := (nr - c.lastAcked) % 8
+	// Guard: reject backwards N(R) (would appear as a large forward ACK).
+	if int(newlyAcked) > pp.MaxWindow {
+		return
+	}
+	if newlyAcked == 0 {
+		return
+	}
+
+	c.t1Polls = 0 // remote responded — reset consecutive poll counter
+
+	// Karn RTT sampling from first-TX timestamps (skip retransmitted frames).
+	now := t.clock.Now()
+	seq := c.lastAcked
+	for i := uint8(0); i < newlyAcked; i++ {
+		if sendTime, ok := c.iframeTimestamps[seq]; ok {
+			delete(c.iframeTimestamps, seq)
+			rtt := now.Sub(sendTime)
+			t.updateSRTT(c, rtt)
+		}
+		seq = (seq + 1) % 8
+	}
+
+	// Purge retransmit buffer for ACKed sequence numbers.
+	seq = c.lastAcked
+	for i := uint8(0); i < newlyAcked; i++ {
+		delete(c.retransmitBuf, seq)
+		seq = (seq + 1) % 8
+	}
+
+	c.lastAcked = nr
+	if int(c.unacked) > int(newlyAcked) {
+		c.unacked -= newlyAcked
+	} else {
+		c.unacked = 0
+	}
+
+	if len(c.retransmitBuf) > 0 {
+		t.startT1(c)
+	} else {
+		c.t1 = cancelTimer(c.t1)
+	}
+	t.drainOutbound(c)
+}
+
+// updateSRTT updates smoothed RTT and variance per Karn's algorithm (RFC 2988).
+// Mirrors tncd.py:1404-1421.
+func (t *Table) updateSRTT(c *Conn, rtt time.Duration) {
+	const t1Floor = 3 * time.Second
+	const t1Ceil = 60 * time.Second
+	if c.srtt == 0 {
+		// First measurement.
+		c.srtt = rtt
+		c.rttvar = rtt / 2
+	} else {
+		// α = 7/8, β = 3/4 (RFC 2988 / Jacobson/Karels).
+		diff := c.srtt - rtt
+		if diff < 0 {
+			diff = -diff
+		}
+		c.rttvar = (3*c.rttvar + diff) / 4
+		c.srtt = (7*c.srtt + rtt) / 8
+	}
+	t1 := c.srtt + 4*c.rttvar
+	if t1 < t1Floor {
+		t1 = t1Floor
+	}
+	if t1 > t1Ceil {
+		t1 = t1Ceil
+	}
+	c.t1Value = t1
+}
+
+// retransmitFrom retransmits all buffered I-frames from fromSeq onward,
+// rebuilding each with the current N(R) to piggyback newer ACKs, and
+// dropping RTT timestamps (Karn's algorithm).
+// Mirrors tncd.py:1618-1640.
+func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
+	seq := fromSeq
+	for {
+		raw, ok := c.retransmitBuf[seq]
+		if !ok {
+			break
+		}
+		// Parse the stored frame to extract NS/PID/Info.
+		orig, err := ax25.Parse(raw)
+		if err != nil {
+			break
+		}
+		// Rebuild with current N(R) (piggyback-acknowledge received frames).
+		f := &ax25.Frame{
+			Dst:     mustParseAddr(c.Remote),
+			Src:     mustParseAddr(c.Local),
+			Type:    ax25.I,
+			NS:      orig.NS,
+			NR:      c.recvSeq,
+			PF:      orig.PF,
+			Command: true,
+			PID:     orig.PID,
+			Info:    orig.Info,
+		}
+		for _, v := range c.Via {
+			a, _ := ax25.ParseAddress(v)
+			f.Via = append(f.Via, a)
+		}
+		// Update retransmitBuf with rebuilt frame.
+		c.retransmitBuf[seq] = f.Bytes()
+		// Karn: discard RTT sample for retransmitted frames.
+		delete(c.iframeTimestamps, seq)
+		t.sendFrame(c.Port, f)
+		seq = (seq + 1) % 8
+	}
+}
+
+// mustParseAddr parses an AX.25 address, panicking on failure (used only
+// for known-good strings in retransmitFrom).
+func mustParseAddr(s string) ax25.Address {
+	a, _ := ax25.ParseAddress(s)
+	return a
 }
 
 // OnFrame dispatches an inbound AX.25 frame to the appropriate handler.
@@ -307,9 +573,9 @@ func (t *Table) OnFrame(port int, f *ax25.Frame) {
 	case ax25.FRMR:
 		t.dispatchFRMR(port, f, src, dst)
 	case ax25.I:
-		// TODO Task 9-10: I-frame handling
+		// TODO Task 10: I-frame handling
 	case ax25.RR, ax25.RNR, ax25.REJ:
-		// TODO Task 9-10: S-frame handling
+		t.dispatchS(port, f, src, dst)
 	}
 }
 
@@ -494,6 +760,40 @@ func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	// it sends to src (remote) with dst (local) as source.
 	t.sendSABM(c)
 	t.startT1(c)
+}
+
+// dispatchS handles received S-frames (RR, RNR, REJ).
+// Order: ackFrames first, then RNR/RR busy-flag, then REJ retransmit.
+// Mirrors tncd.py:2064-2096. The poll-response side (P=1 → deferred RR F=1)
+// is Task 10 — see TODO below.
+func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
+	// local=dst, remote=src
+	c := t.Get(port, dst, src)
+	if c == nil || c.State != Connected {
+		return
+	}
+
+	// 1. Process cumulative ACK (always first, per Python order).
+	t.ackFrames(c, f.NR)
+
+	// 2. RNR/RR busy-flag update.
+	switch f.Type {
+	case ax25.RNR:
+		c.remoteBusy = true
+	case ax25.RR:
+		if c.remoteBusy {
+			c.remoteBusy = false
+			t.drainOutbound(c)
+		}
+	}
+
+	// 3. REJ: retransmit from requested sequence number.
+	if f.Type == ax25.REJ {
+		c.remoteBusy = false
+		t.retransmitFrom(c, f.NR)
+	}
+
+	// TODO Task 10: poll-response side — if f.PF && !f.Command, send RR F=1.
 }
 
 // --- helpers ---
