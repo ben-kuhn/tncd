@@ -19,10 +19,11 @@ type Clock interface {
 // execute on the loop — callers must guard against that with their own state
 // (mirror of conn.t1_handle = None in tncd.py).
 type Timer struct {
-	t      *time.Timer
-	mu     sync.Mutex
-	fired  bool
-	cancel bool
+	t          *time.Timer
+	mu         sync.Mutex
+	fired      bool
+	cancel     bool
+	cancelHook func() // optional; called under mu when Cancel() runs (test seam)
 }
 
 // Cancel prevents the timer callback from running. If the timer has already
@@ -31,7 +32,23 @@ func (tm *Timer) Cancel() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.cancel = true
-	tm.t.Stop()
+	if tm.t != nil {
+		tm.t.Stop()
+	}
+	if tm.cancelHook != nil {
+		tm.cancelHook()
+	}
+}
+
+// NewManualTimer returns a *Timer that has no real time.Timer behind it.
+// Calling Cancel() sets *cancelled to true. This is a test seam used by
+// fakeClock in ax25/l2 tests so that l2 code can hold *Timer values under
+// a fake clock without a real time.AfterFunc.
+func NewManualTimer(cancelled *bool) *Timer {
+	tm := &Timer{
+		cancelHook: func() { *cancelled = true },
+	}
+	return tm
 }
 
 // Engine is a serialised event loop. All funcs posted via Do or After run
