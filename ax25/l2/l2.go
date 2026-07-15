@@ -114,11 +114,6 @@ func (t *Table) Get(port int, local, remote string) *Conn {
 	return t.conns[makeKey(port, local, remote)]
 }
 
-// getConn is an internal alias for Get using a pre-built key.
-func (t *Table) getConn(k connKey) *Conn {
-	return t.conns[k]
-}
-
 // getOrCreate returns an existing Conn or creates one. Returns nil if the
 // connection limit is reached (tncd.py:1228-1237).
 func (t *Table) getOrCreate(port int, local, remote string) *Conn {
@@ -476,9 +471,20 @@ func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	if c == nil || c.State != Connected {
 		return
 	}
-	// Full reset (tncd.py:2015-2025).
+	// Reset sequence numbers and buffers (tncd.py:2015-2025) but NOT remoteBusy.
+	// Python's _dispatch_frmr resets: send/recv seqnos, unacked, lastAcked,
+	// retransmitBuf, iframeTimestamps, outQueue — NOT remote_busy.
+	// dispatchSABM also calls resetSeqs() which does reset remoteBusy, but
+	// FRMR should preserve the remote flow-control state.
 	c.State = Connecting
-	c.resetSeqs()
+	c.sendSeq = 0
+	c.recvSeq = 0
+	c.unacked = 0
+	c.lastAcked = 0
+	c.retransmitBuf = make(map[uint8][]byte)
+	c.iframeTimestamps = make(map[uint8]time.Time)
+	c.outQueue = c.outQueue[:0]
+	// Note: remoteBusy is NOT reset here
 	c.t1 = cancelTimer(c.t1)
 	c.t2 = cancelTimer(c.t2)
 	c.t3 = cancelTimer(c.t3)
