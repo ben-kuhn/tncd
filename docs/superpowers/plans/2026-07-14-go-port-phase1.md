@@ -2299,7 +2299,9 @@ git add internal/bridge/
 git commit -m "feat(go): bridge — echo suppression, monitor distribution, l2/AGWPE wiring"
 ```
 
----### Task 15: `internal/frontend/agwpe` — the AGWPE TCP server
+---
+
+### Task 15: `internal/frontend/agwpe` — the AGWPE TCP server
 
 **Files:**
 - Create: `internal/frontend/agwpe/server.go`, `internal/frontend/agwpe/handler.go`
