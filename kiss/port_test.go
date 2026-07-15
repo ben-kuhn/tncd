@@ -100,3 +100,76 @@ func TestReaderEOFTriggersOffline(t *testing.T) {
 		t.Fatal("offline callback never fired")
 	}
 }
+
+// idleTransport returns (0, nil) for the first N reads (simulating a serial
+// port's read-timeout behaviour on an idle line), then delivers a real KISS
+// frame, then blocks until Close.
+type idleTransport struct {
+	idle    int // how many (0, nil) reads to return first
+	frameC  chan []byte
+	closedC chan struct{}
+}
+
+func newIdleTransport(idle int) *idleTransport {
+	return &idleTransport{
+		idle:    idle,
+		frameC:  make(chan []byte, 1),
+		closedC: make(chan struct{}),
+	}
+}
+func (it *idleTransport) Open() error                 { return nil }
+func (it *idleTransport) EnterKISS() error            { return nil }
+func (it *idleTransport) ExitKISS()                   {}
+func (it *idleTransport) Close() error                { close(it.closedC); return nil }
+func (it *idleTransport) Write(b []byte) (int, error) { return len(b), nil }
+func (it *idleTransport) Read(b []byte) (int, error) {
+	if it.idle > 0 {
+		it.idle--
+		return 0, nil // idle timeout — no data
+	}
+	select {
+	case frame := <-it.frameC:
+		n := copy(b, frame)
+		return n, nil
+	case <-it.closedC:
+		return 0, io.EOF
+	}
+}
+
+// TestReaderLoopIdleZeroNilIsNotOffline verifies that the readerLoop correctly
+// treats (0, nil) reads — which occur on a serial port with a read timeout
+// when the line is idle — as "no data, keep going" rather than as an error or
+// EOF.  This matches the SetReadTimeout(100ms) behaviour added in Open().
+func TestReaderLoopIdleZeroNilIsNotOffline(t *testing.T) {
+	const idleRounds = 5
+	it := newIdleTransport(idleRounds)
+	offlineCalled := make(chan struct{}, 1)
+	rx := make(chan RXFrame, 4)
+	p := NewPort(7, it, Params{},
+		func(f RXFrame) { rx <- f },
+		func(int) { offlineCalled <- struct{}{} })
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// Queue a real KISS data frame after the idle reads are exhausted.
+	it.frameC <- WrapData(0, []byte("hello"))
+
+	// Expect the frame to arrive — confirms the loop kept running through (0, nil).
+	select {
+	case f := <-rx:
+		if !bytes.Equal(f.Data, []byte("hello")) {
+			t.Fatalf("unexpected frame data: %q", f.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("frame never received — readerLoop may have exited on (0, nil)")
+	}
+
+	// onOffline must not have been called.
+	select {
+	case <-offlineCalled:
+		t.Fatal("onOffline was called despite no real error")
+	default:
+	}
+}

@@ -26,13 +26,18 @@ type SerialConfig struct {
 
 // serialTransport implements Transport for a serial (RS-232/USB) KISS TNC.
 //
-// The rw field is populated by Open() from the real go.bug.st/serial port.
-// Tests bypass Open() by setting rw and probeWait directly on the struct.
+// The rw field is populated by Open() from the real go.bug.st/serial port and
+// is used for all Read/Write/Close calls. The serialPort field holds the same
+// port as a goserial.Port so that Open() can call SetReadTimeout — the Port
+// interface exposes SetReadTimeout but io.ReadWriteCloser does not.
+// Tests bypass Open() by setting rw and probeWait directly on the struct;
+// serialPort remains nil in tests (SetReadTimeout is not called on the fake).
 type serialTransport struct {
-	cfg       SerialConfig
-	rw        io.ReadWriteCloser
-	flush     func() error
-	probeWait time.Duration // default 1s; overridden to milliseconds in tests
+	cfg        SerialConfig
+	rw         io.ReadWriteCloser
+	serialPort goserial.Port // same object as rw, kept for SetReadTimeout
+	flush      func() error
+	probeWait  time.Duration // default 1s; overridden to milliseconds in tests
 }
 
 // NewSerialTransport returns a Transport backed by a serial port.
@@ -89,7 +94,24 @@ func (s *serialTransport) Open() error {
 		return fmt.Errorf("serial: SetRTS: %w", err)
 	}
 
+	// Set a 100ms read timeout so that probe reads return promptly when the TNC
+	// is already in KISS mode and sends nothing after the probe CR.  Without a
+	// timeout, Read blocks forever (the go.bug.st/serial default), which hangs
+	// EnterKISS on TNCs that never leave KISS (e.g. Direwolf, Mobilinkd between
+	// sessions).  100ms is long enough to read any real response; the 1s
+	// probeWait sleep before each read gives the TNC its full response window.
+	//
+	// The same timeout applies to the readerLoop in port.go: Read returns
+	// (0, nil) periodically on an idle line.  The loop already handles (0, nil)
+	// correctly — it just loops back without treating it as an error — so no
+	// wrapper is needed.
+	if err := port.SetReadTimeout(100 * time.Millisecond); err != nil {
+		_ = port.Close()
+		return fmt.Errorf("serial: SetReadTimeout: %w", err)
+	}
+
 	s.rw = port
+	s.serialPort = port
 	// go.bug.st/serial Port.Drain() waits for all transmit bytes to be sent.
 	// Use it as the flush function for the real port.
 	s.flush = port.Drain
