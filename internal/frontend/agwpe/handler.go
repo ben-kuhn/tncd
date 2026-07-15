@@ -47,12 +47,12 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 	case 'R':
 		// Version request: reply with 8-byte <II (2,0) (tncd.py:210-212, 513-516).
 		log.Printf("agwpe: VERSION request")
-		c.sendVersion()
+		c.sendVersion(port)
 
 	case 'G':
 		// Port info: reply with "{count};{name1};..." (tncd.py:214-216, 518-524).
 		log.Printf("agwpe: PORT INFO request")
-		c.sendPortInfo()
+		c.sendPortInfo(port)
 
 	case 'g':
 		// Port capabilities: 12-byte <8BI (tncd.py:218-230).
@@ -122,15 +122,17 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
 		}
-		conn, err := c.b.L2().Connect(port, from, to, nil)
-		if err != nil {
-			log.Printf("agwpe: L2 Connect error: %v", err)
+		// Check for active non-owner connection BEFORE calling Connect (tncd.py:287-291).
+		if existing := c.b.L2().Get(port, from, to); existing != nil &&
+			existing.State != l2pkg.Disconnected && existing.Owner != c {
+			log.Printf("agwpe: rejecting non-owner 'C' for active %s->%s", from, to)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
 		}
-		if conn.State != l2pkg.Connecting && conn.Owner != nil && conn.Owner != c {
-			log.Printf("agwpe: rejecting non-owner 'C' for active %s->%s", from, to)
+		conn, err := c.b.L2().Connect(port, from, to, nil)
+		if err != nil {
+			log.Printf("agwpe: L2 Connect error: %v", err)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
@@ -139,9 +141,12 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 
 	case 'c':
 		// Connect with non-standard PID (tncd.py:305-329).
+		// No offline-port check here — Python 'c' does not have one (tncd.py:305-329).
 		log.Printf("agwpe: CONNECT (PID=0x%02X) %q -> %q", pid, from, to)
-		if !c.b.PortOnline(port) {
-			log.Printf("agwpe: CONNECT on offline port %d: BUSY", port)
+		// Check for active non-owner connection BEFORE calling Connect (tncd.py:313-316).
+		if existing := c.b.L2().Get(port, from, to); existing != nil &&
+			existing.State != l2pkg.Disconnected && existing.Owner != c {
+			log.Printf("agwpe: rejecting non-owner 'c' for active %s->%s", from, to)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
@@ -149,12 +154,6 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		conn, err := c.b.L2().Connect(port, from, to, nil)
 		if err != nil {
 			log.Printf("agwpe: L2 Connect error: %v", err)
-			busy := fmt.Sprintf("*** BUSY From %s\r", from)
-			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
-			return
-		}
-		if conn.State != l2pkg.Connecting && conn.Owner != nil && conn.Owner != c {
-			log.Printf("agwpe: rejecting non-owner 'c' for active %s->%s", from, to)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
@@ -176,15 +175,17 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
 		}
-		conn, err := c.b.L2().Connect(port, from, to, vias)
-		if err != nil {
-			log.Printf("agwpe: L2 Connect error: %v", err)
+		// Check for active non-owner connection BEFORE calling Connect (tncd.py:347-350).
+		if existing := c.b.L2().Get(port, from, to); existing != nil &&
+			existing.State != l2pkg.Disconnected && existing.Owner != c {
+			log.Printf("agwpe: rejecting non-owner 'v' for active %s->%s", from, to)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
 		}
-		if conn.State != l2pkg.Connecting && conn.Owner != nil && conn.Owner != c {
-			log.Printf("agwpe: rejecting non-owner 'v' for active %s->%s", from, to)
+		conn, err := c.b.L2().Connect(port, from, to, vias)
+		if err != nil {
+			log.Printf("agwpe: L2 Connect error: %v", err)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
 			c.sendFrame(uint8(port), 'd', from, to, []byte(busy))
 			return
@@ -266,14 +267,12 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 
 	case 'Y':
 		// Outstanding frames for connection: unacked+queued (tncd.py:432-449).
+		// Python returns 0 when conn.owner is not this client, INCLUDING owner=None
+		// (tncd.py:440: "if conn and conn.owner is not self").
 		conn := c.b.L2().Get(port, from, to)
 		var count int
-		if conn != nil && conn.Owner != nil && conn.Owner != c {
-			count = 0
-		} else {
-			if conn != nil {
-				count = c.b.L2().Outstanding(conn)
-			}
+		if conn != nil && conn.Owner == c {
+			count = c.b.L2().Outstanding(conn)
 		}
 		log.Printf("agwpe: 'Y' query %q<->%q: outstanding=%d", from, to, count)
 		payload := make([]byte, 4)
@@ -291,15 +290,17 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 }
 
 // sendVersion sends the 8-byte version response (tncd.py:513-516).
-func (c *client) sendVersion() {
+// port is echoed from the request (tncd.py:212: send_version(port)).
+func (c *client) sendVersion(port int) {
 	data := make([]byte, 8)
 	binary.LittleEndian.PutUint32(data[0:4], 2) // MajorRevision
 	binary.LittleEndian.PutUint32(data[4:8], 0) // MinorRevision
-	c.sendFrame(0, 'R', "", "", data)
+	c.sendFrame(uint8(port), 'R', "", "", data)
 }
 
 // sendPortInfo sends the G-frame port info string (tncd.py:518-524).
-func (c *client) sendPortInfo() {
+// port is echoed from the request (tncd.py:216: send_port_info(port)).
+func (c *client) sendPortInfo(port int) {
 	cfg := c.b.Config()
 	count := len(cfg.Ports)
 	var parts []string
@@ -313,7 +314,7 @@ func (c *client) sendPortInfo() {
 	}
 	// Format: "{count};{name1};{name2};...;"
 	payload := strings.Join(parts, ";") + ";"
-	c.sendFrame(0, 'G', "", "", []byte(payload))
+	c.sendFrame(uint8(port), 'G', "", "", []byte(payload))
 }
 
 // sendPortCaps sends the 12-byte g-frame capabilities (tncd.py:218-230).

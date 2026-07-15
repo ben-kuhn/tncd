@@ -580,6 +580,107 @@ func TestOversizedPayloadCloses(t *testing.T) {
 	}
 }
 
+// TestConnectNonOwnerBusy: client A connects KU0HN-10→N0CALL-2 (injecting UA so
+// state=Connected); client B sends 'C' for the same pair → B receives 'd' BUSY,
+// no new SABM is sent, and A's session is untouched.
+func TestConnectNonOwnerBusy(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+		{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+	})
+
+	ln, connA := dialServe(t, eng, b)
+	defer ln.Close()
+	defer connA.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	// Client A: register and connect.
+	writeFrame(t, connA, 0, 'X', 0, "KU0HN-10", "", nil)
+	resp := readOneFrame(t, connA)
+	if resp.Kind != 'X' || (len(resp.Data) > 0 && resp.Data[0] != 0x01) {
+		t.Fatalf("A: X register failed: kind=%c data=%v", resp.Kind, resp.Data)
+	}
+
+	writeFrame(t, connA, 0, 'C', 0, "KU0HN-10", "N0CALL-2", nil)
+
+	// Wait for SABM from A.
+	sabm := waitForSABM(t, fp)
+
+	// Inject UA so the session becomes Connected.
+	ua := &ax25.Frame{
+		Dst:     sabm.Src,
+		Src:     sabm.Dst,
+		Type:    ax25.UA,
+		PF:      sabm.PF,
+		Command: false,
+	}
+	onLoop(t, eng, func() {
+		b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: ua.Bytes()})
+	})
+
+	// Consume A's 'C' connected notification.
+	connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	cResp := readOneFrame(t, connA)
+	if cResp.Kind != 'C' {
+		t.Fatalf("A: expected C notification, got %c", cResp.Kind)
+	}
+
+	// Snapshot frame count before client B connects.
+	framesBefore := len(fp.getSent())
+
+	// Client B: dial in and send 'C' for the same pair.
+	connB, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial connB: %v", err)
+	}
+	defer connB.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	writeFrame(t, connB, 0, 'C', 0, "KU0HN-10", "N0CALL-2", nil)
+
+	// B must receive 'd' BUSY immediately.
+	connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	busyResp := readOneFrame(t, connB)
+	if busyResp.Kind != 'd' {
+		t.Fatalf("B: expected 'd' BUSY, got %c (data=%q)", busyResp.Kind, string(busyResp.Data))
+	}
+	wantMsg := "*** BUSY From KU0HN-10\r"
+	if string(busyResp.Data) != wantMsg {
+		t.Fatalf("B: busy msg = %q, want %q", string(busyResp.Data), wantMsg)
+	}
+
+	// No new SABM should have been sent after B's request.
+	time.Sleep(50 * time.Millisecond)
+	framesAfter := len(fp.getSent())
+	if framesAfter != framesBefore {
+		t.Fatalf("expected no new frames after B's BUSY (before=%d after=%d)", framesBefore, framesAfter)
+	}
+
+	// A's session must still be Connected and owned by A.
+	var connState l2pkg.ConnState
+	var connOwner interface{}
+	onLoop(t, eng, func() {
+		c := b.L2().Get(0, "KU0HN-10", "N0CALL-2")
+		if c == nil {
+			t.Errorf("L2 conn is nil after B's BUSY attempt")
+			return
+		}
+		connState = c.State
+		connOwner = c.Owner
+	})
+	if connState != l2pkg.Connected {
+		t.Fatalf("A's conn state = %v, want Connected", connState)
+	}
+	// Owner must not be nil (still A's client handle).
+	if connOwner == nil {
+		t.Fatalf("A's conn Owner became nil after B's BUSY attempt")
+	}
+}
+
 // TestPartialHeaderReassembly: write a 'R' request split into 3 TCP writes → still answered.
 func TestPartialHeaderReassembly(t *testing.T) {
 	eng := engine.New()
