@@ -50,11 +50,11 @@ func NewBluetoothTransport(cfg BluetoothConfig) Transport {
 // up to 30 seconds for that to arrive.
 //
 // Concurrency: ConnectProfile is dispatched via a goroutine so that the
-// current goroutine can block on a channel waiting for the fd. godbus
-// dispatches exported-method calls (NewConnection) on its own goroutine,
-// which writes the fd into the pending map and signals the channel. The two
-// goroutines communicate via a buffered channel of size 1; there is no shared
-// lock required between Open's wait and NewConnection's delivery.
+// current goroutine can block on a channel waiting for the fd. godbus spawns
+// a new goroutine per incoming call to invoke NewConnection, which writes the
+// fd into the pending map and signals the channel. The two goroutines
+// communicate via a buffered channel of size 1; there is no shared lock
+// required between Open's wait and NewConnection's delivery.
 func (bt *bluetoothTransport) Open() error {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
@@ -158,37 +158,29 @@ func (bt *bluetoothTransport) ExitKISS() {}
 // ---- Process-scoped profile registration ----
 
 // sppProfile is the exported D-Bus object that BlueZ calls back on.
-// Its methods are invoked by godbus on its own dispatch goroutine.
+// Its methods are invoked by godbus in a new goroutine per incoming call.
 type sppProfile struct{}
 
 // NewConnection is called by BlueZ when a connected fd is ready for the
-// registered SPP profile. The fd is a dbus.UnixFD; we dup it immediately
-// (using syscall via os) so ownership is unambiguous, then route to the
-// waiting Open() call via the pending map.
+// registered SPP profile. godbus transfers ownership of the delivered fd to
+// this method; we route it to the waiting Open() call via the pending map.
+// If the connection is unexpected or the channel is full, we close the fd here.
 func (p *sppProfile) NewConnection(devicePath dbus.ObjectPath, fd dbus.UnixFD, properties map[string]dbus.Variant) *dbus.Error {
 	rawFD := int(fd)
 	log.Printf("bluetooth: NewConnection: path=%s fd=%d", devicePath, rawFD)
 
-	// Duplicate the fd so we own a copy independent of the D-Bus message.
-	// The kernel will close the original after this call returns.
-	dupFD, err := dupFD(rawFD)
-	if err != nil {
-		log.Printf("bluetooth: dup fd %d: %v", rawFD, err)
-		return dbus.NewError("org.bluez.Error.Failed", []interface{}{err.Error()})
-	}
-
 	fdCh := lookupPending(string(devicePath))
 	if fdCh == nil {
 		log.Printf("bluetooth: unexpected NewConnection from %s, closing fd", devicePath)
-		_ = closeFD(dupFD)
+		_ = closeFD(rawFD)
 		return nil
 	}
 	// Non-blocking send: channel is buffered(1) and Open created it just for us.
 	select {
-	case fdCh <- dupFD:
+	case fdCh <- rawFD:
 	default:
-		log.Printf("bluetooth: fd channel full for %s, closing dup fd", devicePath)
-		_ = closeFD(dupFD)
+		log.Printf("bluetooth: fd channel full for %s, closing fd", devicePath)
+		_ = closeFD(rawFD)
 	}
 	return nil
 }
