@@ -66,6 +66,9 @@ func New(eng *engine.Engine, cfg *config.Config) *Bridge {
 // L2 returns the AX.25 connection table.
 func (b *Bridge) L2() *l2pkg.Table { return b.l2 }
 
+// Config returns the parsed configuration.
+func (b *Bridge) Config() *config.Config { return b.cfg }
+
 // PortCount returns the number of configured ports.
 func (b *Bridge) PortCount() int { return len(b.ports) }
 
@@ -216,6 +219,34 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// InjectPorts wires L2 and port senders into a Bridge that was created with
+// New but never Start-ed. Intended for integration tests that want a real
+// Bridge with fake ports and a real L2 table.
+func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, senders []PortSender) {
+	hooks := l2pkg.Hooks{
+		SendAX25: func(port int, f *ax25.Frame) {
+			b.SendAX25(port, f)
+		},
+		Connected: func(c *l2pkg.Conn, incoming bool) {
+			b.notifyConnected(c, incoming)
+		},
+		ConnectFailed: func(c *l2pkg.Conn, reason l2pkg.FailReason) {
+			b.notifyConnectFailed(c, reason)
+		},
+		Data: func(c *l2pkg.Conn, pid uint8, data []byte) {
+			b.notifyData(c, pid, data)
+		},
+		Disconnected: func(c *l2pkg.Conn) {
+			b.notifyDisconnected(c)
+		},
+		Defer: func(fn func()) {
+			eng.Do(fn)
+		},
+	}
+	b.l2 = l2pkg.NewTable(eng, hooks, params)
+	b.ports = senders
 }
 
 // Start opens all KISS ports asynchronously (one goroutine per port so a dead
