@@ -87,3 +87,14 @@ func TestExampleLoads(t *testing.T) {
 		t.Fatalf("Example() output does not load: %v", err)
 	}
 }
+
+func TestUppercaseKeysAccepted(t *testing.T) {
+	p := write(t, "[client.0]\nType = serial\nDevice = /dev/x\nSerial_Baudrate = 1200\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ports[0].Device != "/dev/x" || cfg.Ports[0].SerialBaudrate != 1200 {
+		t.Errorf("port = %+v", cfg.Ports[0])
+	}
+}

@@ -236,6 +236,7 @@ func Load(path string) (*Config, error) {
 		IgnoreInlineComment:         true,
 		UnescapeValueDoubleQuotes:   false,
 		UnescapeValueCommentSymbols: false,
+		InsensitiveKeys:             true,
 	}
 
 	var f *ini.File
