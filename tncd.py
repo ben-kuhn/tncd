@@ -1690,7 +1690,12 @@ class Bridge:
             self._dispatch_sabm(frame, src, dst, port_num)
         elif ft is ax25.FrameType.SABME:
             # Reject extended (mod-128) mode — we only support basic (mod-8).
-            # Remote should fall back to SABM.
+            # Remote should fall back to SABM.  Only respond when the SABME
+            # was addressed to one of our registered callsigns; answering
+            # foreign SABMEs transmits DM into other stations' sessions.
+            if not self._is_local_call(dst):
+                logger.debug(f"Ignoring SABME to unregistered callsign {dst}")
+                return
             logger.debug(f"Rejecting SABME from {src} (mod-128 not supported)")
             try:
                 dm = _resp_frame(src, dst,

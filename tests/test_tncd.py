@@ -1256,8 +1256,11 @@ class TestConnectedModeReceivePath:
 
 
     def test_sabme_rejected_with_dm(self):
-        """SABME (extended mode) must be rejected with DM, not accepted."""
+        """SABME (extended mode) to a registered callsign must be rejected with DM."""
         bridge = self._make_bridge()
+        client = Mock()
+        client.registered_calls = {'W1ABC'}
+        bridge.add_client(client)
         sabme = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                            control=ax25.Control(ax25.FrameType.SABME, poll_final=True))
         bridge.on_kiss_frame(0, b'\x00' + bytes(sabme))
@@ -1266,6 +1269,18 @@ class TestConnectedModeReceivePath:
         assert dm.control.frame_type is ax25.FrameType.DM
         # No connection should be created
         assert bridge.get_connection(0, 'W1ABC', 'W2DEF') is None
+
+    def test_foreign_sabme_ignored(self):
+        """SABME to an unregistered callsign must NOT produce a DM.
+
+        Same shared-channel guard as SABM/I-frame/DISC: answering a foreign
+        SABME transmits DM into another station's session."""
+        bridge = self._make_bridge()
+        sabme = ax25.Frame(dst=ax25.Address('WT9M-4'), src=ax25.Address('MNWIN'),
+                           control=ax25.Control(ax25.FrameType.SABME, poll_final=True))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabme))
+        bridge.kiss_client.send.assert_not_called()
+        assert bridge.get_connection(0, 'WT9M-4', 'MNWIN') is None
 
     def test_incoming_sabm_sets_owner_for_registered_client(self):
         """Incoming SABM must set conn.owner to the client that registered the callsign."""
