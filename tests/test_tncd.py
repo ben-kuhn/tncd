@@ -1065,6 +1065,10 @@ class TestConnectedModeReceivePath:
     def test_incoming_sabm_sends_ua(self):
         """Incoming SABM must be replied to with UA addressed to the caller."""
         bridge = self._make_bridge()
+        # Register W1ABC so the SABM is accepted (foreign SABMs are dropped).
+        client = Mock()
+        client.registered_calls = {'W1ABC'}
+        bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
         bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
@@ -1088,6 +1092,10 @@ class TestConnectedModeReceivePath:
 
     def test_incoming_sabm_creates_connected_state(self):
         bridge = self._make_bridge()
+        # Register W1ABC so the SABM is accepted (foreign SABMs are dropped).
+        client = Mock()
+        client.registered_calls = {'W1ABC'}
+        bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
         bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
@@ -1284,6 +1292,99 @@ class TestConnectedModeReceivePath:
         bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
         msg = client.send_frame.call_args[0][4]
         assert b'CONNECTED To' in msg
+
+
+class TestForeignFrameGuards:
+    """Shared-channel safety: frames addressed to unregistered callsigns must be
+    silently dropped to avoid disrupting foreign QSOs on the same frequency."""
+
+    def _make_bridge(self):
+        raw = configparser.ConfigParser()
+        raw['server']   = {'listen_host': '0.0.0.0', 'listen_port': '8000', 'callsign': 'N0CALL'}
+        raw['client.0'] = {'type': 'serial', 'device': '/dev/null',
+                           'serial_baudrate': '9600', 'ota_baudrate': '1200'}
+        raw['kiss.0']   = {'tx_delay': '40', 'persistence': '63', 'slot_time': '20', 'tx_tail': '30'}
+        config = PortConfig(raw, ['client.0'], {0: 'kiss.0'})
+        bridge = Bridge(config)
+        mock_kc = Mock()
+        mock_kc.online = True
+        bridge.kiss_clients[0] = mock_kc
+        bridge.kiss_client = mock_kc
+        return bridge
+
+    def test_foreign_iframe_poll_no_dm(self):
+        """I-frame P=1 to an unregistered callsign must NOT trigger a DM response.
+
+        Overheard I-frames from a foreign QSO (e.g. MNWIN→WT9M-4) would
+        otherwise cause tncd to transmit a DM that tears down that session.
+        """
+        bridge = self._make_bridge()
+        # No client registers WT9M-4 — this is a foreign QSO.
+        iframe = ax25.Frame(dst=ax25.Address('WT9M-4'), src=ax25.Address('MNWIN'),
+                            control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                                 recv_seqno=0, poll_final=True),
+                            pid=0xF0, data=b'hello')
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
+        bridge.kiss_client.send.assert_not_called()
+
+    def test_foreign_disc_no_dm(self):
+        """DISC to an unregistered callsign must NOT trigger a DM response.
+
+        Overheard DISC from a foreign QSO would otherwise cause tncd to
+        transmit a DM addressed to a third station, disrupting their session.
+        """
+        bridge = self._make_bridge()
+        disc = ax25.Frame(dst=ax25.Address('WT9M-4'), src=ax25.Address('MNWIN'),
+                          control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(disc))
+        bridge.kiss_client.send.assert_not_called()
+
+    def test_foreign_sabm_ignored(self):
+        """SABM to an unregistered callsign must NOT produce a UA and must NOT
+        create a connection entry in bridge.connections.
+
+        Without this guard, tncd would answer UA pretending to be whatever
+        station a foreign caller was trying to reach, hijacking the connection.
+        """
+        bridge = self._make_bridge()
+        sabm = ax25.Frame(dst=ax25.Address('WT9M-4'), src=ax25.Address('MNWIN'),
+                          control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
+        bridge.kiss_client.send.assert_not_called()
+        assert bridge.get_connection(0, 'WT9M-4', 'MNWIN') is None
+
+    def test_registered_sabm_still_accepted(self):
+        """SABM to a registered callsign must still be accepted and answered with UA."""
+        bridge = self._make_bridge()
+        client = Mock()
+        client.registered_calls = {'W1ABC'}
+        bridge.add_client(client)
+        sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                          control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
+        bridge.on_kiss_frame(0, b'\x00' + bytes(sabm))
+        bridge.kiss_client.send.assert_called_once()
+        ua = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert ua.control.frame_type is ax25.FrameType.UA
+        conn = bridge.get_connection(0, 'W1ABC', 'W2DEF')
+        assert conn is not None
+        assert conn.state == 'CONNECTED'
+
+    def test_registered_iframe_dm_still_sent(self):
+        """I-frame P=1 with no active connection for a REGISTERED callsign must
+        still elicit a DM — that's the legitimate stale-session cleanup path."""
+        bridge = self._make_bridge()
+        client = Mock()
+        client.registered_calls = {'W1ABC'}
+        bridge.add_client(client)
+        # No active connection exists for W1ABC↔W2DEF, but W1ABC is registered.
+        iframe = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
+                            control=ax25.Control(ax25.FrameType.I, send_seqno=0,
+                                                 recv_seqno=0, poll_final=True),
+                            pid=0xF0, data=b'hello')
+        bridge.on_kiss_frame(0, b'\x00' + bytes(iframe))
+        bridge.kiss_client.send.assert_called_once()
+        dm = ax25.Frame.unpack(bridge.kiss_client.send.call_args[0][0])
+        assert dm.control.frame_type is ax25.FrameType.DM
 
 
 class TestRNRHandling:
@@ -2099,6 +2200,10 @@ class TestMultiPortBridge:
         mock_kc1.online = True
         bridge.kiss_clients[0] = mock_kc0
         bridge.kiss_clients[1] = mock_kc1
+        # Register W1ABC so the SABM is accepted (foreign SABMs are dropped).
+        client = Mock()
+        client.registered_calls = {'W1ABC'}
+        bridge.add_client(client)
         # Incoming SABM on port 1
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -2205,6 +2310,10 @@ class TestSpecViolationFixes:
     def test_disc_no_connection_sends_dm_not_ua(self):
         """AX.25 v2.0 §2.4.5: DISC when disconnected must respond with DM."""
         bridge = self._make_bridge()
+        # Register W1ABC so the no-connection DM is sent (foreign DISCs are dropped).
+        client = Mock()
+        client.registered_calls = {'W1ABC'}
+        bridge.add_client(client)
         # No connection exists for this callsign pair
         disc = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.DISC, poll_final=True))
@@ -2526,6 +2635,8 @@ class TestSABMResetsBuffers:
         conn.retransmit_buf = {0: b'stale0', 1: b'stale1'}
         conn.outbound_queue.append((b'queued', 0xF0))
         conn.remote_busy = True
+        # Register W1ABC so the re-SABM is accepted (foreign SABMs are dropped).
+        protocol.registered_calls = {'W1ABC'}
 
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))

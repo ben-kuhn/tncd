@@ -1222,6 +1222,11 @@ class Bridge:
     def _conn_key(self, port, local, remote):
         return (port, local.strip().upper(), remote.strip().upper())
 
+    def _is_local_call(self, call):
+        """True if any connected AGWPE client has registered this callsign."""
+        call = call.strip().upper()
+        return any(call in c.registered_calls for c in self.clients)
+
     def get_connection(self, port, local, remote):
         return self.connections.get(self._conn_key(port, local, remote))
 
@@ -1768,9 +1773,11 @@ class Bridge:
                         logger.debug(f"Dropping overheard I-frame from {src} "
                                      f"on port {port} (conn on port {other_port})")
                         return
-            # No active connection on any port — send DM so the remote
-            # knows to disconnect.
-            if frame.control.poll_final:
+            # No active connection on any port — send DM only if the frame
+            # was addressed to one of our registered callsigns.  Overheard
+            # I-frames from foreign QSOs must be silently dropped to avoid
+            # tearing down sessions we have no part in.
+            if frame.control.poll_final and self._is_local_call(dst):
                 try:
                     dm = _resp_frame(src, dst,
                                      control=ax25.Control(ax25.FrameType.DM,
@@ -1854,6 +1861,12 @@ class Bridge:
                     logger.debug(f"Dropping overheard SABM from {src} on port {port} "
                                  f"(conn on port {other_port})")
                     return
+        # Reject SABMs to callsigns not registered by any AGWPE client.
+        # On a shared channel, a foreign station connecting to a third party
+        # would otherwise cause tncd to answer UA pretending to be that station.
+        if not self._is_local_call(dst):
+            logger.debug(f"Ignoring SABM to unregistered callsign {dst} from {src}")
+            return
         # Capture digipeater path (reversed for return direction).
         incoming_via = [str(v) for v in frame.via] if frame.via else []
         return_via = list(reversed(incoming_via))
@@ -1984,14 +1997,20 @@ class Bridge:
             except Exception as e:
                 logger.error(f"Failed to send UA for DISC: {e}")
         else:
-            # No connection: respond with DM per AX.25 v2.0 §2.4.5
-            try:
-                dm = _resp_frame(str(frame.src), str(frame.dst),
-                                 control=ax25.Control(ax25.FrameType.DM,
-                                                      poll_final=frame.control.poll_final))
-                self._send_ax25(dm, port)
-            except Exception as e:
-                logger.error(f"Failed to send DM for DISC: {e}")
+            # No connection: respond with DM per AX.25 v2.0 §2.4.5, but only
+            # if the frame was addressed to one of our registered callsigns.
+            # Foreign DISC frames overheard on a shared channel must not elicit
+            # a DM that tears down another station's session.
+            if self._is_local_call(dst):
+                try:
+                    dm = _resp_frame(str(frame.src), str(frame.dst),
+                                     control=ax25.Control(ax25.FrameType.DM,
+                                                          poll_final=frame.control.poll_final))
+                    self._send_ax25(dm, port)
+                except Exception as e:
+                    logger.error(f"Failed to send DM for DISC: {e}")
+            else:
+                logger.debug(f"Dropping DISC to unregistered callsign {dst} from {src}")
             return
 
         if conn:
