@@ -15,19 +15,19 @@ type Clock interface {
 }
 
 // Timer wraps a time.AfterFunc timer so that the posted fn can be cancelled.
-// If Cancel is called after the timer has already fired, the fn may still
-// execute on the loop — callers must guard against that with their own state
-// (mirror of conn.t1_handle = None in tncd.py).
+// If Cancel is called after the timer has already fired and the fn has already
+// been posted to the loop, the fn may still execute — callers must guard
+// with their own state (e.g. checking c.t1 == self in the expiry closure).
 type Timer struct {
 	t          *time.Timer
 	mu         sync.Mutex
-	fired      bool
 	cancel     bool
 	cancelHook func() // optional; called under mu when Cancel() runs (test seam)
 }
 
 // Cancel prevents the timer callback from running. If the timer has already
-// fired and the fn is queued, it will be silently dropped.
+// fired and the fn is already posted to the loop, the fn may still execute —
+// callers must guard with their own state.
 func (tm *Timer) Cancel() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -57,8 +57,7 @@ type Engine struct {
 	mu    sync.Mutex
 	queue []func()
 	wake  chan struct{} // cap-1; signals the loop that work is available
-	quit  chan struct{} // closed by Stop to drain-and-exit
-	stop  bool          // set under mu; causes Run to exit after draining
+	stop  bool         // set under mu; causes Run to exit after draining
 }
 
 // New returns a ready-to-use Engine. Call Run (in a goroutine or directly) to
@@ -66,7 +65,6 @@ type Engine struct {
 func New() *Engine {
 	return &Engine{
 		wake: make(chan struct{}, 1),
-		quit: make(chan struct{}),
 	}
 }
 
@@ -101,7 +99,6 @@ func (e *Engine) Run() {
 		e.mu.Lock()
 		batch := e.queue
 		e.queue = nil
-		shouldStop := e.stop
 		e.mu.Unlock()
 
 		for _, fn := range batch {
@@ -111,7 +108,7 @@ func (e *Engine) Run() {
 		// Check stop after running the batch (Stop sets the flag via a posted fn,
 		// so it will have been executed in the batch above).
 		e.mu.Lock()
-		shouldStop = e.stop
+		shouldStop := e.stop
 		e.mu.Unlock()
 		if shouldStop {
 			return
@@ -129,7 +126,6 @@ func (e *Engine) After(d time.Duration, fn func()) *Timer {
 	tm.t = time.AfterFunc(d, func() {
 		tm.mu.Lock()
 		cancelled := tm.cancel
-		tm.fired = true
 		tm.mu.Unlock()
 		if cancelled {
 			return

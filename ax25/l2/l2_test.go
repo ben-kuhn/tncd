@@ -133,3 +133,70 @@ func TestFRMRResetsConnection(t *testing.T) {
 		t.Fatalf("last = %+v, want fresh SABM", last)
 	}
 }
+
+// TestStaleTimerExpiryIgnored verifies that each advance() fires exactly one
+// T1 expiry per period — no double-fire from a stale cancelled timer (I4).
+// In the real engine, a timer closure that raced with Cancel could still post
+// to the loop; the c.t1 == self guard prevents it from doing anything. Under
+// the fake clock, cancelled timers are already skipped, so this test validates
+// the invariant (each T1 period fires exactly one retransmit).
+func TestStaleTimerExpiryIgnored(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	_, err := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+
+	// Advance T1 once → one retransmit (initial SABM already sent).
+	pollsBefore := c.t1Polls
+	clk.advance(120 * time.Second) // well past T1 at 1200 baud (~4.7s)
+	if c.t1Polls != pollsBefore+1 {
+		t.Fatalf("t1Polls after one T1 expiry = %d, want %d", c.t1Polls, pollsBefore+1)
+	}
+
+	// Advance T1 again → second retransmit only.
+	clk.advance(120 * time.Second)
+	if c.t1Polls != pollsBefore+2 {
+		t.Fatalf("t1Polls after two T1 expiries = %d, want %d", c.t1Polls, pollsBefore+2)
+	}
+
+	// Each T1 expiry in Connecting state sends exactly one SABM.
+	// Initial SABM + 2 retransmits = 3 total. If a stale timer double-fired,
+	// we'd see more.
+	sabms := 0
+	for _, f := range rec.sent {
+		if f.Type == ax25.SABM {
+			sabms++
+		}
+	}
+	if sabms != 3 {
+		t.Fatalf("SABMs = %d, want 3 (initial + 2 retransmits)", sabms)
+	}
+}
+
+// TestRemovedConnTimerIgnored verifies that timers cancelled when a connection
+// is removed do not fire any frames afterward (I4 — removed-conn invariant).
+// The c.t3 == self guard in startT3 ensures this even under real-timer races.
+func TestRemovedConnTimerIgnored(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	// Establish a Connected state via incoming SABM (T3 starts after OnFrame).
+	tbl.OnFrame(0, mkFrame(ax25.SABM, "N0CALL-2", "KU0HN-10", pf))
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || c.State != Connected {
+		t.Fatal("connection not established")
+	}
+
+	framesBefore := len(rec.sent)
+
+	// Remove the connection while T3 is armed.
+	tbl.remove(0, "KU0HN-10", "N0CALL-2")
+
+	// Advance past T3 (180 s by default at 1200 baud).
+	clk.advance(200 * time.Second)
+
+	// No frames should have been sent from the stale T3 expiry.
+	if got := len(rec.sent); got != framesBefore {
+		t.Fatalf("stale T3 sent %d unexpected frame(s) after conn removed", got-framesBefore)
+	}
+}

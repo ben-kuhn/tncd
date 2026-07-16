@@ -175,14 +175,23 @@ func (t *Table) removeConn(c *Conn) {
 
 // startT1 starts (or restarts) the T1 retransmit/poll timer for conn.
 // Uses c.t1Value for the duration (Karn adaptive will update this in Task 9).
+// The closure captures the returned *Timer in self so that a stale expiry
+// (fired after a subsequent startT1 replaced c.t1) is a no-op (I4 guard).
 func (t *Table) startT1(c *Conn) {
 	c.t1 = cancelTimer(c.t1)
 	d := c.t1Value
 	if d <= 0 {
 		d = t.portParams(c.Port).T1
 	}
-	conn := c // capture
-	c.t1 = t.clock.After(d, func() { t.t1Expired(conn) })
+	conn := c
+	var self *engine.Timer
+	self = t.clock.After(d, func() {
+		if c.t1 != self {
+			return // stale — a newer startT1 replaced us
+		}
+		t.t1Expired(conn)
+	})
+	c.t1 = self
 }
 
 // cancelT1 stops the T1 timer if running.
@@ -193,13 +202,21 @@ func cancelT1(c *Conn) {
 // scheduleT2 schedules a delayed RR (T2 timer), resetting any existing timer.
 // A burst of in-sequence I-frames results in a single RR after the last frame.
 // Mirrors tncd.py:1423-1436 (_schedule_t2).
+// The closure captures self so that a stale expiry is a no-op (I4 guard).
 func (t *Table) scheduleT2(c *Conn, src, dst string) {
 	c.t2 = cancelTimer(c.t2)
 	c.t2Src = src
 	c.t2Dst = dst
 	pp := t.portParams(c.Port)
 	conn := c
-	c.t2 = t.clock.After(pp.T2, func() { t.t2Expired(conn) })
+	var self *engine.Timer
+	self = t.clock.After(pp.T2, func() {
+		if c.t2 != self {
+			return // stale
+		}
+		t.t2Expired(conn)
+	})
+	c.t2 = self
 }
 
 // cancelT2 cancels the T2 delayed ACK timer.
@@ -222,6 +239,7 @@ func (t *Table) t2Expired(c *Conn) {
 
 // startT3 starts (or restarts) the T3 inactive link timer.
 // Mirrors tncd.py:1453-1463 (_start_t3).
+// The closure captures self so that a stale expiry is a no-op (I4 guard).
 func (t *Table) startT3(c *Conn) {
 	c.t3 = cancelTimer(c.t3)
 	pp := t.portParams(c.Port)
@@ -229,7 +247,14 @@ func (t *Table) startT3(c *Conn) {
 		return
 	}
 	conn := c
-	c.t3 = t.clock.After(pp.T3, func() { t.t3Expired(conn) })
+	var self *engine.Timer
+	self = t.clock.After(pp.T3, func() {
+		if c.t3 != self {
+			return // stale
+		}
+		t.t3Expired(conn)
+	})
+	c.t3 = self
 }
 
 // t3Expired fires the T3 liveness poll: sends RR P=1 command and starts T1.
