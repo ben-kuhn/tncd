@@ -75,3 +75,40 @@ func TestDecoderDropsEmptyAndGarbage(t *testing.T) {
 		t.Fatalf("got %d frames, want 0", len(frames))
 	}
 }
+
+// TestDecoderSingleFENDDelimiter verifies that a stream using single-FEND
+// frame delimiters (FEND+f1+FEND+f2+FEND) produces both frames.
+// kiss3 splits on FEND and keeps every non-empty segment.
+func TestDecoderSingleFENDDelimiter(t *testing.T) {
+	f1 := []byte{0x00, 0xAA, 0xBB} // cmd+payload for frame 1
+	f2 := []byte{0x10, 0xCC, 0xDD} // cmd+payload for frame 2
+
+	stream := []byte{FEND}
+	stream = append(stream, f1...)
+	stream = append(stream, FEND)
+	stream = append(stream, f2...)
+	stream = append(stream, FEND)
+
+	// Test with full feed at once.
+	var d1 Decoder
+	frames := d1.Feed(stream)
+	if len(frames) != 2 {
+		t.Fatalf("full feed: got %d frames, want 2", len(frames))
+	}
+	if !bytes.Equal(frames[0], f1) {
+		t.Errorf("frame[0] = % x, want % x", frames[0], f1)
+	}
+	if !bytes.Equal(frames[1], f2) {
+		t.Errorf("frame[1] = % x, want % x", frames[1], f2)
+	}
+
+	// Test byte-by-byte feed.
+	var d2 Decoder
+	var all [][]byte
+	for _, b := range stream {
+		all = append(all, d2.Feed([]byte{b})...)
+	}
+	if len(all) != 2 {
+		t.Fatalf("byte-by-byte: got %d frames, want 2", len(all))
+	}
+}

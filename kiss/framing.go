@@ -91,15 +91,15 @@ func (d *Decoder) Feed(p []byte) [][]byte {
 			// Start of escape sequence
 			d.esc = true
 		} else if b == FEND {
-			// End of frame
+			// End of (and simultaneously start of next) frame.
+			// A FEND while in-frame closes the current frame and immediately
+			// begins the next one — single-FEND delimiter semantics (kiss3).
 			if len(d.buf) > 0 {
-				// Non-empty frame, emit it
 				frames = append(frames, append([]byte{}, d.buf...))
 			}
 			d.buf = nil
-			d.inFrame = false
-			// Don't set inFrame = true here; wait for the next FEND to start a new frame
-			// Actually, we should reset and remain ready for the next frame starting at FEND
+			// Stay inFrame: this FEND is both the closer and the opener.
+			// (Double-FEND just produces an empty buf which we drop.)
 		} else {
 			// Regular data byte
 			d.buf = append(d.buf, b)
