@@ -28,6 +28,22 @@ func TestWrapCommand(t *testing.T) {
 	}
 }
 
+func TestWrapCommandEscapesValueByte(t *testing.T) {
+	// value = 0xC0 (FEND) must be escaped as FESC TFEND.
+	got192 := WrapCommand(0, 0x02, 192)
+	want192 := []byte{FEND, 0x02, FESC, TFEND, FEND}
+	if !bytes.Equal(got192, want192) {
+		t.Errorf("value=0xC0: got % x, want % x", got192, want192)
+	}
+
+	// value = 0xDB (FESC) must be escaped as FESC TFESC.
+	got219 := WrapCommand(0, 0x02, 219)
+	want219 := []byte{FEND, 0x02, FESC, TFESC, FEND}
+	if !bytes.Equal(got219, want219) {
+		t.Errorf("value=0xDB: got % x, want % x", got219, want219)
+	}
+}
+
 func TestExitFrame(t *testing.T) {
 	if !bytes.Equal(ExitFrame(), []byte{0xC0, 0xFF, 0xC0}) {
 		t.Errorf("got % x", ExitFrame())

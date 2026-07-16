@@ -33,13 +33,22 @@ func WrapData(kissPort uint8, ax25Frame []byte) []byte {
 
 // WrapCommand builds a KISS TNC-parameter frame (cmd 1-6), e.g.
 // WrapCommand(0, 0x01, 40) for TXDELAY=40 on port 0.
+// The value byte is escaped so that FEND/FESC values do not corrupt the stream.
 func WrapCommand(kissPort uint8, cmd uint8, value uint8) []byte {
 	var result []byte
 	result = append(result, FEND)
 	// cmd byte: port in high nibble, cmd in low nibble
 	cmdByte := (kissPort << 4) | cmd
 	result = append(result, cmdByte)
-	result = append(result, value)
+	// Escape the value byte (FEND/FESC would corrupt the stream).
+	switch value {
+	case FEND:
+		result = append(result, FESC, TFEND)
+	case FESC:
+		result = append(result, FESC, TFESC)
+	default:
+		result = append(result, value)
+	}
 	result = append(result, FEND)
 	return result
 }
