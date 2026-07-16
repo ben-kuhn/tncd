@@ -154,6 +154,33 @@
 
 <main>
 
+  <!-- v1.3.2 -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.3.2</h2>
+      <span class="date">July 2026</span>
+      <a class="tag" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.3.2">release</a>
+    </div>
+    <div class="release-body">
+      <h3>Bug Fixes</h3>
+      <ul>
+        <li><strong>Shared-channel fix (recommended upgrade):</strong> tncd no longer
+          transmits responses to frames overheard from other stations' sessions.
+          Previously, an I-frame poll, DISC, SABM, or SABME addressed to a
+          <em>different</em> station on the same frequency could trigger a DM or UA
+          transmission from tncd &mdash; potentially tearing down or hijacking other
+          stations' connections. All four paths now respond only when the frame is
+          addressed to a callsign registered by a connected client application.</li>
+      </ul>
+      <h3>Notes</h3>
+      <ul>
+        <li>The stale-session DM (clearing remote sessions after a tncd restart) still
+          works &mdash; it now requires the client application (e.g. PAT) to have
+          reconnected and registered its callsign first.</li>
+      </ul>
+    </div>
+  </div>
+
   <!-- v1.3.1 -->
   <div class="release">
     <div class="release-header">
