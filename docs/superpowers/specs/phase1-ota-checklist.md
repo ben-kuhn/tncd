@@ -23,7 +23,7 @@ Run every test with the `tncd-go` binary from the Nix package (nix-ham-packages 
 ### tncd-ota.ini excerpt
 
 ```ini
-[kiss]
+[kiss.0]
 type = serial
 device = /dev/ttyUSB1
 serial_baudrate = 1200
@@ -84,7 +84,7 @@ Notes:
 ### tncd-ota.ini excerpt
 
 ```ini
-[kiss]
+[kiss.0]
 type = serial
 device = /dev/ttyUSB1
 serial_baudrate = 9600
@@ -151,7 +151,7 @@ Notes:
 ### tncd-ota.ini excerpt
 
 ```ini
-[kiss]
+[kiss.0]
 type = serial
 device = /dev/ttyUSB0
 serial_baudrate = 57600
@@ -228,7 +228,7 @@ These checks are carried over from the Task 13 Bluetooth code review:
 ### Config excerpt (for reference)
 
 ```ini
-[kiss]
+[kiss.0]
 type = bluetooth
 bluetooth_address = <mobilinkd-bdaddr>
 bluetooth_channel = 1   # TNC4; use 6 for TNC3
