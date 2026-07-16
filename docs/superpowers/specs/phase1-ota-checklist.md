@@ -294,3 +294,12 @@ random (incompressible) attachment to w0ne@winlink.org via W0NE-10 on
 zero transmissions to non-KU0HN destinations in the tncd log during the
 session (guards validated on a live shared channel). Graceful SIGTERM
 shutdown with KISS exit confirmed again.
+
+### Direwolf bidirectional test 2026-07-16: PASS
+
+Single 35-second session, both directions: transmitted "W0NE Winlink Net
+Check-In" (KCEREZ3BOHDM, 278/237 bytes, FS Y accepted) AND received the
+W0NE reply "Re: tncd 2.0 OTA test - 10KB attachment" (KBFAAUXCMOFL,
+413/315 bytes) with clean FF/FQ teardown. 44 frames total on the link,
+zero foreign-destination transmissions. Message bodies verified intact
+both ways.
