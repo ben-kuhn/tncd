@@ -368,16 +368,17 @@ func (c *client) sendPortCaps(port int) {
 
 // sendFrame builds and queues an AGWPE frame. Mirrors tncd.py:478-511.
 func (c *client) sendFrame(port uint8, kind byte, from, to string, data []byte) {
+	pkt := agwpepkg.Build(port, kind, 0, from, to, data)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return
 	}
-	c.mu.Unlock()
-	pkt := agwpepkg.Build(port, kind, 0, from, to, data)
 	select {
 	case c.writeCh <- pkt:
+		c.mu.Unlock()
 	default:
+		c.mu.Unlock()
 		log.Printf("agwpe: write channel full, closing client")
 		c.CloseTransport()
 	}

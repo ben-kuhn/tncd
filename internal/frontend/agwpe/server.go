@@ -155,8 +155,8 @@ done:
 	c.conn.Close()
 	c.mu.Lock()
 	c.closed = true
-	c.mu.Unlock()
 	close(c.writeCh)
+	c.mu.Unlock()
 	<-writerDone
 
 	// Remove from bridge on engine loop.
@@ -174,16 +174,17 @@ done:
 // SendAGWPE queues an AGWPE frame for the write goroutine.
 // Must be safe to call from the engine loop (it is — it only writes to a channel).
 func (c *client) SendAGWPE(port uint8, kind byte, pid uint8, from, to string, data []byte) {
+	pkt := agwpepkg.Build(port, kind, pid, from, to, data)
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return
 	}
-	c.mu.Unlock()
-	pkt := agwpepkg.Build(port, kind, pid, from, to, data)
 	select {
 	case c.writeCh <- pkt:
+		c.mu.Unlock()
 	default:
+		c.mu.Unlock()
 		log.Printf("agwpe: write channel full for %s, closing", c.conn.RemoteAddr())
 		c.CloseTransport()
 	}
