@@ -2,7 +2,6 @@ package bridge
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/ben-kuhn/tncd/v2/internal/config"
@@ -20,10 +19,10 @@ func buildTransport(pc config.Port) (kiss.Transport, error) {
 			Parity:         pc.Parity,
 			StopBits:       pc.StopBits,
 			RTSCTS:         pc.RTSCTS,
-			InitString:     expandEscapes(pc.InitString),
+			InitString:     pc.InitString,
 			InitDelay:      time.Duration(pc.InitDelay * float64(time.Second)),
 			SendKISSExit:   pc.SendKISSExit,
-			HostExitString: expandEscapes(pc.HostExitString),
+			HostExitString: pc.HostExitString,
 			ExitDelay:      time.Duration(pc.ExitDelay * float64(time.Second)),
 		}), nil
 	case "tcp":
@@ -39,12 +38,4 @@ func buildTransport(pc config.Port) (kiss.Transport, error) {
 	default:
 		return nil, fmt.Errorf("unknown port type %q", pc.Type)
 	}
-}
-
-// expandEscapes converts literal \r and \n sequences to actual CR/LF bytes,
-// mirroring tncd.py's init_string escape handling.
-func expandEscapes(s string) string {
-	s = strings.ReplaceAll(s, `\r`, "\r")
-	s = strings.ReplaceAll(s, `\n`, "\n")
-	return s
 }
