@@ -785,6 +785,14 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 		}
 	}
 
+	// Foreign-SABM suppression: if dst is not one of our registered callsigns,
+	// silently drop — no UA, no DM, no connection created. On a shared channel,
+	// connect requests addressed to other stations must not be answered.
+	// Deliberate divergence from tncd.py:1844-1912 (shared-channel courtesy).
+	if !t.isLocal(port, dst) {
+		return
+	}
+
 	// Capture digipeater path (reversed for return direction, tncd.py:1858-1859).
 	incomingVia := addrSliceToStrings(f.Via)
 	returnVia := reversed(incomingVia)

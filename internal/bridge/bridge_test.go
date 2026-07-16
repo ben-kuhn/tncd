@@ -504,3 +504,46 @@ func TestForeignPollNoDMWithoutRegistration(t *testing.T) {
 		t.Fatalf("last TX type = %v, want DM", last.Type)
 	}
 }
+
+// TestForeignSABMNoUA verifies that an incoming SABM addressed to a foreign
+// callsign (not registered by any client) produces no TX and no connection.
+// Follows TestForeignPollNoDMWithoutRegistration's pattern.
+func TestForeignSABMNoUA(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+
+	// Build bridge using InjectPorts so Hooks.IsLocal is wired correctly.
+	cfg := &config.Config{
+		Server: config.Server{MaxClients: 8, IdleTimeout: 0},
+		AX25:   config.AX25{MaxWindow: 3, N2Retry: 10, T3Timeout: 0},
+		Ports:  []config.Port{{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200}},
+	}
+	b := New(eng, cfg)
+	params := []l2pkg.PortParams{l2pkg.DeriveParams(1200, 3, 10, 0)}
+	onLoop(t, eng, func() {
+		InjectPorts(b, eng, params, []PortSender{fp})
+	})
+
+	// Add a client with no registered callsigns — nothing is "ours".
+	onLoop(t, eng, func() { b.AddClient(newFakeClient(false)) })
+
+	// Build a SABM P=1 addressed to a foreign callsign W0NE-10.
+	sabmFrame := &ax25.Frame{
+		Src:     mustAddr("N0CALL-2"),
+		Dst:     mustAddr("W0NE-10"),
+		Type:    ax25.SABM,
+		PF:      true,
+		Command: true,
+	}
+	onLoop(t, eng, func() {
+		b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: sabmFrame.Bytes()})
+	})
+
+	// No UA (and no DM) must have been sent — W0NE-10 is not our callsign.
+	if got := fp.getSent(); len(got) != 0 {
+		t.Fatalf("foreign SABM: port sent %d frame(s), want 0", len(got))
+	}
+}

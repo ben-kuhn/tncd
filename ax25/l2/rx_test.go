@@ -212,3 +212,42 @@ func TestForeignDISCNoDM(t *testing.T) {
 		t.Fatalf("our callsign DISC: sent %+v, want DM", rec.sent)
 	}
 }
+
+// TestForeignSABMIgnored verifies the shared-channel courtesy fix for incoming
+// SABM: a connect request addressed to a foreign callsign (not ours) must
+// produce NO response — no UA, no DM — and must not create a phantom connection.
+func TestForeignSABMIgnored(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// SABM P=1: N0CALL-2→W0NE-10 (W0NE-10 is not ours). Must be silently dropped.
+	tbl.OnFrame(0, mkFrame(ax25.SABM, "N0CALL-2", "W0NE-10", pf))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign SABM: sent %d frame(s), want 0", len(rec.sent))
+	}
+	if tbl.Get(0, "W0NE-10", "N0CALL-2") != nil {
+		t.Fatal("foreign SABM must not create a phantom connection")
+	}
+}
+
+// TestLocalSABMStillAccepted verifies that a SABM addressed to one of our own
+// registered callsigns is still accepted and UA'd after the IsLocal hook is set.
+func TestLocalSABMStillAccepted(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// SABM P=1: N0CALL-2→KU0HN-10 (our callsign). Must be accepted.
+	tbl.OnFrame(0, mkFrame(ax25.SABM, "N0CALL-2", "KU0HN-10", pf))
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || c.State != Connected {
+		t.Fatalf("local SABM: conn = %+v, want Connected", c)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.UA || !rec.sent[0].PF {
+		t.Fatalf("local SABM: response = %+v, want UA F=1", rec.sent)
+	}
+	if len(rec.connected) != 1 || rec.connected[0] != "N0CALL-2:incoming" {
+		t.Fatalf("local SABM: connected hook = %v, want [N0CALL-2:incoming]", rec.connected)
+	}
+}
