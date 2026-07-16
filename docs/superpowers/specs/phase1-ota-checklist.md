@@ -284,3 +284,13 @@ Notes:
   tncd.py's stale-session DM, but it answers other stations' polls on shared
   channels. Candidate fix (phase 2 decision): only DM I-frames addressed to a
   registered/local callsign.
+
+### Direwolf re-test 2026-07-16 (post shared-channel guards): PASS
+
+Binary built from 1ca0a61 (all four IsLocal guards). Uploaded a 10,240-byte
+random (incompressible) attachment to w0ne@winlink.org via W0NE-10 on
+145.030 MHz: proposal FC EM 10612/10685 accepted, transmitted in one pass
+(52 I-frames TX), FF/FQ clean disconnect, session ~2m20s. Foreign-TX check:
+zero transmissions to non-KU0HN destinations in the tncd log during the
+session (guards validated on a live shared channel). Graceful SIGTERM
+shutdown with KISS exit confirmed again.
