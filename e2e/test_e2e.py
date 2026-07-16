@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import tncd_command
+
 
 pytestmark = [
     pytest.mark.skipif(
@@ -454,7 +456,7 @@ def tncd_instance(direwolf_pair, tmp_path):
         )
 
     proc = subprocess.Popen(
-        [sys.executable, "tncd.py", "-c", str(config_path)],
+        tncd_command() + ["-c", str(config_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -620,7 +622,7 @@ class TestAPRS:
         """Send APRS position, message, and telemetry through tncd,
         verify Direwolf-B decodes them."""
         import threading
-        from tests.emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
+        from emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
 
         agwpe_port = tncd_instance["agwpe_port"]
         log_b_path = direwolf_pair["log_b_path"]
@@ -949,7 +951,7 @@ def tncd_instance_pty(direwolf_pair_pty, tmp_path):
     )
 
     proc = subprocess.Popen(
-        [sys.executable, "tncd.py", "-c", str(config_path)],
+        tncd_command() + ["-c", str(config_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -1102,7 +1104,7 @@ def tncd_multiport(multiport_direwolf_pair, tmp_path):
     ])
 
     proc = subprocess.Popen(
-        [sys.executable, "tncd.py", "-c", str(config_path)],
+        tncd_command() + ["-c", str(config_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -1123,7 +1125,7 @@ class TestMultiPort:
 
     def test_g_frame_reports_two_ports(self, tncd_multiport):
         """G frame should report 2 ports with configured names."""
-        from tests.emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
+        from emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
 
         agwpe_port = tncd_multiport["agwpe_port"]
 
@@ -1148,7 +1150,7 @@ class TestMultiPort:
 
     def test_ui_frame_routes_to_correct_port(self, tncd_multiport):
         """UI frame on port 0 goes to Direwolf-A, port 1 goes to Direwolf-B."""
-        from tests.emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
+        from emulator_agwpe import AGWPEClientEmulator, create_agwpe_frame
 
         agwpe_port = tncd_multiport["agwpe_port"]
         dw = tncd_multiport["dw"]
