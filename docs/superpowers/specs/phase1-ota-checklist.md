@@ -258,3 +258,29 @@ All phase 1 serial tests PASS:
 - [ ] TS-2000
 
 Record final commit hash of `v2-go-port` under test: `___________`
+
+## Direwolf 1.8.1 (software TNC via PTY) — added as first OTA subject
+
+Setup: direwolf-vhf.conf (ADEVICE pipewire, MODEM 1200, PTT RIG via rigctld/TS-2000
+RTS), `direwolf -p` PTY at /tmp/kisstnc; tncd-go [client.0] type=serial,
+device=/tmp/kisstnc, ota_baudrate=1200; PAT via ax25+agwpe on 127.0.0.1:8000.
+
+- [x] tncd-go opens PTY (SetDTR/SetRTS non-fatal ENOTTY warnings — expected)
+- [x] AGWPE init from PAT ("AGWPE TNC (2.0) initialized")
+- [x] SABM/UA connect to W0NE-10 on 145.030 MHz (~2 s)
+- [x] Full Winlink B2F session: 2 messages received (2414 + 4787 bytes compressed)
+- [x] Clean FQ disconnect, DISC/UA teardown
+- [x] Graceful shutdown: SIGTERM → KISS exit (C0 FF C0) → clean stop
+
+**Result: 2026-07-16 PASS** (KU0HN, W0NE-10 RMS, TS-2000 @ 145.030)
+
+Notes:
+- The resident `pat http` daemon grabs the AGWPE connection and registers the
+  callsign as soon as tncd's port is up; a CLI `pat connect` is then refused
+  ("callsign in use", correct duplicate-registration behavior). Stop pat.service
+  during CLI-driven tests.
+- Observed 1.x-parity behavior worth revisiting: an overheard I-frame P=1 from a
+  foreign QSO (MNWIN→WT9M-4) triggered a DM transmission. Faithful port of
+  tncd.py's stale-session DM, but it answers other stations' polls on shared
+  channels. Candidate fix (phase 2 decision): only DM I-frames addressed to a
+  registered/local callsign.
