@@ -32,12 +32,25 @@ type SerialConfig struct {
 // interface exposes SetReadTimeout but io.ReadWriteCloser does not.
 // Tests bypass Open() by setting rw and probeWait directly on the struct;
 // serialPort remains nil in tests (SetReadTimeout is not called on the fake).
+// modemPort is the subset of goserial.Port used for modem control signals.
+// Extracted as an interface so tests can inject a fake that returns ENOTTY.
+type modemPort interface {
+	SetDTR(dtr bool) error
+	SetRTS(rts bool) error
+	SetReadTimeout(t time.Duration) error
+	Close() error
+}
+
 type serialTransport struct {
 	cfg        SerialConfig
 	rw         io.ReadWriteCloser
 	serialPort goserial.Port // same object as rw, kept for SetReadTimeout
 	flush      func() error
 	probeWait  time.Duration // default 1s; overridden to milliseconds in tests
+
+	// openPort is called by Open() to open the underlying serial port.
+	// Injected in tests to avoid requiring a real device.
+	openPort func(device string, mode *goserial.Mode) (modemPort, error)
 }
 
 // NewSerialTransport returns a Transport backed by a serial port.
@@ -77,21 +90,32 @@ func (s *serialTransport) Open() error {
 		StopBits: stopBits,
 	}
 
-	port, err := goserial.Open(s.cfg.Device, mode)
+	// openPort is injected in tests; defaults to goserial.Open.
+	openFn := s.openPort
+	if openFn == nil {
+		openFn = func(device string, mode *goserial.Mode) (modemPort, error) {
+			return goserial.Open(device, mode)
+		}
+	}
+
+	port, err := openFn(s.cfg.Device, mode)
 	if err != nil {
 		return fmt.Errorf("serial: open %s: %w", s.cfg.Device, err)
 	}
 
 	// Assert DTR so the TNC knows the host is present.
 	// DTR is never toggled on close: dropping DTR resets some TNCs (HUPCL lesson).
+	// Non-fatal: PTY devices and some USB adapters do not support modem control
+	// signals and return ENOTTY ("inappropriate ioctl for device"). The Python
+	// reference implementation (kiss3/pyserial) never sets DTR explicitly, so
+	// matching that behaviour: log a warning and continue.
 	if err := port.SetDTR(true); err != nil {
-		_ = port.Close()
-		return fmt.Errorf("serial: SetDTR: %w", err)
+		log.Printf("serial: SetDTR not supported on %s (non-fatal): %v", s.cfg.Device, err)
 	}
 	// Hold RTS low: some interfaces (e.g. Digirig) wire RTS to PTT.
+	// Same non-fatal rationale as DTR above.
 	if err := port.SetRTS(false); err != nil {
-		_ = port.Close()
-		return fmt.Errorf("serial: SetRTS: %w", err)
+		log.Printf("serial: SetRTS not supported on %s (non-fatal): %v", s.cfg.Device, err)
 	}
 
 	// Set a 100ms read timeout so that probe reads return promptly when the TNC
@@ -110,11 +134,13 @@ func (s *serialTransport) Open() error {
 		return fmt.Errorf("serial: SetReadTimeout: %w", err)
 	}
 
-	s.rw = port
-	s.serialPort = port
-	// go.bug.st/serial Port.Drain() waits for all transmit bytes to be sent.
-	// Use it as the flush function for the real port.
-	s.flush = port.Drain
+	s.rw = port.(io.ReadWriteCloser)
+	if gp, ok := port.(goserial.Port); ok {
+		s.serialPort = gp
+		// go.bug.st/serial Port.Drain() waits for all transmit bytes to be sent.
+		// Use it as the flush function for the real port.
+		s.flush = gp.Drain
+	}
 	return nil
 }
 

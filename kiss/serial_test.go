@@ -2,10 +2,14 @@ package kiss
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	goserial "go.bug.st/serial"
 )
 
 // fakeSerial scripts responses: each probe CR gets the next queued response.
@@ -94,5 +98,52 @@ func TestExitKISSDisabled(t *testing.T) {
 	st.ExitKISS()
 	if fs.written.Len() != 0 {
 		t.Fatalf("wrote % x with send_kiss_exit=false", fs.written.Bytes())
+	}
+}
+
+// fakeModemPort is a fake modemPort that implements io.ReadWriteCloser plus
+// the modemPort interface, with configurable DTR/RTS errors.
+// This simulates a PTY device that returns ENOTTY from SetDTR/SetRTS.
+type fakeModemPort struct {
+	fakeSerial
+	dtrErr error
+	rtsErr error
+}
+
+func (f *fakeModemPort) SetDTR(bool) error                  { return f.dtrErr }
+func (f *fakeModemPort) SetRTS(bool) error                  { return f.rtsErr }
+func (f *fakeModemPort) SetReadTimeout(time.Duration) error { return nil }
+
+// TestOpenNonFatalDTRRTSError verifies that SetDTR/SetRTS failures (e.g. on a
+// PTY device that does not support modem control signals) are non-fatal.
+// Regression: the Go port previously aborted Open() on these errors, causing
+// the port to remain offline and AGWPE connections to return BUSY immediately.
+// The Python reference (kiss3/pyserial) never sets DTR/RTS, so they are
+// always non-fatal in tncd.
+func TestOpenNonFatalDTRRTSError(t *testing.T) {
+	enotty := errors.New("inappropriate ioctl for device")
+	fmp := &fakeModemPort{dtrErr: enotty, rtsErr: enotty}
+
+	st := NewSerialTransport(SerialConfig{Device: "/dev/pts/fake"}).(*serialTransport)
+	st.probeWait = time.Millisecond
+	// Inject a fake openPort that returns our fake modem port (no real device needed).
+	st.openPort = func(device string, mode *goserial.Mode) (modemPort, error) {
+		return fmp, nil
+	}
+
+	// Open must succeed even though DTR and RTS return errors.
+	if err := st.Open(); err != nil {
+		t.Fatalf("Open() returned error: %v (expected nil — DTR/RTS errors should be non-fatal)", err)
+	}
+
+	// The rw field must be set so the transport can be used for reads/writes.
+	if st.rw == nil {
+		t.Fatal("st.rw is nil after Open() with non-fatal DTR/RTS error")
+	}
+
+	// Read and Write must delegate to the fake port without panicking.
+	data := []byte{0xC0, 0x00, 0xC0}
+	if _, err := st.rw.(io.Writer).Write(data); err != nil {
+		t.Fatalf("Write after Open() failed: %v", err)
 	}
 }
