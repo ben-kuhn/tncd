@@ -105,8 +105,12 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		log.Printf("agwpe: UNPROTO VIA from %q to %q", from, to)
 		if len(data) > 0 {
 			nVia := int(data[0])
-			viaBytes := data[1 : 1+nVia*10]
-			info := data[1+nVia*10:]
+			end := 1 + nVia*10
+			if end > len(data) {
+				end = len(data)
+			}
+			viaBytes := data[1:end]
+			info := data[end:]
 			vias := decodeVias(viaBytes, nVia)
 			c.sendUnproto(from, to, pid, info, vias, port)
 		} else {
@@ -165,7 +169,11 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		var vias []string
 		if len(data) > 0 {
 			nVia := int(data[0])
-			viaBytes := data[1 : 1+nVia*10]
+			end := 1 + nVia*10
+			if end > len(data) {
+				end = len(data)
+			}
+			viaBytes := data[1:end]
 			vias = decodeVias(viaBytes, nVia)
 		}
 		log.Printf("agwpe: CONNECT %q -> %q via %v", from, to, vias)

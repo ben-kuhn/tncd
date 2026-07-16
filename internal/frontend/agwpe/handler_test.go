@@ -681,6 +681,37 @@ func TestConnectNonOwnerBusy(t *testing.T) {
 	}
 }
 
+// TestViaCountOverflowNoPanic verifies that 'V' and 'v' frames declaring more
+// via bytes than are present in the payload do not panic (I1).
+func TestViaCountOverflowNoPanic(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+		{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+	})
+
+	ln, conn := dialServe(t, eng, b)
+	defer ln.Close()
+	defer conn.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	// 'V' frame: nVia=10 but only 5 bytes of via data follow (should not panic).
+	writeFrame(t, conn, 0, 'V', 0xF0, "N0CALL", "KU0HN", []byte{10, 0, 0, 0, 0, 0})
+
+	// 'v' frame: nVia=10 but only 5 bytes of via data follow (should not panic).
+	writeFrame(t, conn, 0, 'v', 0, "N0CALL", "KU0HN", []byte{10, 0, 0, 0, 0, 0})
+
+	// Send 'R' and verify the server is still alive (didn't crash).
+	writeFrame(t, conn, 0, 'R', 0, "", "", nil)
+	resp := readOneFrame(t, conn)
+	if resp.Kind != 'R' {
+		t.Fatalf("expected 'R' response after overflow frames, got %c (server crashed?)", resp.Kind)
+	}
+}
+
 // TestPartialHeaderReassembly: write a 'R' request split into 3 TCP writes → still answered.
 func TestPartialHeaderReassembly(t *testing.T) {
 	eng := engine.New()
