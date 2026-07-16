@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ben-kuhn/tncd/v2/agwpe"
 	"github.com/ben-kuhn/tncd/v2/ax25"
 	l2pkg "github.com/ben-kuhn/tncd/v2/ax25/l2"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
@@ -521,11 +520,10 @@ func (b *Bridge) Shutdown() {
 	for _, c := range b.clients {
 		c.CloseTransport()
 	}
-	for i, p := range b.ports {
+	for _, p := range b.ports {
 		if kp, ok := p.(*kiss.Port); ok {
 			kp.Close()
 		}
-		_ = i
 	}
 }
 
@@ -629,9 +627,3 @@ type offlineSentinel struct{}
 func (*offlineSentinel) Send([]byte)  {}
 func (*offlineSentinel) Online() bool { return false }
 
-// --- AGWPE frame builder helper ---
-
-// buildAGWPE is a shorthand for agwpe.Build used by notification helpers.
-func buildAGWPE(port uint8, kind byte, pid uint8, from, to string, data []byte) []byte {
-	return agwpe.Build(port, kind, pid, from, to, data)
-}

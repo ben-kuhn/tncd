@@ -201,23 +201,9 @@ func TestEchoSuppression(t *testing.T) {
 		t.Fatalf("echo suppression failed: got %d frames, want 0", len(got))
 	}
 
-	// Build a digipeated version: same frame but with via address and H-bit set.
-	// We do this by constructing the frame with a via address that has H-bit set.
-	rawWithVia := makeUIFrameWithVia("N0CALL-2", "KU0HN-10", "W1AW", true, []byte("hello"))
-
-	// This is a digipeated echo — should also be suppressed because normalizeHBits
-	// will match the original (the via H-bit gets cleared in normalization).
-	// First we need the normalised original to be in the ring, and we need the
-	// normalised digipeated version to match. But the original was sent with no
-	// via, so the normalized forms differ. Let's instead send the via-frame and
-	// receive the normalized version.
-	//
 	// Per tncd.py:1307-1328: H-bit on the SSID of via addresses is cleared.
-	// We need to test that a frame sent WITHOUT a via matches when received
-	// WITH a via + H-bit. Build the raw-with-via so normalizing it gives same
-	// result as normalizing raw-without-via, which isn't possible (different
-	// address counts). The correct test is: send frame WITH via H-bit clear,
-	// receive WITH via H-bit set → suppressed.
+	// Test that a frame sent WITH via H-bit clear is suppressed when received
+	// WITH via H-bit set (digipeated echo).
 	rawViaNoH := makeUIFrameWithVia("N0CALL-2", "KU0HN-10", "W1AW", false, []byte("world"))
 	onLoop(t, eng, func() { b.SendToKISS(0, rawViaNoH) })
 
@@ -228,7 +214,6 @@ func TestEchoSuppression(t *testing.T) {
 	if got := monClient.getSent(); len(got) != 0 {
 		t.Fatalf("digipeated echo suppression failed: got %d frames, want 0", len(got))
 	}
-	_ = rawWithVia
 }
 
 // makeUIFrameWithVia builds a UI AX.25 frame with one via address.

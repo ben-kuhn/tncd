@@ -315,11 +315,6 @@ func isBenignConnectError(err error) bool {
 		strings.Contains(s, "br-connection-busy")
 }
 
-// dupFD duplicates a file descriptor using the dup syscall.
-func dupFD(fd int) (int, error) {
-	return syscall.Dup(fd)
-}
-
 // closeFD closes a raw file descriptor.
 func closeFD(fd int) error {
 	return syscall.Close(fd)

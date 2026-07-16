@@ -27,11 +27,8 @@ type SerialConfig struct {
 // serialTransport implements Transport for a serial (RS-232/USB) KISS TNC.
 //
 // The rw field is populated by Open() from the real go.bug.st/serial port and
-// is used for all Read/Write/Close calls. The serialPort field holds the same
-// port as a goserial.Port so that Open() can call SetReadTimeout — the Port
-// interface exposes SetReadTimeout but io.ReadWriteCloser does not.
-// Tests bypass Open() by setting rw and probeWait directly on the struct;
-// serialPort remains nil in tests (SetReadTimeout is not called on the fake).
+// is used for all Read/Write/Close calls. Tests bypass Open() by setting rw
+// and probeWait directly on the struct.
 // modemPort is the subset of goserial.Port used for modem control signals.
 // Extracted as an interface so tests can inject a fake that returns ENOTTY.
 type modemPort interface {
@@ -42,11 +39,10 @@ type modemPort interface {
 }
 
 type serialTransport struct {
-	cfg        SerialConfig
-	rw         io.ReadWriteCloser
-	serialPort goserial.Port // same object as rw, kept for SetReadTimeout
-	flush      func() error
-	probeWait  time.Duration // default 1s; overridden to milliseconds in tests
+	cfg       SerialConfig
+	rw        io.ReadWriteCloser
+	flush     func() error
+	probeWait time.Duration // default 1s; overridden to milliseconds in tests
 
 	// openPort is called by Open() to open the underlying serial port.
 	// Injected in tests to avoid requiring a real device.
@@ -136,7 +132,6 @@ func (s *serialTransport) Open() error {
 
 	s.rw = port.(io.ReadWriteCloser)
 	if gp, ok := port.(goserial.Port); ok {
-		s.serialPort = gp
 		// go.bug.st/serial Port.Drain() waits for all transmit bytes to be sent.
 		// Use it as the flush function for the real port.
 		s.flush = gp.Drain
