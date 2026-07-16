@@ -825,7 +825,13 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 }
 
 // dispatchSABME handles SABME — reject with DM P=1 (tncd.py:1686-1695).
+// Like SABM/I/DISC, the response is gated on the destination being one of
+// our registered callsigns; answering foreign SABMEs would transmit DM into
+// other stations' sessions on a shared channel.
 func (t *Table) dispatchSABME(port int, f *ax25.Frame, src, dst string) {
+	if !t.isLocal(port, dst) {
+		return
+	}
 	dm := respFrame(src, dst, nil, ax25.DM, true)
 	t.sendFrame(port, dm)
 }

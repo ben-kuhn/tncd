@@ -231,6 +231,25 @@ func TestForeignSABMIgnored(t *testing.T) {
 	}
 }
 
+// TestForeignSABMEIgnored verifies the same shared-channel guard for SABME:
+// an extended-mode connect request addressed to a foreign callsign must not
+// trigger our mod-128-unsupported DM rejection.
+func TestForeignSABMEIgnored(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "W0NE-10", pf))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign SABME: sent %d frame(s), want 0", len(rec.sent))
+	}
+
+	// SABME to our own callsign still gets the DM rejection (mod-8 only).
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM || !rec.sent[0].PF {
+		t.Fatalf("local SABME: sent %+v, want one DM P=1", rec.sent)
+	}
+}
+
 // TestLocalSABMStillAccepted verifies that a SABM addressed to one of our own
 // registered callsigns is still accepted and UA'd after the IsLocal hook is set.
 func TestLocalSABMStillAccepted(t *testing.T) {
