@@ -57,7 +57,7 @@ type Engine struct {
 	mu    sync.Mutex
 	queue []func()
 	wake  chan struct{} // cap-1; signals the loop that work is available
-	stop  bool         // set under mu; causes Run to exit after draining
+	stop  bool          // set under mu; causes Run to exit after draining
 }
 
 // New returns a ready-to-use Engine. Call Run (in a goroutine or directly) to

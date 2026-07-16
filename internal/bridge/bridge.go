@@ -626,4 +626,3 @@ type offlineSentinel struct{}
 
 func (*offlineSentinel) Send([]byte)  {}
 func (*offlineSentinel) Online() bool { return false }
-
