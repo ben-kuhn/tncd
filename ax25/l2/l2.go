@@ -79,6 +79,11 @@ type Hooks struct {
 	// Bridge wires this to engine.Do. When nil, fn is called synchronously
 	// (useful in tests that want predictable ordering without a real loop).
 	Defer func(fn func())
+	// IsLocal reports whether call is one of our registered callsigns on port.
+	// Bridge wires this to the AGWPE clients' RegisteredCalls sets.
+	// When nil, the permissive default (always true) is used so that all
+	// existing tests pass unchanged without setting this hook.
+	IsLocal func(port int, call string) bool
 }
 
 // connKey is the map key for the connection table.
@@ -369,6 +374,16 @@ func (t *Table) t1Expired(c *Conn) {
 		}
 	}
 	t.startT1(c)
+}
+
+// isLocal reports whether call is one of our registered callsigns on port.
+// When Hooks.IsLocal is nil, returns true (permissive default: keeps all
+// existing l2 tests passing unchanged without setting the hook).
+func (t *Table) isLocal(port int, call string) bool {
+	if t.hooks.IsLocal == nil {
+		return true
+	}
+	return t.hooks.IsLocal(port, call)
 }
 
 // sendFrame is a helper that calls hooks.SendAX25.
@@ -867,9 +882,14 @@ func (t *Table) dispatchDISC(port int, f *ax25.Frame, src, dst string) {
 				return
 			}
 		}
-		// No connection anywhere — respond with DM (tncd.py:1987-1994).
-		dm := respFrame(src, dst, nil, ax25.DM, f.PF)
-		t.sendFrame(port, dm)
+		// No connection anywhere — respond with DM, but only when dst is one
+		// of our own callsigns. Foreign DISC on a shared channel must not
+		// trigger a DM from us.
+		// Deliberate divergence from tncd.py:1987-1994 (shared-channel courtesy).
+		if t.isLocal(port, dst) {
+			dm := respFrame(src, dst, nil, ax25.DM, f.PF)
+			t.sendFrame(port, dm)
+		}
 		return
 	}
 
@@ -941,9 +961,11 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 				return
 			}
 		}
-		// No active connection on any port — send DM if P=1 so remote knows.
-		// Mirrors tncd.py:1771-1781.
-		if f.PF {
+		// No active connection on any port — send DM if P=1 so remote knows,
+		// but only when dst is one of our own callsigns. Foreign QSOs on a
+		// shared channel must not trigger a DM from us.
+		// Deliberate divergence from tncd.py:1771-1781 (shared-channel courtesy).
+		if f.PF && t.isLocal(port, dst) {
 			dm := respFrame(src, dst, nil, ax25.DM, true)
 			t.sendFrame(port, dm)
 		}

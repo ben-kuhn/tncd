@@ -429,3 +429,78 @@ func mustAddr(s string) ax25.Address {
 	}
 	return a
 }
+
+// TestForeignPollNoDMWithoutRegistration verifies the shared-channel courtesy
+// fix at the bridge level: IsLocal is wired to RegisteredCalls, so a foreign
+// I-frame P=1 must not trigger a DM until the destination callsign has been
+// registered by a client.
+func TestForeignPollNoDMWithoutRegistration(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+
+	// Build bridge using InjectPorts so Hooks.IsLocal is wired correctly.
+	cfg := &config.Config{
+		Server: config.Server{MaxClients: 8, IdleTimeout: 0},
+		AX25:   config.AX25{MaxWindow: 3, N2Retry: 10, T3Timeout: 0},
+		Ports:  []config.Port{{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200}},
+	}
+	b := New(eng, cfg)
+	params := []l2pkg.PortParams{l2pkg.DeriveParams(1200, 3, 10, 0)}
+	onLoop(t, eng, func() {
+		InjectPorts(b, eng, params, []PortSender{fp})
+	})
+
+	// Add a client with no registered callsigns.
+	cl := newFakeClient(false) // no calls registered
+	onLoop(t, eng, func() { b.AddClient(cl) })
+
+	// Build a foreign I-frame P=1: MNWIN→WT9M-4. Neither party is registered.
+	iFrame := &ax25.Frame{
+		Src:     mustAddr("MNWIN"),
+		Dst:     mustAddr("WT9M-4"),
+		Type:    ax25.I,
+		NS:      0,
+		NR:      0,
+		PF:      true,
+		Command: true,
+		PID:     0xF0,
+		Info:    []byte("foreign"),
+	}
+	onLoop(t, eng, func() {
+		b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: iFrame.Bytes()})
+	})
+
+	// No DM must have been sent — WT9M-4 is not our callsign.
+	if got := fp.getSent(); len(got) != 0 {
+		t.Fatalf("foreign I-frame: port sent %d frame(s), want 0", len(got))
+	}
+
+	// Now register WT9M-4 on the client (simulates the 'X' handler registering
+	// the callsign after the client connects).
+	onLoop(t, eng, func() {
+		cl.mu.Lock()
+		cl.registeredCalls["WT9M-4"] = true
+		cl.mu.Unlock()
+	})
+
+	// Re-deliver the same I-frame P=1 addressed to WT9M-4 (our call now).
+	// Must now produce a DM.
+	onLoop(t, eng, func() {
+		b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: iFrame.Bytes()})
+	})
+
+	sent := fp.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected DM after callsign registered, got nothing")
+	}
+	last, err := ax25.Parse(sent[len(sent)-1])
+	if err != nil {
+		t.Fatalf("parse last TX: %v", err)
+	}
+	if last.Type != ax25.DM {
+		t.Fatalf("last TX type = %v, want DM", last.Type)
+	}
+}

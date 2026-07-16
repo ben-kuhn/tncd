@@ -162,3 +162,53 @@ func TestPortOfflineDropsConns(t *testing.T) {
 		t.Fatalf("disconnected=%d", rec.disconnected)
 	}
 }
+
+// TestForeignIFramePollNoDM verifies the shared-channel courtesy fix:
+// an I-frame P=1 addressed to a foreign callsign (not ours) must NOT
+// trigger a DM response. The same frame addressed to our callsign must
+// still trigger DM (stale-session cleanup). The nil-IsLocal default
+// (used by TestUnknownIFrameWithPollGetsDM) must also still DM.
+func TestForeignIFramePollNoDM(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// Foreign I-frame P=1: MNWIN→WT9M-4 (neither party is ours).
+	// No connection exists. Must be silently dropped — no DM.
+	tbl.OnFrame(0, mkFrame(ax25.I, "MNWIN", "WT9M-4", ns(0), nr(0), pf,
+		info([]byte("foreign"))))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign I-frame: sent %d frame(s), want 0", len(rec.sent))
+	}
+
+	// Same foreign I-frame but addressed to our callsign (stale session).
+	// Must still produce DM.
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.I, "MNWIN", "KU0HN-10", ns(0), nr(0), pf,
+		info([]byte("stale"))))
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM {
+		t.Fatalf("our callsign I-frame: sent %+v, want DM", rec.sent)
+	}
+}
+
+// TestForeignDISCNoDM verifies that a DISC P=1 from a foreign QSO does
+// not trigger a DM on a shared channel. A DISC addressed to our callsign
+// with no connection must still DM.
+func TestForeignDISCNoDM(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// Foreign DISC P=1: MNWIN→WT9M-4. No connection. Must be silently dropped.
+	tbl.OnFrame(0, mkFrame(ax25.DISC, "MNWIN", "WT9M-4", pf))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign DISC: sent %d frame(s), want 0", len(rec.sent))
+	}
+
+	// DISC addressed to our callsign (no connection). Must still produce DM.
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.DISC, "MNWIN", "KU0HN-10", pf))
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM {
+		t.Fatalf("our callsign DISC: sent %+v, want DM", rec.sent)
+	}
+}

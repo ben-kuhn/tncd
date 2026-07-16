@@ -322,6 +322,18 @@ func min(a, b int) int {
 	return b
 }
 
+// isLocalCall reports whether call is registered by any current AGWPE client.
+// All reads happen on the engine loop — same as the existing owner lookup.
+func (b *Bridge) isLocalCall(_ int, call string) bool {
+	upper := strings.ToUpper(call)
+	for _, cl := range b.clients {
+		if cl.RegisteredCalls()[upper] {
+			return true
+		}
+	}
+	return false
+}
+
 // InjectPorts wires L2 and port senders into a Bridge that was created with
 // New but never Start-ed. Intended for integration tests that want a real
 // Bridge with fake ports and a real L2 table.
@@ -344,6 +356,9 @@ func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, sende
 		},
 		Defer: func(fn func()) {
 			eng.Do(fn)
+		},
+		IsLocal: func(port int, call string) bool {
+			return b.isLocalCall(port, call)
 		},
 	}
 	b.l2 = l2pkg.NewTable(eng, hooks, params)
@@ -385,6 +400,9 @@ func (b *Bridge) Start() error {
 		},
 		Defer: func(fn func()) {
 			b.eng.Do(fn)
+		},
+		IsLocal: func(port int, call string) bool {
+			return b.isLocalCall(port, call)
 		},
 	}
 	b.l2 = l2pkg.NewTable(b.eng, hooks, params)
