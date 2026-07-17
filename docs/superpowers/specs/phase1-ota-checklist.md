@@ -368,7 +368,7 @@ Bench: KU0HN-10 gateway on 145.670, dummy load. Go binary at b3459b8.
 Note: 10KB incompressible upload is now part of the standard per-device
 validation suite.
 
-### TNC2 Mobilinkd Bluetooth validation 2026-07-17: PASS (qualified — APRS-class device)
+### TNC2 Mobilinkd Bluetooth validation 2026-07-17: TESTED — APRS ONLY
 
 Bench: KU0HN-10 gateway on 145.670. Legacy RN-42 Bluetooth: PIN pairing
 (1234) required via bluetoothctl agent. Not previously tested on any
@@ -385,5 +385,6 @@ tncd version.
       correct throughout (incl. riding through one BT drop during the
       earlier PTT-dead attempt).
 
-Recommendation for docs: TNC2 supported for APRS/UI use; connected-mode
-sessions possible but not reliable — prefer TNC3/TNC4.
+Verdict "tested, APRS only" (operator's call): the partial connected-mode
+session validates real AX.25 frame TX and RX through the device. Use for
+APRS/UI; prefer TNC3/TNC4 for connected mode.
