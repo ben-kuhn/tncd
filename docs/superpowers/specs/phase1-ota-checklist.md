@@ -388,3 +388,29 @@ tncd version.
 Verdict "tested, APRS only" (operator's call): the partial connected-mode
 session validates real AX.25 frame TX and RX through the device. Use for
 APRS/UI; prefer TNC3/TNC4 for connected mode.
+
+### TH-D7 internal TNC (serial) validation 2026-07-17: PASS
+
+First real serial-hardware test of the Go port. /dev/ttyUSB1 @ 9600,
+init_string = KISS ON\rRESTART\r, init_delay 2.0. Bench: KU0HN-10 on
+145.670.
+- [x] Command-mode probe → "cmd:" detected → init sent → KISS confirmed —
+      programmatic KISS entry WORKED on a Kenwood internal TNC (the same
+      TNC family where 1.x always required manual minicom entry)
+- [x] KISS exit on shutdown verified: after SIGTERM, next start's probe
+      found "cmd:" again (C0 FF C0 returned the TNC to command mode)
+- [x] Winlink CMS session via KU0HN-10: queued 291-byte message delivered,
+      clean FF/FQ (operator criteria: connect + data transfer = PASS for
+      memory-limited onboard TNCs; no 10KB stress attempted)
+
+Debug journey (documented for the user docs):
+- No-TX mystery: frames delivered to TNC, radio never keyed. Root cause:
+  data-band SQUELCH OPEN — Kenwood internal TNCs use the squelch line as
+  DCD, so open squelch = channel busy = CSMA defers forever (same class as
+  the 1.x DSP-2232 finding). Mobilinkd practice (open squelch, DSP DCD)
+  is the opposite — easy trap when sharing a radio between both. Closing
+  squelch released the queued frames instantly (confirmed on RF monitor).
+- TH-D7 serial is 3-wire (TX/RX/GND) — no RTS/DTR reach the TNC.
+- Side effect of the debug: serial RTS is now ASSERTED on open (1.x/pyserial
+  parity; commit pending in this session) — irrelevant to the D7 but correct
+  for TNCs that do wire modem lines.

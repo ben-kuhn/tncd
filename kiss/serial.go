@@ -108,9 +108,14 @@ func (s *serialTransport) Open() error {
 	if err := port.SetDTR(true); err != nil {
 		log.Printf("serial: SetDTR not supported on %s (non-fatal): %v", s.cfg.Device, err)
 	}
-	// Hold RTS low: some interfaces (e.g. Digirig) wire RTS to PTT.
+	// Assert RTS, matching pyserial's default line state — every serial TNC
+	// validated under 1.x (KPC+, PK-232, TS-2000, DSP-2232) ran with RTS
+	// asserted, and some Kenwood internal TNCs (TH-D7) will not transmit
+	// host data while RTS is low (observed OTA 2026-07-17). The earlier
+	// RTS-low choice guarded against Digirig-style RTS-wired PTT, but that
+	// applies to soundcard/CAT ports, not serial KISS TNC links.
 	// Same non-fatal rationale as DTR above.
-	if err := port.SetRTS(false); err != nil {
+	if err := port.SetRTS(true); err != nil {
 		log.Printf("serial: SetRTS not supported on %s (non-fatal): %v", s.cfg.Device, err)
 	}
 
