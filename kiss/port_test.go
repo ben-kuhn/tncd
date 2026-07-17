@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -16,6 +17,17 @@ func (p *pipeTransport) ExitKISS()                   {}
 func (p *pipeTransport) Close() error                { return p.c.Close() }
 func (p *pipeTransport) Read(b []byte) (int, error)  { return p.c.Read(b) }
 func (p *pipeTransport) Write(b []byte) (int, error) { return p.c.Write(b) }
+
+// trackingPipeTransport wraps pipeTransport and records whether Close was called.
+type trackingPipeTransport struct {
+	pipeTransport
+	closed atomic.Bool
+}
+
+func (t *trackingPipeTransport) Close() error {
+	t.closed.Store(true)
+	return t.pipeTransport.Close()
+}
 
 func TestPortRoundTrip(t *testing.T) {
 	a, b := net.Pipe()
@@ -172,4 +184,79 @@ func TestReaderLoopIdleZeroNilIsNotOffline(t *testing.T) {
 		t.Fatal("onOffline was called despite no real error")
 	default:
 	}
+}
+
+// TestReaderEOFClosesTrasportAndWriterExits verifies Bug 2 fix:
+// when the transport signals EOF (device power-cycle), readerLoop must
+//
+//	(a) call tr.Close() on the dead transport, and
+//	(b) stop the writer goroutine so a subsequent Port.Close() does not hang.
+func TestReaderEOFClosesTransportAndWriterExits(t *testing.T) {
+	a, b := net.Pipe()
+	tr := &trackingPipeTransport{pipeTransport: pipeTransport{c: a}}
+
+	off := make(chan int, 1)
+	p := NewPort(5, tr, Params{},
+		func(RXFrame) {},
+		func(n int) { off <- n })
+
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close the far end — simulates device power-cycle / EOF.
+	b.Close()
+
+	// Wait for onOffline to fire.
+	select {
+	case n := <-off:
+		if n != 5 {
+			t.Fatalf("offline port = %d, want 5", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("onOffline never fired after EOF")
+	}
+
+	// Transport must have been closed by readerLoop teardown.
+	if !tr.closed.Load() {
+		t.Error("transport.Close() was not called after EOF teardown")
+	}
+
+	// Port.Close() must return promptly (writer goroutine must have stopped).
+	done := make(chan struct{})
+	go func() {
+		p.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Port.Close() hung after EOF teardown — writer goroutine leaked")
+	}
+}
+
+// TestReaderEOFSendDoesNotPanic verifies that Send() after EOF teardown
+// does not panic (frame is silently dropped via the non-blocking select).
+func TestReaderEOFSendDoesNotPanic(t *testing.T) {
+	a, b := net.Pipe()
+	off := make(chan int, 1)
+	p := NewPort(6, &pipeTransport{c: a}, Params{},
+		func(RXFrame) {},
+		func(n int) { off <- n })
+
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger EOF.
+	b.Close()
+
+	select {
+	case <-off:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onOffline never fired")
+	}
+
+	// Send after teardown must not panic.
+	p.Send([]byte("after-eof"))
 }

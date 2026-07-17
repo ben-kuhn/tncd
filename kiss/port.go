@@ -106,11 +106,16 @@ func (p *Port) readerLoop() {
 		}
 		if err != nil {
 			// EOF or transport error.
-			if !p.closed.Load() {
-				// Unexpected disconnect — fire onOffline.
+			if p.closed.CompareAndSwap(false, true) {
+				// Unexpected disconnect: we won the CAS, so we are responsible
+				// for teardown. Close stopCh to stop the writer, then close the
+				// dead transport (no ExitKISS on a dead link), and fire onOffline.
 				p.online.Store(false)
+				close(p.stopCh)
+				p.tr.Close()
 				p.onOffline(p.num)
 			}
+			// If the CAS lost, Close() is already tearing down; just return.
 			return
 		}
 	}
