@@ -343,3 +343,12 @@ Bench: KU0HN-10 gateway on 145.670, dummy load. Go binary at b3459b8
 Device note: Mobilinkd calibration/config sessions can clear the TNC's
 stored link keys — if ConnectProfile fails with br-connection-key-missing,
 remove and re-pair in bluetoothctl (tncd recovers automatically once paired).
+
+### TNC4 stress test 2026-07-17: PASS
+
+10,240-byte random (incompressible) attachment to w0ne@winlink.org via
+KU0HN-10 (bench, 145.670). Proposal 10592/10670 accepted, 56 I-frames TX,
+one over-the-air frame loss recovered via REJ retransmission (correct
+ack-then-retransmit ordering, matching 1.x), clean FF/FQ, message in sent/.
+Zero foreign-destination transmissions. Y-frame flow control observed
+reporting outstanding=8 under load (window + queue accounting working).
