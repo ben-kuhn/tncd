@@ -303,3 +303,24 @@ W0NE reply "Re: tncd 2.0 OTA test - 10KB attachment" (KBFAAUXCMOFL,
 413/315 bytes) with clean FF/FQ teardown. 44 frames total on the link,
 zero foreign-destination transmissions. Message bodies verified intact
 both ways.
+
+### UV-PRO Bluetooth validation 2026-07-16: PASS (with findings)
+
+Bench: KU0HN-10 gateway on 145.670, dummy load. Go binary at 1ca0a61.
+- [x] BlueZ D-Bus SPP flow end-to-end: profile registration, ConnectProfile,
+      NewConnection fd delivery, port online
+- [x] Winlink CMS round-trip via KU0HN-10 (twice, clean FF/FQ)
+- [x] Power-cycle reconnect: offline detect → 5s backoff → reconnect (cycle 1)
+- [x] Profile registration survives reconnect cycles within one process
+- [x] No echoed TX frames leaked past suppression into the RX path
+
+Findings (fixes queued):
+1. BUG: SPP profile registration failure is cached forever (sync.Once) — a
+   UUID conflict (e.g. production 1.x tncd running) is unrecoverable without
+   a process restart, despite the reconnect loop retrying.
+2. BUG: reconnect leaks the previous SPP socket fd (one per successful
+   reconnect; fds 9,10 observed stranded after two cycles).
+3. Device note: UV-Pro auto-reconnects to the last host on power-up and can
+   wedge in a half-open state after abrupt cycles (radio shows connected,
+   BlueZ shows not; all inbound BR/EDR refused). Radio reboot recovers.
+   tncd's retry loop behaves correctly; document in user docs.
