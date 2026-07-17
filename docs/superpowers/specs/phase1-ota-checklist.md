@@ -352,3 +352,18 @@ one over-the-air frame loss recovered via REJ retransmission (correct
 ack-then-retransmit ordering, matching 1.x), clean FF/FQ, message in sent/.
 Zero foreign-destination transmissions. Y-frame flow control observed
 reporting outstanding=8 under load (window + queue accounting working).
+
+### TNC3 Mobilinkd Bluetooth validation 2026-07-17: PASS
+
+Bench: KU0HN-10 gateway on 145.670, dummy load. Go binary at b3459b8.
+- [x] SPP connect first try (pairing survived calibration, unlike TNC4)
+- [x] Winlink CMS round-trip, clean FF/FQ
+- [x] Power-cycle reconnect: device-side auto-reconnect collided twice
+      (br-connection-already-connected); backoff absorbed it, reconnected
+      on 3rd attempt. fd count flat (9→8 during outage→9 reconnected).
+- [x] 10KB stress: random attachment ZIXYHDC6BP2B (10592/10669) accepted
+      and transferred, 57 I-frames, zero REJs (clean channel this run),
+      in sent/. Zero foreign-destination transmissions.
+
+Note: 10KB incompressible upload is now part of the standard per-device
+validation suite.
