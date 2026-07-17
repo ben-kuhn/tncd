@@ -23,17 +23,17 @@ Run every test with the `tncd-go` binary from the Nix package (nix-ham-packages 
 ### tncd-ota.ini excerpt
 
 ```ini
-[kiss.0]
+[server]
+listen_port = 8005
+callsign = KU0HN
+
+[client.0]
 type = serial
 device = /dev/ttyUSB1
 serial_baudrate = 1200
 init_string = INTFACE KISS\rRESET\r
 init_delay = 2.0
 send_kiss_exit = true
-
-[client.0]
-listen_port = 8005
-callsign = KU0HN
 ota_baudrate = 1200
 ```
 
@@ -84,7 +84,11 @@ Notes:
 ### tncd-ota.ini excerpt
 
 ```ini
-[kiss.0]
+[server]
+listen_port = 8005
+callsign = KU0HN
+
+[client.0]
 type = serial
 device = /dev/ttyUSB1
 serial_baudrate = 9600
@@ -93,10 +97,6 @@ init_delay = 2.0
 send_kiss_exit = true
 host_exit_string = KISS OFF\r
 exit_delay = 1.0
-
-[client.0]
-listen_port = 8005
-callsign = KU0HN
 ota_baudrate = 1200
 ```
 
@@ -151,18 +151,26 @@ Notes:
 ### tncd-ota.ini excerpt
 
 ```ini
-[kiss.0]
+[server]
+listen_port = 8005
+callsign = KU0HN
+
+[client.0]
 type = serial
 device = /dev/ttyUSB0
 serial_baudrate = 57600
 rtscts = false
+init_string = KISS ON\rRESTART\r
+init_delay = 2.0
 send_kiss_exit = true
-
-[client.0]
-listen_port = 8005
-callsign = KU0HN
 ota_baudrate = 1200
 ```
+
+Note: try programmatic KISS entry first — the TH-D7 (same TNC family)
+entered KISS via init_string under the Go port on 2026-07-17, which 1.x
+never managed on this family. Manual minicom entry remains the fallback.
+Also: close the data-band SQUELCH (squelch = DCD on Kenwood internal
+TNCs; open squelch silently blocks all TX).
 
 ### Pre-flight — manual KISS entry
 
@@ -228,17 +236,20 @@ These checks are carried over from the Task 13 Bluetooth code review:
 ### Config excerpt (for reference)
 
 ```ini
-[kiss.0]
-type = bluetooth
-bluetooth_address = <mobilinkd-bdaddr>
-bluetooth_channel = 1   # TNC4; use 6 for TNC3
-send_kiss_exit = true
-
-[client.0]
+[server]
 listen_port = 8005
 callsign = KU0HN
+
+[client.0]
+type = bluetooth
+bdaddr = <mobilinkd-bdaddr>
+channel = 1   # TNC4; use 6 for TNC3 (informational; SPP UUID drives connect)
+reconnect = true
 ota_baudrate = 1200
 ```
+Note: KISS exit is serial-only; `send_kiss_exit` has no effect on
+Bluetooth ports. Key names are `bdaddr`/`channel` (not
+`bluetooth_address`/`bluetooth_channel`).
 
 ### Result
 
