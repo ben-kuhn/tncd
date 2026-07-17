@@ -3,7 +3,8 @@
 **Purpose**: Gate the `v2-go-port` branch for hardware correctness before the 2.0.0 tag.
 Run every test with the `tncd-go` binary from the Nix package (nix-ham-packages `tncd-go`).
 
-**Status**: [ ] in-progress / [ ] all PASS
+**Status**: [x] hardware validation complete (2026-07-17) — all tested TNCs
+PASS; PK-232MBX deliberately deferred to a post-v2.2 bench test. See Sign-off.
 
 ---
 
@@ -262,13 +263,27 @@ Notes:
 
 ## Sign-off
 
-All phase 1 serial tests PASS:
+Phase 1 hardware validation — see dated result sections below for detail.
 
-- [ ] KPC-3+
-- [ ] PK-232MBX
-- [ ] TS-2000
+**Serial TNCs:**
+- [x] KPC-3+ — PASS (Winlink + 10KB stress; exit-verification cycle pending re-plug, non-blocking)
+- [ ] PK-232MBX — **deliberately deferred** to a post-v2.2 bench test (operator decision 2026-07-17), NOT an oversight
+- [x] TS-2000 — PASS at 9600 baud (57600 corrupts without hw flow control — use 9600)
 
-Record final commit hash of `v2-go-port` under test: `___________`
+**Also validated (beyond the original serial scope):**
+- [x] Direwolf 1.8.1 software TNC (PTY) — PASS ×3 (download, 10KB upload, bidirectional)
+- [x] TH-D7 internal TNC (serial) — PASS (programmatic KISS entry, a 1.x first)
+- [x] Mobilinkd TNC4 (Bluetooth SPP) — PASS incl. 10KB stress + reconnect/fd checks
+- [x] Mobilinkd TNC3 (Bluetooth SPP) — PASS incl. 10KB stress
+- [x] UV-Pro (Bluetooth SPP) — PASS (surfaced + fixed two Bluetooth bugs)
+- [x] Mobilinkd TNC2 (Bluetooth SPP) — TESTED, APRS only (connected mode marginal on this APRS-class device)
+
+Bench-driven code fixes landed and verified this campaign: four shared-channel
+guards (also backported to Python, released as v1.3.2), two Bluetooth reconnect
+bugs (848b246/75afa32/b3459b8), and the RTS-flip revert (bf8efb8).
+
+Final commit hash of `v2-go-port` under test: `82d0c80`
+(update if further commits land before the merge/tag).
 
 ## Direwolf 1.8.1 (software TNC via PTY) — added as first OTA subject
 
@@ -453,3 +468,32 @@ Bench lessons (same session, cabling):
 - Digirig cabling trap: with the serial plug pulled but audio connected,
   the only live line is RTS→PTT — opening the port keys the transmitter
   with no data path at all. Verify both plugs before serial TNC sessions.
+
+### Kantronics KPC-3+ (KPC3PMX v9.1, serial) validation 2026-07-17: PASS
+
+Serial: /dev/ttyUSB1 (MCT U232 adapter) @ 1200; init_string =
+INTFACE KISS\rRESET\r, init_delay 2.0; send_kiss_exit = true;
+host_exit_string = INTFACE TERMINAL\r (restores NVRAM interface mode so
+the TNC boots to cmd:, not silent KISS). Bench: KU0HN-10 on 145.670.
+- [x] Programmatic KISS entry (probe → cmd: → INTFACE KISS/RESET → confirmed)
+- [x] Winlink CMS message delivered via KU0HN-10, clean FF/FQ
+- [x] 10KB stress: random attachment PZAE4F6DUCNK (10566/10641) accepted
+      and transferred, clean FF/FQ. Serial stress path validated.
+- [~] Exit-verification cycle (stop → immediate cmd: probe) NOT completed:
+      the USB adapter dropped off the bus (13:43) before the final cycle.
+      Retest when re-plugged. The exit sequence itself was observed firing
+      correctly (KISS exit bytes + INTFACE TERMINAL) in the tncd log.
+
+Root cause of a long debug saga (documented so it isn't re-chased): the
+unit had **ABAUD 9600** stored in NVRAM after a factory reset. Every
+soft reset (KISS exit issues one) and power-cycle brought the TNC back at
+9600 while host/minicom talked 1200 → garbage/silence in shifting forms
+that looked like a "wedge." NOT a tncd defect and NOT the KISS-exit. Fixed
+by pinning `ABAUD 1200` + RESTART in NVRAM. Also required a hard reset
+first (NVRAM was corrupt: "PBBS MESSAGE BUFFER NOT VALID" at boot), which
+cleared `CD SOFTWARE` (had to re-enable software DCD) and reset TX audio
+level (low tone initially killed decodes — CALIBRATE to confirm audio path).
+Bench lessons: minicom's default hardware flow control can show a blank
+unresponsive session on cables without CTS (turn it off); the KPC+ uses
+per-line autobaud, so blind probes re-lock it to random rates — validate
+baud interactively in minicom, not with scripted CRs.
