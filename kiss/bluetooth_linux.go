@@ -203,20 +203,29 @@ func (p *sppProfile) Release() *dbus.Error {
 // It must stay open for the lifetime of the profile.
 var profileConn *dbus.Conn
 
-// profileOnce ensures the SPP profile is registered exactly once per process.
-var profileOnce sync.Once
-var profileOnceErr error
+// profileMu guards profileRegistered and profileConn.
+var profileMu sync.Mutex
+
+// profileRegistered is true once a successful RegisterProfile call has been
+// made. Unlike sync.Once, a failed attempt leaves it false so the next
+// Open() can retry from scratch.
+var profileRegistered bool
 
 // registerProfileOnce connects to the system D-Bus, exports the Profile1
-// object, and calls ProfileManager1.RegisterProfile. It is idempotent.
+// object, and calls ProfileManager1.RegisterProfile.
+//
+// On success it sets profileRegistered=true and leaves profileConn open for
+// the lifetime of the profile. On failure it closes any D-Bus connection
+// opened during this attempt and returns the error, leaving profileRegistered
+// false so the next call retries.
+//
+// Once registration succeeds, subsequent calls are no-ops (idempotent).
 func registerProfileOnce() error {
-	profileOnce.Do(func() {
+	return ensureProfile(func() error {
 		conn, err := dbus.ConnectSystemBus()
 		if err != nil {
-			profileOnceErr = fmt.Errorf("bluetooth: system bus for profile: %w", err)
-			return
+			return fmt.Errorf("bluetooth: system bus for profile: %w", err)
 		}
-		profileConn = conn
 
 		prof := &sppProfile{}
 		// Export using ExportMethodTable so we can map D-Bus method names
@@ -232,8 +241,7 @@ func registerProfileOnce() error {
 		)
 		if err != nil {
 			conn.Close()
-			profileOnceErr = fmt.Errorf("bluetooth: export Profile1: %w", err)
-			return
+			return fmt.Errorf("bluetooth: export Profile1: %w", err)
 		}
 
 		manager := conn.Object("org.bluez", "/org/bluez")
@@ -245,12 +253,32 @@ func registerProfileOnce() error {
 			profilePath, sppUUID, opts,
 		).Err; err != nil {
 			conn.Close()
-			profileOnceErr = fmt.Errorf("bluetooth: RegisterProfile: %w", err)
-			return
+			return fmt.Errorf("bluetooth: RegisterProfile: %w", err)
 		}
+
+		profileConn = conn
 		log.Printf("bluetooth: SPP profile registered at %s", profilePath)
+		return nil
 	})
-	return profileOnceErr
+}
+
+// ensureProfile is the testable seam for profile registration. It calls
+// register at most once as long as registration keeps failing; once register
+// succeeds the registered flag is set and subsequent calls are no-ops.
+//
+// Thread-safe: guarded by profileMu.
+func ensureProfile(register func() error) error {
+	profileMu.Lock()
+	defer profileMu.Unlock()
+	if profileRegistered {
+		return nil
+	}
+	if err := register(); err != nil {
+		// Leave profileRegistered false so the next Open() can retry.
+		return err
+	}
+	profileRegistered = true
+	return nil
 }
 
 // ---- Pending-connection map ----
