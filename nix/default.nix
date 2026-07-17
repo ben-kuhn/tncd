@@ -1,41 +1,43 @@
 { lib
-, python3
-, bluetoothSupport ? false
+, buildGoModule
 }:
 
-python3.pkgs.buildPythonApplication rec {
+buildGoModule rec {
   pname = "tncd";
-  version = "1.3.1";
+  version = "1.97-Beta";
 
   src = lib.cleanSource ../.;
 
-  format = "other";
+  # Pin the module dependency hash. Update when go.mod/go.sum change:
+  #   set to lib.fakeHash, build, and copy the "got:" hash from the error.
+  vendorHash = "sha256-FFRXOD48HO+2C3m95wkFYpAIXmHytpXFSxl5TYbnjR8=";
 
-  disabled = python3.pkgs.pythonOlder "3.8";
+  env.CGO_ENABLED = "0";
 
-  dependencies = with python3.pkgs; [
-    pyserial
-    # kiss3 and pyham-ax25 must be provided as custom derivations
-    # if not yet available in the nixpkgs channel being used.
-  ] ++ lib.optionals bluetoothSupport (with python3.pkgs; [
-    dbus-python
-    pygobject3
-  ]);
+  # Build only the daemon; skip helper/example mains if any are added later.
+  subPackages = [ "cmd/tncd" ];
 
-  installPhase = ''
-    install -Dm755 tncd.py      $out/bin/tncd
-    install -Dm644 tncd.ini     $out/share/tncd/tncd.ini.example
+  ldflags = [
+    "-s"
+    "-w"
+    "-X github.com/ben-kuhn/tncd/v2/internal/version.Version=${version}"
+  ];
+
+  postInstall = ''
+    install -Dm644 tncd.ini $out/share/tncd/tncd.ini.example
   '';
 
   meta = with lib; {
     description = "AGWPE-to-KISS Translation Bridge";
     longDescription = ''
-      A bridge that allows AGWPE-client applications to communicate with KISS TNCs.
-      Supports both serial and TCP KISS connections.
+      A bridge that allows AGWPE-client applications to communicate with KISS
+      TNCs. Supports both serial and TCP KISS connections, and full AX.25
+      connected mode. This is the Go port (tncd 2.0 line).
     '';
     homepage = "https://tncd.dev";
-    license = lib.licenses.gpl3;
+    license = licenses.gpl3Only;
     maintainers = [ ];
-    platforms = lib.platforms.linux;
+    platforms = platforms.linux;
+    mainProgram = "tncd";
   };
 }

@@ -66,7 +66,11 @@ in {
     };
 
     bluetooth = {
-      enable = lib.mkEnableOption "Bluetooth SPP support (adds dbus-python and PyGObject)";
+      enable = lib.mkEnableOption ''
+        Bluetooth SPP support. Adds the service user to the 'bluetooth' group
+        and orders the unit after bluetooth.service. The Go binary talks to
+        BlueZ over D-Bus, so no extra package is required
+      '';
     };
 
   };
@@ -87,11 +91,6 @@ in {
     users.groups = lib.mkIf (cfg.group == "tncd") {
       tncd = {};
     };
-
-    # Override the package to include bluetooth deps when enabled
-    services.tncd.package = lib.mkIf cfg.bluetooth.enable (
-      lib.mkDefault (cfg.package.override { bluetoothSupport = true; })
-    );
 
     systemd.services.tncd = {
       description = "AGWPE-to-KISS Translation Bridge";
