@@ -367,3 +367,23 @@ Bench: KU0HN-10 gateway on 145.670, dummy load. Go binary at b3459b8.
 
 Note: 10KB incompressible upload is now part of the standard per-device
 validation suite.
+
+### TNC2 Mobilinkd Bluetooth validation 2026-07-17: PASS (qualified — APRS-class device)
+
+Bench: KU0HN-10 gateway on 145.670. Legacy RN-42 Bluetooth: PIN pairing
+(1234) required via bluetoothctl agent. Not previously tested on any
+tncd version.
+- [x] SPP connect via PIN-paired RN-42; tncd BlueZ flow works unchanged
+- [x] AX.25 connected-mode session established (SABM/UA) after a PTT
+      calibration fix
+- [x] CMS session opened, message proposal accepted, all transmitted data
+      link-layer acknowledged (RR to N(R)=7, outstanding drained to 0)
+- [~] Session lost mid-B2F: TNC2 RX went deaf after our transmit burst
+      (2 min silence, gateway DISC, correctly UA'd). Device-class
+      limitation — the TNC2 is APRS-oriented; connected-mode Winlink is
+      beyond its comfort zone per the operator. tncd's link handling was
+      correct throughout (incl. riding through one BT drop during the
+      earlier PTT-dead attempt).
+
+Recommendation for docs: TNC2 supported for APRS/UI use; connected-mode
+sessions possible but not reliable — prefer TNC3/TNC4.
