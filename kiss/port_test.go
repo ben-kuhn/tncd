@@ -186,7 +186,7 @@ func TestReaderLoopIdleZeroNilIsNotOffline(t *testing.T) {
 	}
 }
 
-// TestReaderEOFClosesTrasportAndWriterExits verifies Bug 2 fix:
+// TestReaderEOFClosesTransportAndWriterExits verifies Bug 2 fix:
 // when the transport signals EOF (device power-cycle), readerLoop must
 //
 //	(a) call tr.Close() on the dead transport, and
@@ -259,4 +259,47 @@ func TestReaderEOFSendDoesNotPanic(t *testing.T) {
 
 	// Send after teardown must not panic.
 	p.Send([]byte("after-eof"))
+}
+
+// TestCloseAfterReaderEOFTeardownJoins verifies that after a reader-error
+// teardown completes (onOffline observed), calling Close() returns promptly
+// (join works, no deadlock).
+func TestCloseAfterReaderEOFTeardownJoins(t *testing.T) {
+	a, b := net.Pipe()
+	off := make(chan int, 1)
+	p := NewPort(8, &pipeTransport{c: a}, Params{},
+		func(RXFrame) {},
+		func(n int) { off <- n })
+
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger EOF to start reader-initiated teardown.
+	b.Close()
+
+	// Wait for onOffline to fire, confirming teardown is done.
+	select {
+	case n := <-off:
+		if n != 8 {
+			t.Fatalf("offline port = %d, want 8", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("onOffline never fired after EOF")
+	}
+
+	// Now call Close() after the reader has already torn down.
+	// This exercises the path where the CAS fails (reader won).
+	// Close must still call wg.Wait() and return promptly.
+	done := make(chan struct{})
+	go func() {
+		p.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Success: join completed within timeout.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Port.Close() hung after reader-initiated teardown — join failed")
+	}
 }

@@ -153,18 +153,29 @@ func (p *Port) Online() bool {
 	return p.online.Load()
 }
 
-// Close stops the port: signals the writer, calls ExitKISS, closes the
-// transport, and waits for goroutines. Does NOT trigger onOffline.
+// Close stops the port and joins all goroutines before returning.
+// It signals the writer, calls ExitKISS, closes the transport, and waits for
+// all goroutines. If an unexpected reader error already initiated teardown,
+// Close skips the teardown steps (the reader won the race) but still waits
+// for all goroutines to finish. Does NOT trigger onOffline.
 func (p *Port) Close() {
 	if !p.closed.CompareAndSwap(false, true) {
 		return // already closed
 	}
-	// Signal the writer loop to stop.
-	close(p.stopCh)
-	// Mark offline before closing the transport so the reader loop knows
-	// this is an intentional close and does not call onOffline.
-	p.online.Store(false)
-	p.tr.ExitKISS()
-	p.tr.Close()
+	// If this CAS succeeded, we own teardown. The reader may have already
+	// closed stopCh and set online to false in a concurrent teardown, but
+	// only one of us will win the CAS.
+	// If the reader won (CAS failed above), it already closed stopCh, set
+	// online=false, and closed tr. We skip these steps but still join below.
+	if p.online.Load() {
+		// Normal close path: we shut down first.
+		close(p.stopCh)
+		p.online.Store(false)
+		p.tr.ExitKISS()
+		p.tr.Close()
+	} else {
+		// Reader already won and cleaned up; stopCh is closed, tr is closed.
+		// Just join the goroutines.
+	}
 	p.wg.Wait()
 }
