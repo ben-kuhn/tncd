@@ -422,9 +422,11 @@ Debug journey (documented for the user docs):
   is the opposite — easy trap when sharing a radio between both. Closing
   squelch released the queued frames instantly (confirmed on RF monitor).
 - TH-D7 serial is 3-wire (TX/RX/GND) — no RTS/DTR reach the TNC.
-- Side effect of the debug: serial RTS is now ASSERTED on open (1.x/pyserial
-  parity; commit pending in this session) — irrelevant to the D7 but correct
-  for TNCs that do wire modem lines.
+- NOTE (corrected 2026-07-17): during this debug an RTS-low→high flip was
+  committed on the mistaken theory the D7 needed RTS asserted. The real
+  cause was the squelch; the D7 doesn't even wire RTS. That flip was
+  reverted (bf8efb8) — serial RTS stays LOW on open (Digirig RTS→PTT safe),
+  the original design.
 
 ### TS-2000 internal TNC (serial) validation 2026-07-17: PASS at 9600
 
