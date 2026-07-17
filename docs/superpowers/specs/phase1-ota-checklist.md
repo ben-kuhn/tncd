@@ -425,3 +425,29 @@ Debug journey (documented for the user docs):
 - Side effect of the debug: serial RTS is now ASSERTED on open (1.x/pyserial
   parity; commit pending in this session) — irrelevant to the D7 but correct
   for TNCs that do wire modem lines.
+
+### TS-2000 internal TNC (serial) validation 2026-07-17: PASS at 9600
+
+Bench path: Digirig serial → TS-2000 COM connector; W0NE-10 on 145.030.
+- [x] Programmatic KISS entry WORKED (probe → "cmd:" → KISS ON/RESTART →
+      confirmed) — 1.x never achieved this on the TS-2000; the Go serial
+      path (read timeouts) cracked it. Manual minicom no longer needed.
+- [x] KISS exit on stop returns TNC to cmd mode (verified via re-probe)
+- [x] Winlink CMS message delivered via W0NE-10, clean FF/FQ — at 9600.
+- [!] At 57600 (the 1.x-documented rate): B2 "data stream not a correct
+      format" corruption, reproduced twice, same message. Dropped to 9600
+      (controlled variable): identical test passed cleanly. Verdict:
+      byte-level corruption on this TNC's serial input at 57600 without
+      hardware flow control (go.bug.st cannot apply CRTSCTS — the deferred
+      Task 12 gap now has a concrete customer). RECOMMEND serial_baudrate
+      9600 for TS-2000 under 2.0 until termios CRTSCTS support lands.
+- Note: menu 56 (COM CONNECTOR PARAMETERS) baud changes require a radio
+  reboot to take effect.
+
+Bench lessons (same session, cabling):
+- The TS-2000 COM port serves CAT (rigctld) AND the internal TNC — rigctld
+  must be stopped for TNC use; a running rigctld silently consumes all TNC
+  serial output.
+- Digirig cabling trap: with the serial plug pulled but audio connected,
+  the only live line is RTS→PTT — opening the port keys the transmitter
+  with no data path at all. Verify both plugs before serial TNC sessions.
