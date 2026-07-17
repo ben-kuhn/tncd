@@ -324,3 +324,22 @@ Findings (fixes queued):
    wedge in a half-open state after abrupt cycles (radio shows connected,
    BlueZ shows not; all inbound BR/EDR refused). Radio reboot recovers.
    tncd's retry loop behaves correctly; document in user docs.
+
+### TNC4 Mobilinkd Bluetooth validation 2026-07-17: PASS
+
+Bench: KU0HN-10 gateway on 145.670, dummy load. Go binary at b3459b8
+(includes both bench-finding fixes). Device freshly calibrated.
+- [x] Registration-retry fix demonstrated live: calibration had cleared the
+      TNC4's link key (br-connection-key-missing); the running process kept
+      retrying through re-pairing and connected on the next backoff attempt
+      — no restart needed (impossible before 848b246)
+- [x] Winlink CMS round-trip via KU0HN-10, clean FF/FQ
+- [x] Power-cycle reconnect: offline → backoff → reconnected; one transient
+      br-connection-already-connected (device-side auto-reconnect collision)
+      absorbed by the retry loop
+- [x] fd-leak fix verified on hardware: fd count flat at 9 across the cycle
+      (75afa32/b3459b8; yesterday's build leaked one per reconnect)
+
+Device note: Mobilinkd calibration/config sessions can clear the TNC's
+stored link keys — if ConnectProfile fails with br-connection-key-missing,
+remove and re-pair in bluetoothctl (tncd recovers automatically once paired).
