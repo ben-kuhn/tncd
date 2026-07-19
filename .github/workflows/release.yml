@@ -9,143 +9,121 @@ permissions:
   contents: write
 
 jobs:
-  # ── Build one package set per target architecture ──────────────────────────
+  # ── Build all packages on one runner ──────────────────────────────────────
+  # Plain GOOS/GOARCH cross-compilation of the static (CGO_ENABLED=0) Go binary
+  # for each target arch, then nfpm packages each into .deb and .rpm. This
+  # replaces the old QEMU/Docker/fpm/Python matrix — no emulation, no vendored
+  # Python deps, no python3 runtime dependency.
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: amd64
-            deb_arch: amd64
-            rpm_arch: x86_64
-            platform: linux/amd64
-            image: ubuntu:22.04
-          - name: i386
-            deb_arch: i386
-            rpm_arch: i686
-            platform: linux/386
-            image: i386/debian:bookworm-slim
-          - name: armhf
-            deb_arch: armhf
-            rpm_arch: armhfp
-            platform: linux/arm/v7
-            image: debian:bookworm-slim
-          - name: arm64
-            deb_arch: arm64
-            rpm_arch: aarch64
-            platform: linux/arm64
-            image: debian:bookworm-slim
-          - name: riscv64
-            deb_arch: riscv64
-            rpm_arch: riscv64
-            platform: linux/riscv64
-            image: debian:sid-slim
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Extract version
+        # Strip the leading 'v' from the tag: v1.97-Beta → 1.97-Beta.
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      # Register QEMU binfmt handlers for cross-arch container execution.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
 
-      # Install Python deps into vendor/ inside a container matching the
-      # target architecture so that bitarray (C extension) is built correctly.
-      - name: Build vendored Python dependencies
+      - name: Install nfpm
         run: |
-          docker run --rm \
-            --platform "${{ matrix.platform }}" \
-            -v "$GITHUB_WORKSPACE:/work" \
-            "${{ matrix.image }}" \
-            bash -c "
-              for i in 1 2 3; do
-                apt-get update -qq && break
-                echo \"apt-get update failed (attempt \$i/3), retrying in 5s...\"
-                sleep 5
-              done &&
-              apt-get install -y --no-install-recommends \
-                python3-pip gcc python3-dev python3-setuptools &&
-              BSP=\$(python3 -m pip install --help 2>&1 | grep -q break-system-packages && echo --break-system-packages || true) &&
-              python3 -m pip install \
-                --target /work/vendor \
-                --no-compile \
-                \$BSP \
-                bitarray kiss3 pyserial pyserial-asyncio pyham_ax25
-            "
+          NFPM_VERSION=2.46.3
+          curl -sSfL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" \
+            -o /tmp/nfpm.deb
+          sudo dpkg -i /tmp/nfpm.deb
 
-      - name: Install fpm
+      - name: Cross-compile binaries and build packages
         run: |
-          sudo apt-get install -y ruby ruby-dev build-essential rpm
-          sudo gem install fpm --no-document
+          set -euo pipefail
+          mkdir -p dist out
 
-      - name: Stage package tree
-        run: |
-          mkdir -p staging/usr/bin
-          mkdir -p staging/usr/lib/tncd
-          mkdir -p staging/etc
-          mkdir -p staging/lib/systemd/system
+          LDFLAGS="-s -w -X github.com/ben-kuhn/tncd/v2/internal/version.Version=${VERSION}"
 
-          # Main script and all vendored deps
-          cp tncd.py staging/usr/lib/tncd/
-          cp -r vendor/. staging/usr/lib/tncd/
+          # arch rows: <nfpm arch> <artifact label> <GOARCH> <GOARM (blank if n/a)>
+          # nfpm's arch name drives both deb and rpm labels:
+          #   amd64 → amd64 / x86_64      386   → i386  / i686
+          #   arm64 → arm64 / aarch64     arm6  → armhf / armv6hl
+          #   riscv64 → riscv64 / riscv64
+          build_one() {
+            local nfpm_arch="$1" label="$2" goarch="$3" goarm="${4:-}"
+            echo "── building ${label} (GOARCH=${goarch} GOARM=${goarm:-none}) ──"
+            env CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" GOARM="${goarm}" \
+              go build -ldflags "${LDFLAGS}" -o dist/tncd ./cmd/tncd
 
-          # /usr/bin wrapper
-          cp packaging/tncd-wrapper staging/usr/bin/tncd
-          chmod 755 staging/usr/bin/tncd
+            # Stage the systemd unit patched for packaged paths (binary at
+            # /usr/bin, config at /etc; drop WorkingDirectory).
+            sed \
+              -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
+              -e '/^WorkingDirectory=/d' \
+              tncd.service > dist/tncd.service
 
-          # Example config
-          cp tncd.ini staging/etc/tncd.ini.example
+            VERSION="${VERSION}" ARCH="${nfpm_arch}" nfpm package -f nfpm.yaml -p deb -t out/
+            VERSION="${VERSION}" ARCH="${nfpm_arch}" nfpm package -f nfpm.yaml -p rpm -t out/
 
-          # Systemd unit — patch for installed paths
-          sed \
-            -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
-            -e '/^WorkingDirectory=/d' \
-            tncd.service > staging/lib/systemd/system/tncd.service
+            # Ship the raw static binary per arch for direct download.
+            cp dist/tncd "out/tncd-linux-${label}"
+          }
 
-      - name: Build .deb
-        run: |
-          fpm -s dir -t deb \
-            -n tncd \
-            -v "$VERSION" \
-            --architecture "${{ matrix.deb_arch }}" \
-            --description "AGWPE-to-KISS Translation Bridge for packet radio" \
-            --url "https://tncd.dev" \
-            --license "GPL-3.0-only" \
-            --maintainer "KU0HN <ku0hn@ku0hn.radio>" \
-            --depends python3 \
-            --depends bluez \
-            --config-files /etc/tncd.ini.example \
-            -p "tncd_${VERSION}_${{ matrix.deb_arch }}.deb" \
-            -C staging .
+          build_one amd64   amd64   amd64
+          build_one 386     i386    386
+          build_one arm64   arm64   arm64
+          build_one arm6    armhf   arm   6
+          build_one riscv64 riscv64 riscv64
 
-      - name: Build .rpm
-        run: |
-          fpm -s dir -t rpm \
-            -n tncd \
-            -v "$VERSION" \
-            --architecture "${{ matrix.rpm_arch }}" \
-            --description "AGWPE-to-KISS Translation Bridge for packet radio" \
-            --url "https://tncd.dev" \
-            --license "GPL-3.0-only" \
-            --maintainer "KU0HN <ku0hn@ku0hn.radio>" \
-            --depends python3 \
-            --depends bluez \
-            --config-files /etc/tncd.ini.example \
-            -p "tncd-${VERSION}-1.${{ matrix.rpm_arch }}.rpm" \
-            -C staging .
+          echo "── artifacts ──"
+          ls -la out/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: packages-${{ matrix.name }}
+          name: packages
           path: |
-            *.deb
-            *.rpm
+            out/*.deb
+            out/*.rpm
+            out/tncd-linux-*
 
-  # ── Publish: APT + RPM repos, website, Cloudflare Pages, GitHub Release ────
-  publish:
+  # ── Publish: GitHub Release only (beta posture) ───────────────────────────
+  # For the 2.0 beta line, artifacts are published ONLY to a GitHub Release.
+  # The signed APT/RPM repos, the Cloudflare Pages site (tncd.dev), and the AUR
+  # PKGBUILD push all stay on the Python 1.3.2 line and are DEFERRED to phase 4
+  # (see the disabled `publish-repos` job below) so public installs keep
+  # serving the stable Python build until the Go port is feature-complete.
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: out/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*.deb
+            out/*.rpm
+            out/tncd-linux-*
+          generate_release_notes: true
+
+  # ── DEFERRED to phase 4 — repos stay on Python 1.3.2 until the Go port is ──
+  # feature-complete (phases 2-4) and shaken out. This job is preserved verbatim
+  # (only wired to the new `out/` artifact dir) but gated `if: false` so it never
+  # runs on a tag push. To re-enable in phase 4: change `if: false` to
+  # `if: ${{ true }}` (or remove the guard) and set `needs: build`.
+  #
+  # It publishes:
+  #   - Signed APT repository  (GPG_PRIVATE_KEY)
+  #   - Signed RPM repository  (GPG_PRIVATE_KEY)
+  #   - Cloudflare Pages / Workers site → tncd.dev  (CF_API_TOKEN, CF_ACCOUNT_ID)
+  #   - AUR PKGBUILD version-bump commit to main
+  publish-repos:
+    if: false
     runs-on: ubuntu-latest
     needs: build
     environment: tncd_cloudflare
@@ -159,9 +137,8 @@ jobs:
       - name: Download all packages
         uses: actions/download-artifact@v4
         with:
-          pattern: packages-*
+          name: packages
           path: pkgs/
-          merge-multiple: true
 
       - name: Install repo tools
         run: |
@@ -206,6 +183,8 @@ jobs:
 
       - name: Build RPM repository
         run: |
+          # NOTE (phase-4 re-enable): nfpm labels the arm rpm 'armv6hl' (not the
+          # old fpm 'armhfp'). Update this arch list to armv6hl when restoring.
           for rpm_arch in x86_64 i686 armhfp aarch64 riscv64; do
             mkdir -p "repo/rpm/${rpm_arch}"
             # Copy RPMs for this arch (may be empty if build failed)
@@ -264,11 +243,3 @@ jobs:
           command: deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            pkgs/*.deb
-            pkgs/*.rpm
-          generate_release_notes: true

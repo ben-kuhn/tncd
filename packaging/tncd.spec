@@ -1,43 +1,42 @@
 Name:           tncd
-Version:        1.1
+Version:        1.97~beta
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
-License:        GPL-3.0-or-later
+License:        GPL-3.0-only
 URL:            https://tncd.dev
 Source0:        %{name}-%{version}.tar.gz
 
-BuildArch:      noarch
-BuildRequires:  python3-devel
+BuildRequires:  golang >= 1.25
 
-Requires:       python3
-Requires:       python3-kiss3 >= 8.0.0
-%if 0%{?suse_version}
-Requires:       python3-pyham_ax25 >= 1.0.0
-%else
-Requires:       python3-pyham-ax25 >= 1.0.0
-%endif
-Requires:       python3-pyserial >= 3.5
-Requires:       bluez
+# Fully static binary (CGO_ENABLED=0) — no runtime library dependencies.
 
 %description
 A userspace bridge allowing AGWPE-compatible client applications to communicate
 with KISS TNCs (serial or TCP). Implements full AX.25 connected mode including
-SABM/UA handshake, I-frame sequencing, and RR acknowledgement.
+SABM/UA handshake, I-frame sequencing, and RR acknowledgement. This is the Go
+port (tncd 2.0 line).
+
+%global vertag 1.97-Beta
 
 %prep
 %autosetup
 
 %build
-# Pure Python — nothing to compile.
+export CGO_ENABLED=0
+export GOFLAGS="-mod=readonly"
+go build \
+    -ldflags "-s -w -X github.com/ben-kuhn/tncd/v2/internal/version.Version=%{vertag}" \
+    -o tncd \
+    ./cmd/tncd
 
 %install
-install -Dm755 tncd.py           %{buildroot}%{_bindir}/tncd
+install -Dm755 tncd              %{buildroot}%{_bindir}/tncd
 install -Dm644 tncd.ini          %{buildroot}%{_sysconfdir}/tncd.ini.example
 
 # Create the systemd unit directory before writing to it.
 install -d %{buildroot}%{_unitdir}
 
-# Install service files with packaged paths (binary at /usr/bin, config at /etc).
+# Install service file with packaged paths (binary at /usr/bin, config at /etc).
 sed \
     -e 's|ExecStart=.*tncd[^-].*|ExecStart=/usr/bin/tncd -c /etc/tncd.ini|' \
     -e '/^WorkingDirectory=/d' \
@@ -59,6 +58,10 @@ sed \
 %{_unitdir}/tncd.service
 
 %changelog
+* Thu Jul 17 2026 KU0HN <ku0hn@ku0hn.radio> - 1.97~beta-1
+- Go port (tncd 2.0 beta line); static binary, no python3 dependency
+- Packaging moves from fpm/Python to nfpm/Go cross-compilation
+
 * Sun Jun 15 2026 KU0HN <ku0hn@ku0hn.radio> - 1.1-1
 - Parallel Bluetooth port startup; AGWPE server no longer blocked by offline ports
 - Fix SIGABRT crash from blocking dbus ConnectProfile thread (cross-thread heap corruption)

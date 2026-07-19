@@ -13,3 +13,9 @@ venv/
 tncd_personal.ini
 README.html
 *_test*.ini
+/tncd
+/tncd.exe
+# nfpm / release build outputs
+/out/
+*.deb
+*.rpm

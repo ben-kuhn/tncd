@@ -1,0 +1,71 @@
+# nfpm configuration for tncd (Go port, 2.0 line).
+#
+# Produces the tncd .deb and .rpm from a pre-built static Go binary. This
+# replaces the old QEMU/Docker/fpm/Python pipeline: a single ubuntu-latest
+# runner cross-compiles the binary per arch, stages the patched systemd unit,
+# then invokes:
+#
+#   VERSION=1.97-Beta ARCH=amd64 \
+#     nfpm package -f nfpm.yaml -p deb -t dist/
+#   VERSION=1.97-Beta ARCH=amd64 \
+#     nfpm package -f nfpm.yaml -p rpm -t dist/
+#
+# nfpm expands ${VERSION} / ${ARCH} from the environment. ARCH uses nfpm's
+# canonical (Go/deb-style) names — amd64, 386, arm, arm64, riscv64 — and nfpm
+# translates to the rpm equivalents (x86_64, i686, armhfp, aarch64, riscv64)
+# for the rpm target automatically. For armhf (GOARM=6) set ARCH=arm6
+# (nfpm's "arm" is soft-float armel; "arm6" is armhf — the workflow uses arm6).
+#
+# Expected staging (produced by the build step / local test gate):
+#   dist/tncd          the cross-compiled static binary for ${ARCH}
+#   dist/tncd.service  tncd.service patched for packaged paths
+#
+# NOTE: no python3 / bluez dependency — the Go binary is fully static
+# (CGO_ENABLED=0) and talks to BlueZ over D-Bus, which is present on any
+# system running Bluetooth; it is not a hard package dependency.
+
+name: tncd
+arch: ${ARCH}
+version: ${VERSION}
+# Treat the version as an exact release string; do not let nfpm try to parse
+# it as semver (1.97-Beta is not semver). This keeps the deb/rpm version equal
+# to the tag (minus leading v).
+version_schema: none
+release: "1"
+section: hamradio
+priority: optional
+maintainer: KU0HN <ku0hn@ku0hn.radio>
+description: |
+  AGWPE-to-KISS Translation Bridge for packet radio.
+  A userspace bridge allowing AGWPE-compatible client applications
+  (PAT/Winlink, Paracon, Xastir) to communicate with KISS TNCs over serial
+  or TCP. Implements full AX.25 connected mode: SABM/UA handshake, I-frame
+  sequencing, RR acknowledgement, and DISC handling.
+vendor: KU0HN
+homepage: https://tncd.dev
+license: GPL-3.0-only
+
+contents:
+  - src: dist/tncd
+    dst: /usr/bin/tncd
+    file_info:
+      mode: 0755
+
+  - src: tncd.ini
+    dst: /etc/tncd.ini.example
+    type: config
+    file_info:
+      mode: 0644
+
+  - src: dist/tncd.service
+    dst: /usr/lib/systemd/system/tncd.service
+    file_info:
+      mode: 0644
+
+deb:
+  # No Depends: the static Go binary needs no runtime packages.
+  fields:
+    Origin: tncd
+
+rpm:
+  summary: AGWPE-to-KISS Translation Bridge

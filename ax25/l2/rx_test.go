@@ -1,0 +1,272 @@
+package l2
+
+import (
+	"testing"
+	"time"
+
+	"github.com/ben-kuhn/tncd/v2/ax25"
+)
+
+func TestInSequenceIFrameDeliversAndT2Acks(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	c := connect(t, tbl, rec)
+	tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), info([]byte("hi"))))
+	if len(rec.data) != 1 || string(rec.data[0]) != "hi" {
+		t.Fatalf("data = %v", rec.data)
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("RR sent immediately; must wait for T2. sent=%+v", rec.sent)
+	}
+	clk.advance(5 * time.Second) // > T2
+	last := rec.sent[len(rec.sent)-1]
+	if last.Type != ax25.RR || last.NR != 1 || last.PF || last.Command {
+		t.Fatalf("T2 RR = %+v, want RR resp N(R)=1 F=0", last)
+	}
+	_ = c
+}
+
+func TestBurstYieldsSingleT2RR(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	connect(t, tbl, rec)
+	for i := 0; i < 3; i++ {
+		tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10",
+			ns(uint8(i)), nr(0), info([]byte{byte(i)})))
+	}
+	clk.advance(5 * time.Second)
+	rrs := 0
+	var lastNR uint8
+	for _, f := range rec.sent {
+		if f.Type == ax25.RR {
+			rrs++
+			lastNR = f.NR
+		}
+	}
+	if rrs != 1 || lastNR != 3 {
+		t.Fatalf("rrs=%d lastNR=%d, want 1 RR with N(R)=3", rrs, lastNR)
+	}
+}
+
+func TestIFramePollGetsImmediateGuardedRR(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	connect(t, tbl, rec)
+	tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), pf,
+		info([]byte("x"))))
+	last := rec.sent[len(rec.sent)-1]
+	if last.Type != ax25.RR || !last.PF || last.NR != 1 {
+		t.Fatalf("poll response = %+v", last)
+	}
+}
+
+func TestDuplicateIFrameDiscardedRRGuarded(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	connect(t, tbl, rec)
+	f := mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), pf, info([]byte("x")))
+	tbl.OnFrame(0, f)
+	nData, nSent := len(rec.data), len(rec.sent)
+	tbl.OnFrame(0, f) // exact duplicate, same NS, within 3s
+	if len(rec.data) != nData {
+		t.Fatal("duplicate delivered twice")
+	}
+	if len(rec.sent) != nSent {
+		t.Fatal("RR guard failed: duplicate RR F=1 with same N(R) within 3s")
+	}
+}
+
+func TestRRGuardExpiresAfter3s(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	connect(t, tbl, rec)
+	f := mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), pf, info([]byte("x")))
+	tbl.OnFrame(0, f)
+	nSent := len(rec.sent)
+	clk.advance(3100 * time.Millisecond)
+	tbl.OnFrame(0, f)
+	if len(rec.sent) != nSent+1 {
+		t.Fatal("RR should be sent again after guard window")
+	}
+}
+
+func TestGapSendsREJ(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	connect(t, tbl, rec)
+	tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(2), nr(0),
+		info([]byte("future"))))
+	last := rec.sent[len(rec.sent)-1]
+	if last.Type != ax25.REJ || last.NR != 0 {
+		t.Fatalf("gap response = %+v, want REJ N(R)=0", last)
+	}
+	if len(rec.data) != 0 {
+		t.Fatal("out-of-sequence data delivered")
+	}
+}
+
+func TestIFrameWhileConnectingPromotes(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0),
+		info([]byte("early"))))
+	if c.State != Connected || len(rec.connected) != 1 || len(rec.data) != 1 {
+		t.Fatalf("state=%v connected=%v data=%v", c.State, rec.connected, rec.data)
+	}
+}
+
+func TestUnknownIFrameWithPollGetsDM(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), pf,
+		info([]byte("stale"))))
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM {
+		t.Fatalf("response = %+v, want DM", rec.sent)
+	}
+}
+
+func TestPollResponseDeferredBehindQueuedIFrames(t *testing.T) {
+	// The call_soon fix: RR P=1 arriving in the same burst as I-frames
+	// must report the N(R) *after* those I-frames are processed.
+	tbl, rec, _ := newHarness(1200)
+	connect(t, tbl, rec)
+	var deferred []func()
+	tbl.Hooks().Defer = func(fn func()) { deferred = append(deferred, fn) }
+	// Burst: RR P=1 processed first, then two I-frames (already queued).
+	tbl.OnFrame(0, mkFrame(ax25.RR, "N0CALL-2", "KU0HN-10", nr(0), pf))
+	tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), info([]byte("a"))))
+	tbl.OnFrame(0, mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(1), nr(0), info([]byte("b"))))
+	for _, fn := range deferred {
+		fn()
+	}
+	var rr *ax25.Frame
+	for _, f := range rec.sent {
+		if f.Type == ax25.RR && f.PF {
+			rr = f
+		}
+	}
+	if rr == nil || rr.NR != 2 {
+		t.Fatalf("poll response = %+v, want RR F=1 N(R)=2", rr)
+	}
+}
+
+func TestT3LivenessPoll(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	connect(t, tbl, rec)
+	rec.sent = nil
+	clk.advance(181 * time.Second)
+	if len(rec.sent) == 0 || rec.sent[0].Type != ax25.RR || !rec.sent[0].PF ||
+		!rec.sent[0].Command {
+		t.Fatalf("T3 poll = %+v, want RR P=1 command", rec.sent)
+	}
+}
+
+func TestPortOfflineDropsConns(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	connect(t, tbl, rec)
+	tbl.PortOffline(0)
+	if rec.disconnected != 1 || tbl.Get(0, "KU0HN-10", "N0CALL-2") != nil {
+		t.Fatalf("disconnected=%d", rec.disconnected)
+	}
+}
+
+// TestForeignIFramePollNoDM verifies the shared-channel courtesy fix:
+// an I-frame P=1 addressed to a foreign callsign (not ours) must NOT
+// trigger a DM response. The same frame addressed to our callsign must
+// still trigger DM (stale-session cleanup). The nil-IsLocal default
+// (used by TestUnknownIFrameWithPollGetsDM) must also still DM.
+func TestForeignIFramePollNoDM(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// Foreign I-frame P=1: MNWIN→WT9M-4 (neither party is ours).
+	// No connection exists. Must be silently dropped — no DM.
+	tbl.OnFrame(0, mkFrame(ax25.I, "MNWIN", "WT9M-4", ns(0), nr(0), pf,
+		info([]byte("foreign"))))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign I-frame: sent %d frame(s), want 0", len(rec.sent))
+	}
+
+	// Same foreign I-frame but addressed to our callsign (stale session).
+	// Must still produce DM.
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.I, "MNWIN", "KU0HN-10", ns(0), nr(0), pf,
+		info([]byte("stale"))))
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM {
+		t.Fatalf("our callsign I-frame: sent %+v, want DM", rec.sent)
+	}
+}
+
+// TestForeignDISCNoDM verifies that a DISC P=1 from a foreign QSO does
+// not trigger a DM on a shared channel. A DISC addressed to our callsign
+// with no connection must still DM.
+func TestForeignDISCNoDM(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// Foreign DISC P=1: MNWIN→WT9M-4. No connection. Must be silently dropped.
+	tbl.OnFrame(0, mkFrame(ax25.DISC, "MNWIN", "WT9M-4", pf))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign DISC: sent %d frame(s), want 0", len(rec.sent))
+	}
+
+	// DISC addressed to our callsign (no connection). Must still produce DM.
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.DISC, "MNWIN", "KU0HN-10", pf))
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM {
+		t.Fatalf("our callsign DISC: sent %+v, want DM", rec.sent)
+	}
+}
+
+// TestForeignSABMIgnored verifies the shared-channel courtesy fix for incoming
+// SABM: a connect request addressed to a foreign callsign (not ours) must
+// produce NO response — no UA, no DM — and must not create a phantom connection.
+func TestForeignSABMIgnored(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// SABM P=1: N0CALL-2→W0NE-10 (W0NE-10 is not ours). Must be silently dropped.
+	tbl.OnFrame(0, mkFrame(ax25.SABM, "N0CALL-2", "W0NE-10", pf))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign SABM: sent %d frame(s), want 0", len(rec.sent))
+	}
+	if tbl.Get(0, "W0NE-10", "N0CALL-2") != nil {
+		t.Fatal("foreign SABM must not create a phantom connection")
+	}
+}
+
+// TestForeignSABMEIgnored verifies the same shared-channel guard for SABME:
+// an extended-mode connect request addressed to a foreign callsign must not
+// trigger our mod-128-unsupported DM rejection.
+func TestForeignSABMEIgnored(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "W0NE-10", pf))
+	if len(rec.sent) != 0 {
+		t.Fatalf("foreign SABME: sent %d frame(s), want 0", len(rec.sent))
+	}
+
+	// SABME to our own callsign still gets the DM rejection (mod-8 only).
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM || !rec.sent[0].PF {
+		t.Fatalf("local SABME: sent %+v, want one DM P=1", rec.sent)
+	}
+}
+
+// TestLocalSABMStillAccepted verifies that a SABM addressed to one of our own
+// registered callsigns is still accepted and UA'd after the IsLocal hook is set.
+func TestLocalSABMStillAccepted(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	// Wire IsLocal: only "KU0HN-10" is ours.
+	tbl.Hooks().IsLocal = func(_ int, call string) bool { return call == "KU0HN-10" }
+
+	// SABM P=1: N0CALL-2→KU0HN-10 (our callsign). Must be accepted.
+	tbl.OnFrame(0, mkFrame(ax25.SABM, "N0CALL-2", "KU0HN-10", pf))
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || c.State != Connected {
+		t.Fatalf("local SABM: conn = %+v, want Connected", c)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.UA || !rec.sent[0].PF {
+		t.Fatalf("local SABM: response = %+v, want UA F=1", rec.sent)
+	}
+	if len(rec.connected) != 1 || rec.connected[0] != "N0CALL-2:incoming" {
+		t.Fatalf("local SABM: connected hook = %v, want [N0CALL-2:incoming]", rec.connected)
+	}
+}

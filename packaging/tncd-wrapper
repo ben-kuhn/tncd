@@ -1,2 +1,0 @@
-#!/bin/sh
-exec env PYTHONPATH=/usr/lib/tncd python3 /usr/lib/tncd/tncd.py "$@"

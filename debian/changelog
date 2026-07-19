@@ -1,3 +1,12 @@
+tncd (1.97~beta) UNRELEASED; urgency=medium
+
+  * Go port (tncd 2.0 beta line): the daemon is now a single static Go binary
+    with no python3 runtime dependency
+  * Packaging moves from fpm/Python to nfpm/Go cross-compilation
+    (debian/rules now builds with `go build`)
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Thu, 17 Jul 2026 00:00:00 +0000
+
 tncd (1.1) UNRELEASED; urgency=medium
 
   * Parallel Bluetooth port startup — AGWPE server now starts immediately
