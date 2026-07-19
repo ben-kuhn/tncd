@@ -28,12 +28,17 @@ jobs:
                      | awk -F: '/^fpr:/{print $10; exit}')
           echo "GPG_FP=$GPG_FP" >> "$GITHUB_ENV"
 
-      - name: Download latest release packages
+      - name: Download release packages for the public APT/RPM repos
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p pkgs
-          gh release download --pattern '*.deb' --pattern '*.rpm' --dir pkgs/ \
+          # PINNED to v1.3.2 (stable Python line). The public apt/rpm.tncd.dev
+          # repos must keep serving 1.3.x while the 2.0 Go port is in beta —
+          # an unpinned "latest" download would promote a 2.0 pre-release (e.g.
+          # v1.97-Beta) to the public repos on any website/** commit. Bump this
+          # pin (or remove it) in phase 4 when the repos move to the Go line.
+          gh release download v1.3.2 --pattern '*.deb' --pattern '*.rpm' --dir pkgs/ \
             || echo "No release found — deploying website only"
 
       - name: Build APT repository

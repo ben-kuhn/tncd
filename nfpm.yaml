@@ -13,7 +13,8 @@
 # nfpm expands ${VERSION} / ${ARCH} from the environment. ARCH uses nfpm's
 # canonical (Go/deb-style) names — amd64, 386, arm, arm64, riscv64 — and nfpm
 # translates to the rpm equivalents (x86_64, i686, armhfp, aarch64, riscv64)
-# for the rpm target automatically. For arm (GOARM=6 / armhf) set ARCH=arm.
+# for the rpm target automatically. For armhf (GOARM=6) set ARCH=arm6
+# (nfpm's "arm" is soft-float armel; "arm6" is armhf — the workflow uses arm6).
 #
 # Expected staging (produced by the build step / local test gate):
 #   dist/tncd          the cross-compiled static binary for ${ARCH}
