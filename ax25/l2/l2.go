@@ -776,6 +776,8 @@ func (t *Table) OnFrame(port int, f *ax25.Frame) {
 		t.dispatchI(port, f, src, dst)
 	case ax25.RR, ax25.RNR, ax25.REJ:
 		t.dispatchS(port, f, src, dst)
+	case ax25.XID:
+		t.dispatchXID(port, f, src, dst)
 	}
 
 	// Reset T3 inactive link timer on any received frame for a Connected conn.
@@ -1183,6 +1185,43 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 			}
 		}
 	}
+}
+
+// dispatchXID answers an XID command with a min-negotiated XID response.
+// tncd is a passive responder: it never initiates XID. We always advertise
+// SREJ off (which is what turns Direwolf's default-on single-SREJ off) and
+// our fixed N1 = 256, negotiating the window down to the peer's request.
+// Mirrors Direwolf xid_frame (mdl_state_0_ready, command branch).
+func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
+	if !f.Command || !f.PF {
+		return // only XID command with P=1 is actionable; a response is unexpected
+	}
+	if !t.isLocal(port, dst) {
+		return
+	}
+	c := t.Get(port, dst, src)
+	if c == nil {
+		return
+	}
+	their, err := ax25.ParseXID(f.Info)
+	if err != nil {
+		return
+	}
+	pp := t.portParams(port)
+	window := pp.MaxWindow
+	if their.WindowRx > 0 && their.WindowRx < window {
+		window = their.WindowRx
+	}
+	resp := ax25.XIDParams{
+		FullDuplex:       false,
+		SREJ:             ax25.SREJNone,
+		Modulo:           128,
+		IFieldLenRxBytes: 256,
+		WindowRx:         window,
+	}
+	out := respFrame(src, dst, c.Via, ax25.XID, true) // response, F=1
+	out.Info = resp.Encode(false)
+	t.sendFrame(port, out)
 }
 
 // --- helpers ---

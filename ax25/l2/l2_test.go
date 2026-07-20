@@ -295,3 +295,34 @@ func TestModuloForDefaultsTo8(t *testing.T) {
 		t.Fatalf("ModuloFor = %d, want 128", m)
 	}
 }
+
+func TestXIDCommandGetsResponse(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	// Establish an incoming mod-128 link first.
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	rec.sent = nil
+
+	// Peer's XID command: modulo 128, SREJ single, N1 256, window 7.
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.XID {
+		t.Fatalf("sent = %+v, want one XID response", rec.sent)
+	}
+	got, err := ax25.ParseXID(rec.sent[0].Info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SREJ != ax25.SREJNone {
+		t.Errorf("SREJ = %v, want none (must suppress Direwolf SREJ)", got.SREJ)
+	}
+	if got.Modulo != 128 || got.IFieldLenRxBytes != 256 {
+		t.Errorf("params = %+v", got)
+	}
+	if got.WindowRx != 3 { // min(7, MaxWindow=3)
+		t.Errorf("window = %d, want 3", got.WindowRx)
+	}
+}
