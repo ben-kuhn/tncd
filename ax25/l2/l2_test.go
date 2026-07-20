@@ -200,3 +200,15 @@ func TestRemovedConnTimerIgnored(t *testing.T) {
 		t.Fatalf("stale T3 sent %d unexpected frame(s) after conn removed", got-framesBefore)
 	}
 }
+
+func TestModuloForDefaultsTo8(t *testing.T) {
+	tbl, _, _ := newHarness(1200)
+	if m := tbl.ModuloFor(0, "KU0HN-10", "N0CALL-2"); m != 8 {
+		t.Fatalf("ModuloFor with no conn = %d, want 8", m)
+	}
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	c.modulo = 128
+	if m := tbl.ModuloFor(0, "KU0HN-10", "N0CALL-2"); m != 128 {
+		t.Fatalf("ModuloFor = %d, want 128", m)
+	}
+}

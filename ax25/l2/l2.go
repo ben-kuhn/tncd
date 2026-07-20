@@ -386,11 +386,25 @@ func (t *Table) isLocal(port int, call string) bool {
 	return t.hooks.IsLocal(port, call)
 }
 
-// sendFrame is a helper that calls hooks.SendAX25.
+// sendFrame stamps the modulo on outgoing I/S frames (if not already set)
+// then calls hooks.SendAX25.
 func (t *Table) sendFrame(port int, f *ax25.Frame) {
+	if f.Modulo == 0 && (f.Type == ax25.I || f.Type.IsS()) {
+		f.Modulo = uint8(t.ModuloFor(port, f.Src.String(), f.Dst.String()))
+	}
 	if t.hooks.SendAX25 != nil {
 		t.hooks.SendAX25(port, f)
 	}
+}
+
+// ModuloFor returns the negotiated modulo (8 or 128) for the connection
+// addressed by (port, local, remote), or 8 if there is no such connection.
+// The bridge uses this to decode inbound I/S control fields at the right width.
+func (t *Table) ModuloFor(port int, local, remote string) int {
+	if c := t.Get(port, local, remote); c != nil {
+		return int(c.modulo)
+	}
+	return 8
 }
 
 // cmdFrame builds a command frame (dst C-bit=1, src C-bit=0).
@@ -548,6 +562,7 @@ func (t *Table) drainOutbound(c *Conn) {
 			Command: true,
 			PID:     pid,
 			Info:    chunk,
+			Modulo:  c.modulo,
 		}
 		for _, v := range c.Via {
 			a, _ := ax25.ParseAddress(v)
@@ -558,7 +573,7 @@ func (t *Table) drainOutbound(c *Conn) {
 		raw := f.Bytes()
 		c.retransmitBuf[ns] = raw
 		c.iframeTimestamps[ns] = t.clock.Now()
-		c.sendSeq = (ns + 1) % 8
+		c.sendSeq = (ns + 1) % c.modulo
 		c.unacked++
 		sentAny = true
 
@@ -576,7 +591,7 @@ func (t *Table) drainOutbound(c *Conn) {
 // Mirrors tncd.py:1581-1616.
 func (t *Table) ackFrames(c *Conn, nr uint8) {
 	pp := t.portParams(c.Port)
-	newlyAcked := (nr - c.lastAcked) % 8
+	newlyAcked := (nr - c.lastAcked) % c.modulo
 	// Guard: reject backwards N(R) (would appear as a large forward ACK).
 	if int(newlyAcked) > pp.MaxWindow {
 		return
@@ -596,14 +611,14 @@ func (t *Table) ackFrames(c *Conn, nr uint8) {
 			rtt := now.Sub(sendTime)
 			t.updateSRTT(c, rtt)
 		}
-		seq = (seq + 1) % 8
+		seq = (seq + 1) % c.modulo
 	}
 
 	// Purge retransmit buffer for ACKed sequence numbers.
 	seq = c.lastAcked
 	for i := uint8(0); i < newlyAcked; i++ {
 		delete(c.retransmitBuf, seq)
-		seq = (seq + 1) % 8
+		seq = (seq + 1) % c.modulo
 	}
 
 	c.lastAcked = nr
@@ -661,7 +676,7 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 			break
 		}
 		// Parse the stored frame to extract NS/PID/Info.
-		orig, err := ax25.Parse(raw)
+		orig, err := ax25.ParseModulo(raw, int(c.modulo))
 		if err != nil {
 			break
 		}
@@ -676,6 +691,7 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 			Command: true,
 			PID:     orig.PID,
 			Info:    orig.Info,
+			Modulo:  c.modulo,
 		}
 		for _, v := range c.Via {
 			a, _ := ax25.ParseAddress(v)
@@ -686,7 +702,7 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 		// Karn: discard RTT sample for retransmitted frames.
 		delete(c.iframeTimestamps, seq)
 		t.sendFrame(c.Port, f)
-		seq = (seq + 1) % 8
+		seq = (seq + 1) % c.modulo
 	}
 }
 
@@ -994,7 +1010,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 	expectedNS := c.recvSeq
 	if f.NS != expectedNS {
 		// Out-of-sequence or duplicate frame.
-		gap := (f.NS - expectedNS) % 8
+		gap := (f.NS - expectedNS) % c.modulo
 		if gap > 0 && int(gap) <= pp.MaxWindow {
 			// Gap within window: send REJ with V(R) = expected, echoing P/F.
 			// Mirrors tncd.py:1791-1805.
@@ -1017,7 +1033,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 
 	// In-sequence frame: advance V(R) and schedule delayed ACK.
 	// Mirrors tncd.py:1816-1832.
-	c.recvSeq = (f.NS + 1) % 8
+	c.recvSeq = (f.NS + 1) % c.modulo
 	if f.PF {
 		// Poll requires immediate response.
 		cancelT2(c)
