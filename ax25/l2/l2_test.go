@@ -357,3 +357,70 @@ func TestXIDCommandGetsResponse(t *testing.T) {
 		t.Errorf("window = %d, want 3", got.WindowRx)
 	}
 }
+
+// TestConnectResetsTriedFallback verifies that calling Connect on a reused Conn
+// resets triedFallback so that a fresh v2.2 attempt can still downgrade to SABM
+// if needed. getOrCreate returns the same Conn object on reconnect, so the reset
+// must happen inside Connect itself.
+func TestConnectResetsTriedFallback(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+
+	// First connect — sends SABME; force DM fallback so triedFallback becomes true.
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	tbl.OnFrame(0, mkFrame(ax25.DM, "N0CALL-2", "KU0HN-10", pf, resp))
+	if !c.triedFallback || c.modulo != 8 {
+		t.Fatalf("precondition: triedFallback=%v modulo=%d", c.triedFallback, c.modulo)
+	}
+
+	// Reconnect using the same (port, local, remote) — getOrCreate returns the
+	// same Conn. Connect must reset triedFallback and send SABME (not SABM).
+	rec.sent = nil
+	c2, err := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	if c2 != c {
+		t.Fatal("expected getOrCreate to return the same Conn object")
+	}
+	if c.triedFallback {
+		t.Error("triedFallback must be false after Connect (was not reset)")
+	}
+	if c.modulo != 128 {
+		t.Errorf("modulo = %d, want 128 (v2.2 port reset)", c.modulo)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.SABME {
+		t.Errorf("sent = %+v, want exactly one SABME after reconnect", rec.sent)
+	}
+}
+
+// TestIncomingSABMESuppressedOnOtherPort mirrors TestOverheardSABMOnOtherPortDropped
+// but for SABME: if (local, remote) already has a Connecting/Connected conn on
+// port 0, an incoming SABME for the same pair on port 1 must be silently dropped
+// (no UA, no DM, no conn created on port 1).
+func TestIncomingSABMESuppressedOnOtherPort(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setV22(tbl, 1)
+
+	// Establish mod-128 conn for (KU0HN-10, N0CALL-2) on port 0 via incoming SABME.
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	c0 := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c0 == nil || c0.State != Connected {
+		t.Fatalf("precondition: port-0 conn not Connected (got %+v)", c0)
+	}
+
+	// Record frame count after port-0 setup, then deliver SABME on port 1.
+	n := len(rec.sent)
+	tbl.OnFrame(1, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+
+	// No new frames must have been sent (no UA, no DM).
+	if len(rec.sent) != n {
+		t.Errorf("overheard SABME sent %d unexpected frame(s) on port 1: %+v",
+			len(rec.sent)-n, rec.sent[n:])
+	}
+	// No conn must have been created on port 1.
+	if tbl.Get(1, "KU0HN-10", "N0CALL-2") != nil {
+		t.Error("phantom connection created on port 1 for overheard SABME")
+	}
+}

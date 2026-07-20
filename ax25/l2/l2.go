@@ -457,7 +457,7 @@ func respFrame(dst, src string, via []string, typ ax25.FrameType, pf bool) *ax25
 	return f
 }
 
-// sendSABM sends a SABM P=1 command frame to the remote.
+// sendSABM sends a SABM P=1 (mod-8 connect) command frame to the remote.
 func (t *Table) sendSABM(c *Conn) {
 	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.SABM, true)
 	t.sendFrame(c.Port, f)
@@ -484,8 +484,10 @@ func (t *Table) fallbackToSABM(c *Conn) bool {
 }
 
 // Connect initiates an outgoing AX.25 connection (tncd.py:274-304).
-// Sends SABM P=1, sets state=Connecting, starts T1.
-// Returns an error if the connection table is full.
+// Sends SABME P=1 on AX.25 v2.2 ports, SABM P=1 on v2.0 ports.
+// Sets state=Connecting, starts T1. Returns an error if the connection table is full.
+// getOrCreate may return a reused Conn from a prior session; all relevant state
+// (including triedFallback) is reset so that a fresh v2.2 attempt starts clean.
 func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, error) {
 	c := t.getOrCreate(port, local, remote)
 	if c == nil {
@@ -495,6 +497,7 @@ func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, er
 	c.sendSeq = 0
 	c.recvSeq = 0
 	c.t1Polls = 0
+	c.triedFallback = false
 	c.Via = via
 	c.t1Value = t.portParams(port).T1
 
@@ -888,6 +891,14 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 // our registered callsigns; answering foreign SABMEs would transmit DM into
 // other stations' sessions on a shared channel.
 func (t *Table) dispatchSABME(port int, f *ax25.Frame, src, dst string) {
+	// Overheard-frame suppression: if this pair has a connection on a
+	// different port, silently drop (mirrors dispatchSABM logic).
+	for otherPort, c := range t.connsByPair(dst, src) {
+		if otherPort != port && (c.State == Connecting || c.State == Connected) {
+			return
+		}
+	}
+
 	if !t.isLocal(port, dst) {
 		return
 	}
