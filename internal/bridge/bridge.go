@@ -380,6 +380,7 @@ func (b *Bridge) Start() error {
 			b.cfg.AX25.N2Retry,
 			b.cfg.AX25.T3Timeout,
 		)
+		params[i].AX25Version = b.cfg.Ports[i].AX25Version
 	}
 
 	hooks := l2pkg.Hooks{

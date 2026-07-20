@@ -19,11 +19,12 @@ const ax25Overhead = 20
 // PortParams holds the T1/T2/T3 timing and window parameters for one port.
 // Derived from ota_baudrate via DeriveParams (tncd.py:1068-1087).
 type PortParams struct {
-	MaxWindow int
-	N2Retry   int
-	T1        time.Duration // max(3s, 2*(window*frameTime + 1s))
-	T2        time.Duration // max(100ms, 1.2*frameTime)
-	T3        time.Duration // 0 disables
+	MaxWindow   int
+	N2Retry     int
+	T1          time.Duration // max(3s, 2*(window*frameTime + 1s))
+	T2          time.Duration // max(100ms, 1.2*frameTime)
+	T3          time.Duration // 0 disables
+	AX25Version int           // 20 (mod-8 only) or 22 (attempt SABME/mod-128); default 20
 }
 
 // DeriveParams computes PortParams from the on-air baud rate and config.
