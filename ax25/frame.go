@@ -21,6 +21,7 @@ const (
 	DM
 	DISC
 	FRMR
+	XID
 )
 
 // IsI returns true for I-frames.
@@ -32,7 +33,7 @@ func (t FrameType) IsS() bool { return t == RR || t == RNR || t == REJ || t == S
 // IsU returns true for unnumbered frames.
 func (t FrameType) IsU() bool {
 	switch t {
-	case UI, SABM, SABME, UA, DM, DISC, FRMR:
+	case UI, SABM, SABME, UA, DM, DISC, FRMR, XID:
 		return true
 	}
 	return false
@@ -65,6 +66,8 @@ func (t FrameType) String() string {
 		return "DISC"
 	case FRMR:
 		return "FRMR"
+	case XID:
+		return "XID"
 	}
 	return "UNKNOWN"
 }
@@ -78,6 +81,7 @@ const (
 	dmBase    = 0x0F
 	uaBase    = 0x63
 	frmrBase  = 0x87
+	xidBase   = 0xAF
 )
 
 // Frame represents a parsed AX.25 frame.
@@ -233,16 +237,20 @@ func ParseModulo(raw []byte, modulo int) (*Frame, error) {
 			f.Type = UA
 		case frmrBase:
 			f.Type = FRMR
+		case xidBase:
+			f.Type = XID
 		default:
 			f.Type = UnknownType
 		}
-		// UI frames have PID + info
+		// UI frames have PID + info; XID carries info directly (no PID)
 		if f.Type == UI {
 			if pos >= len(raw) {
 				return nil, fmt.Errorf("ax25: UI frame too short for PID")
 			}
 			f.PID = raw[pos]
 			pos++
+			f.Info = raw[pos:]
+		} else if f.Type == XID {
 			f.Info = raw[pos:]
 		}
 	}
@@ -318,13 +326,18 @@ func (f *Frame) Bytes() []byte {
 			base = uaBase
 		case FRMR:
 			base = frmrBase
+		case XID:
+			base = xidBase
 		}
 		buf = append(buf, base|boolBit(f.PF)<<4)
 	}
 
-	// PID and Info for I and UI frames
+	// PID and Info for I and UI frames; XID carries info with no PID
 	if f.Type == I || f.Type == UI {
 		buf = append(buf, f.PID)
+		buf = append(buf, f.Info...)
+	}
+	if f.Type == XID {
 		buf = append(buf, f.Info...)
 	}
 
