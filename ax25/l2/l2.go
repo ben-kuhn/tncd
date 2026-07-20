@@ -452,6 +452,12 @@ func (t *Table) sendSABM(c *Conn) {
 	t.sendFrame(c.Port, f)
 }
 
+// sendSABME sends a SABME P=1 command frame to the remote (AX.25 v2.2 mod-128).
+func (t *Table) sendSABME(c *Conn) {
+	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.SABME, true)
+	t.sendFrame(c.Port, f)
+}
+
 // Connect initiates an outgoing AX.25 connection (tncd.py:274-304).
 // Sends SABM P=1, sets state=Connecting, starts T1.
 // Returns an error if the connection table is full.
@@ -467,7 +473,13 @@ func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, er
 	c.Via = via
 	c.t1Value = t.portParams(port).T1
 
-	t.sendSABM(c)
+	if t.portParams(port).AX25Version >= 22 {
+		c.modulo = 128
+		t.sendSABME(c)
+	} else {
+		c.modulo = 8
+		t.sendSABM(c)
+	}
 	t.startT1(c)
 	return c, nil
 }
@@ -841,7 +853,10 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 	}
 }
 
-// dispatchSABME handles SABME — reject with DM P=1 (tncd.py:1686-1695).
+// dispatchSABME handles SABME (tncd.py:1686-1695 for the DM-reject path;
+// extended here for AX.25 v2.2 accept).
+// On a 2.0-only port: reject with DM P=1 so the peer (e.g. Direwolf) retries SABM.
+// On a 2.2 port: accept with UA, set modulo=128, fire the Connected hook.
 // Like SABM/I/DISC, the response is gated on the destination being one of
 // our registered callsigns; answering foreign SABMEs would transmit DM into
 // other stations' sessions on a shared channel.
@@ -849,8 +864,33 @@ func (t *Table) dispatchSABME(port int, f *ax25.Frame, src, dst string) {
 	if !t.isLocal(port, dst) {
 		return
 	}
-	dm := respFrame(src, dst, nil, ax25.DM, true)
-	t.sendFrame(port, dm)
+	if t.portParams(port).AX25Version < 22 {
+		// 2.0-only port: reject; the peer (e.g. Direwolf) then retries SABM.
+		dm := respFrame(src, dst, nil, ax25.DM, true)
+		t.sendFrame(port, dm)
+		return
+	}
+	// Accept mod-128. Mirror dispatchSABM but set modulo = 128.
+	incomingVia := addrSliceToStrings(f.Via)
+	returnVia := reversed(incomingVia)
+	c := t.getOrCreate(port, dst, src)
+	if c == nil {
+		dm := respFrame(src, dst, returnVia, ax25.DM, f.PF)
+		t.sendFrame(port, dm)
+		return
+	}
+	ua := respFrame(src, dst, returnVia, ax25.UA, f.PF)
+	t.sendFrame(port, ua)
+	c.Via = returnVia
+	c.State = Connected
+	c.modulo = 128
+	c.resetSeqs()
+	c.t1 = cancelTimer(c.t1)
+	c.t2 = cancelTimer(c.t2)
+	c.t3 = cancelTimer(c.t3)
+	if t.hooks.Connected != nil {
+		t.hooks.Connected(c, true)
+	}
 }
 
 // dispatchUA handles incoming UA (tncd.py:1914-1944).

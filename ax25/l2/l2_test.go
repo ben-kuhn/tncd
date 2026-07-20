@@ -201,6 +201,46 @@ func TestRemovedConnTimerIgnored(t *testing.T) {
 	}
 }
 
+func setV22(tbl *Table, port int) {
+	tbl.params[port].AX25Version = 22
+}
+
+func TestConnectSendsSABMEOnV22(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	if c.modulo != 128 {
+		t.Fatalf("modulo = %d, want 128", c.modulo)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.SABME {
+		t.Fatalf("sent = %+v, want one SABME", rec.sent)
+	}
+}
+
+func TestIncomingSABMEAcceptedOnV22(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || c.State != Connected || c.modulo != 128 {
+		t.Fatalf("conn = %+v", c)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.UA {
+		t.Fatalf("sent = %+v, want UA", rec.sent)
+	}
+}
+
+func TestIncomingSABMERejectedOnV20(t *testing.T) {
+	tbl, rec, _ := newHarness(1200) // AX25Version stays 0 (== 2.0 only)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	if tbl.Get(0, "KU0HN-10", "N0CALL-2") != nil {
+		t.Fatal("no conn should be created on a 2.0 port")
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM {
+		t.Fatalf("sent = %+v, want DM", rec.sent)
+	}
+}
+
 func TestModuloForDefaultsTo8(t *testing.T) {
 	tbl, _, _ := newHarness(1200)
 	if m := tbl.ModuloFor(0, "KU0HN-10", "N0CALL-2"); m != 8 {
