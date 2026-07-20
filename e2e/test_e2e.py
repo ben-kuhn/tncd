@@ -206,11 +206,19 @@ def pw_configure_for_test():
     return original
 
 
-def pw_restore_settings(original):
-    """Restore PipeWire settings from saved values."""
-    for key, value in original.items():
+def pw_restore_settings(original=None):
+    """Reset PipeWire clock settings to the system defaults.
+
+    Deletes the runtime overrides applied by pw_configure_for_test() so
+    PipeWire falls back to its configured default.clock.* values.  We
+    deliberately do NOT replay a captured snapshot: replaying a snapshot
+    taken while the graph was already in a bad state would re-break audio.
+    ``original`` is accepted for backwards compatibility and ignored.
+    """
+    for key in ("clock.allowed-rates", "clock.quantum",
+                "clock.min-quantum", "clock.max-quantum"):
         subprocess.run(
-            ["pw-metadata", "-n", "settings", "0", key, value],
+            ["pw-metadata", "-n", "settings", "-d", "0", key],
             capture_output=True, timeout=5,
         )
 
