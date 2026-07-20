@@ -13,6 +13,7 @@ const (
 	RR
 	RNR
 	REJ
+	SREJ
 	UI
 	SABM
 	SABME
@@ -25,8 +26,8 @@ const (
 // IsI returns true for I-frames.
 func (t FrameType) IsI() bool { return t == I }
 
-// IsS returns true for supervisory frames (RR, RNR, REJ).
-func (t FrameType) IsS() bool { return t == RR || t == RNR || t == REJ }
+// IsS returns true for supervisory frames (RR, RNR, REJ, SREJ).
+func (t FrameType) IsS() bool { return t == RR || t == RNR || t == REJ || t == SREJ }
 
 // IsU returns true for unnumbered frames.
 func (t FrameType) IsU() bool {
@@ -48,6 +49,8 @@ func (t FrameType) String() string {
 		return "RNR"
 	case REJ:
 		return "REJ"
+	case SREJ:
+		return "SREJ"
 	case UI:
 		return "UI"
 	case SABM:
@@ -84,13 +87,21 @@ type Frame struct {
 	Type     FrameType
 	NR, NS   uint8 // mod-8; NS only for I, NR for I and S frames
 	PF       bool
-	Command  bool   // true = command (dst C-bit set), false = response
+	Modulo   uint8 // 8 (default/mod-8) or 128 (mod-128 extended I/S control)
+	Command  bool  // true = command (dst C-bit set), false = response
 	PID      uint8  // I and UI frames only
 	Info     []byte // I and UI frames only
 }
 
-// Parse decodes a raw AX.25 frame from wire bytes.
-func Parse(raw []byte) (*Frame, error) {
+// Parse decodes a raw AX.25 frame assuming mod-8 (1-byte I/S control).
+// For established mod-128 links, callers use ParseModulo(raw, 128).
+func Parse(raw []byte) (*Frame, error) { return ParseModulo(raw, 8) }
+
+// ParseModulo decodes a raw AX.25 frame. modulo selects the I/S control-field
+// width: 8 → 1 byte (classic), 128 → 2 bytes (extended). U-frames are
+// modulo-independent. Addresses and frame-type classification are always the
+// same regardless of modulo.
+func ParseModulo(raw []byte, modulo int) (*Frame, error) {
 	if len(raw) < 15 {
 		// Minimum: 7 (dst) + 7 (src) + 1 (control) = 15 bytes
 		return nil, fmt.Errorf("ax25: frame too short (%d bytes)", len(raw))
@@ -134,12 +145,13 @@ func Parse(raw []byte) (*Frame, error) {
 	}
 
 	ctl := raw[pos]
-	pos++
+	// Note: pos++ is NOT done here; each branch advances pos by the correct amount.
 
 	f := &Frame{
-		Dst: dst,
-		Src: src,
-		Via: via,
+		Dst:    dst,
+		Src:    src,
+		Via:    via,
+		Modulo: uint8(modulo),
 	}
 
 	// Derive Command from C/R bits
@@ -149,24 +161,47 @@ func Parse(raw []byte) (*Frame, error) {
 
 	// Decode frame type from control byte
 	if ctl&0x01 == 0 {
-		// I-frame: bit 0 = 0
+		// I-frame
 		f.Type = I
-		f.NS = (ctl >> 1) & 0x07
-		f.PF = (ctl & 0x10) != 0
-		f.NR = (ctl >> 5) & 0x07
-		// PID byte
+		if modulo == 128 {
+			if pos+1 >= len(raw) {
+				return nil, fmt.Errorf("ax25: extended I-frame too short for control")
+			}
+			ctl2 := raw[pos+1]
+			f.NS = (ctl >> 1) & 0x7F
+			f.PF = ctl2&0x01 != 0
+			f.NR = (ctl2 >> 1) & 0x7F
+			pos += 2
+		} else {
+			f.NS = (ctl >> 1) & 0x07
+			f.PF = ctl&0x10 != 0
+			f.NR = (ctl >> 5) & 0x07
+			pos++
+		}
 		if pos >= len(raw) {
 			return nil, fmt.Errorf("ax25: I-frame too short for PID")
 		}
 		f.PID = raw[pos]
 		pos++
-		// Info
 		f.Info = raw[pos:]
 	} else if ctl&0x03 == 0x01 {
-		// S-frame: bits 1:0 = 01
-		f.PF = (ctl & 0x10) != 0
-		f.NR = (ctl >> 5) & 0x07
-		sBits := (ctl >> 2) & 0x03
+		// S-frame
+		var sBits byte
+		if modulo == 128 {
+			if pos+1 >= len(raw) {
+				return nil, fmt.Errorf("ax25: extended S-frame too short for control")
+			}
+			ctl2 := raw[pos+1]
+			sBits = (ctl >> 2) & 0x03
+			f.PF = ctl2&0x01 != 0
+			f.NR = (ctl2 >> 1) & 0x7F
+			pos += 2
+		} else {
+			f.PF = ctl&0x10 != 0
+			f.NR = (ctl >> 5) & 0x07
+			sBits = (ctl >> 2) & 0x03
+			pos++
+		}
 		switch sBits {
 		case 0:
 			f.Type = RR
@@ -174,11 +209,12 @@ func Parse(raw []byte) (*Frame, error) {
 			f.Type = RNR
 		case 2:
 			f.Type = REJ
-		default:
-			f.Type = UnknownType
+		case 3:
+			f.Type = SREJ
 		}
 	} else {
 		// U-frame: bits 1:0 = 11
+		pos++
 		f.PF = (ctl & 0x10) != 0
 		// Mask out PF bit to get base opcode
 		base := ctl &^ uint8(0x10)
@@ -238,14 +274,16 @@ func (f *Frame) Bytes() []byte {
 		buf = append(buf, encoded[:]...)
 	}
 
-	// Control byte
-	var ctl byte
+	// Control byte(s)
 	switch {
 	case f.Type.IsI():
-		// I: NR<<5 | PF<<4 | NS<<1 | 0
-		ctl = f.NR<<5 | boolBit(f.PF)<<4 | f.NS<<1
+		if f.Modulo == 128 {
+			buf = append(buf, f.NS<<1)                 // bit0=0, NS in 7..1
+			buf = append(buf, f.NR<<1|boolBit(f.PF)) // NR in 7..1, PF bit0
+		} else {
+			buf = append(buf, f.NR<<5|boolBit(f.PF)<<4|f.NS<<1)
+		}
 	case f.Type.IsS():
-		// S: NR<<5 | PF<<4 | sBits<<2 | 0x01
 		var sBits byte
 		switch f.Type {
 		case RR:
@@ -254,10 +292,16 @@ func (f *Frame) Bytes() []byte {
 			sBits = 1
 		case REJ:
 			sBits = 2
+		case SREJ:
+			sBits = 3
 		}
-		ctl = f.NR<<5 | boolBit(f.PF)<<4 | sBits<<2 | 0x01
+		if f.Modulo == 128 {
+			buf = append(buf, sBits<<2|0x01)
+			buf = append(buf, f.NR<<1|boolBit(f.PF))
+		} else {
+			buf = append(buf, f.NR<<5|boolBit(f.PF)<<4|sBits<<2|0x01)
+		}
 	default:
-		// U: base | (PF<<4)
 		var base byte
 		switch f.Type {
 		case UI:
@@ -275,9 +319,8 @@ func (f *Frame) Bytes() []byte {
 		case FRMR:
 			base = frmrBase
 		}
-		ctl = base | boolBit(f.PF)<<4
+		buf = append(buf, base|boolBit(f.PF)<<4)
 	}
-	buf = append(buf, ctl)
 
 	// PID and Info for I and UI frames
 	if f.Type == I || f.Type == UI {
