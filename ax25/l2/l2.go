@@ -774,7 +774,7 @@ func (t *Table) OnFrame(port int, f *ax25.Frame) {
 		t.dispatchFRMR(port, f, src, dst)
 	case ax25.I:
 		t.dispatchI(port, f, src, dst)
-	case ax25.RR, ax25.RNR, ax25.REJ:
+	case ax25.RR, ax25.RNR, ax25.REJ, ax25.SREJ:
 		t.dispatchS(port, f, src, dst)
 	case ax25.XID:
 		t.dispatchXID(port, f, src, dst)
@@ -1141,6 +1141,31 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 
 	// 1. Process cumulative ACK (always first, per Python order).
 	t.ackFrames(c, f.NR)
+
+	// Single-SREJ (v2.2): ackFrames above already acked <= N(R)-1 and left
+	// frame N(R) in the retransmit buffer. Retransmit ONLY that frame — not
+	// go-back-N. (We never send SREJ ourselves; sending is phase 3.5.)
+	if f.Type == ax25.SREJ {
+		c.remoteBusy = false
+		if raw, ok := c.retransmitBuf[f.NR]; ok {
+			if orig, err := ax25.ParseModulo(raw, int(c.modulo)); err == nil {
+				rf := &ax25.Frame{
+					Dst: mustParseAddr(c.Remote), Src: mustParseAddr(c.Local),
+					Type: ax25.I, Modulo: c.modulo,
+					NS: orig.NS, NR: c.recvSeq, Command: true,
+					PID: orig.PID, Info: orig.Info,
+				}
+				for _, v := range c.Via {
+					a, _ := ax25.ParseAddress(v)
+					rf.Via = append(rf.Via, a)
+				}
+				c.retransmitBuf[f.NR] = rf.Bytes()
+				delete(c.iframeTimestamps, f.NR) // Karn: no RTT sample on retransmit
+				t.sendFrame(c.Port, rf)
+			}
+		}
+		return // SREJ has no REJ/RR busy semantics beyond the above
+	}
 
 	// 2. RNR/RR busy-flag update.
 	switch f.Type {

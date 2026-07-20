@@ -296,6 +296,37 @@ func TestModuloForDefaultsTo8(t *testing.T) {
 	}
 }
 
+func TestReceivedSREJRetransmitsOneFrame(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	tbl.params[0].MaxWindow = 7 // ensure all 4 I-frames transmit before SREJ arrives
+	// Establish outgoing mod-128 link.
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // SABME
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	rec.sent = nil
+
+	// Queue 4 I-frames (N(S) 0..3).
+	for i := 0; i < 4; i++ {
+		tbl.SendData(c, 0xF0, []byte{byte('A' + i)})
+	}
+	rec.sent = nil
+
+	// Peer SREJs frame 1: acks 0, requests only 1.
+	srej := mkFrame(ax25.SREJ, "N0CALL-2", "KU0HN-10", resp, nr(1))
+	tbl.OnFrame(0, srej)
+
+	// Exactly one I-frame retransmitted, and it is N(S)=1.
+	var iframes []*ax25.Frame
+	for _, f := range rec.sent {
+		if f.Type == ax25.I {
+			iframes = append(iframes, f)
+		}
+	}
+	if len(iframes) != 1 || iframes[0].NS != 1 {
+		t.Fatalf("SREJ retransmit = %d frames, first NS=%v; want exactly frame 1", len(iframes), iframes)
+	}
+}
+
 func TestXIDCommandGetsResponse(t *testing.T) {
 	tbl, rec, _ := newHarness(1200)
 	setV22(tbl, 0)
