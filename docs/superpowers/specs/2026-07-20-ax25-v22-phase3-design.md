@@ -61,20 +61,35 @@ Verified in `ax25_link.c`:
 
 ## 1. Mode selection & fallback
 
-`Conn` gains `modulo uint8` (8 or 128) and `triedFallback bool`.
+`Conn` gains `modulo uint8` (8 or 128) and `triedFallback bool`. We **replicate
+Direwolf's retry scheme exactly** (`ax25_link.c` `t1_expiry`, `dm_frame`,
+`frmr_frame`; verified 1.8.1 behavior).
+
+**Retry budget.** `maxV22 = N2Retry / 3` (integer division), matching Direwolf's
+`maxv22 = AX25_N2_RETRY_DEFAULT / 3` (`config.c:905`). At our default
+`N2Retry = 10` this is **3** — three SABMEs are transmitted before the timeout
+fallback. The first SABME is transmission try 1 (Direwolf `establish_data_link`
+does `SET_RC(1)` then sends). `maxV22 == 0` means "v2.0 only" and is handled at
+`Connect` time (never send SABME), mirroring Direwolf's `maxv22 == 0` guard.
 
 **Outgoing `Connect` on a 2.2 port:** send `SABME`, `state = Connecting`,
-`modulo = 128`. Fallback (→ resend `SABM`, `modulo = 8`, `triedFallback = true`,
-reset poll counter):
+`modulo = 128`, `triedFallback = false`. Fallback (→ `modulo = 8`,
+`triedFallback = true`, resend as `SABM`):
 
-- `DM` while Connecting-extended (`dispatchDM`) — mod-8-only peer rejecting SABME.
-- `FRMR` while Connecting-extended (`dispatchFRMR`).
-- T1/N2 exhaustion while Connecting-extended (`t1Expired`) — peer silently
-  dropping SABME. One SABM budget follows, *then* `FailTimeout`.
+- `DM` (F=1) while Connecting-extended (`dispatchDM`) — **immediate** fallback.
+  Direwolf found real TNCs (KPC-3+) answer an un-understood SABME with DM rather
+  than FRMR, so this is the common old-peer path (`ax25_link.c:4559`).
+- `FRMR` while Connecting-extended (`dispatchFRMR`) — **immediate** fallback
+  (`ax25_link.c:4841`, `set_version_2_0`).
+- T1 timeout (`t1Expired`): on each expiry the poll counter increments; when it
+  reaches `maxV22`, switch to `modulo = 8` and continue the *same* retry budget
+  as `SABM` (do **not** reset the counter — Direwolf keeps `rc` running). Give
+  up with `FailTimeout` when the counter reaches `N2Retry` (10 total tries: 3
+  SABME + 7 SABM at defaults).
 
-`triedFallback` prevents a second downgrade loop; once mod-8 is in play the
-existing mod-8 give-up path applies. On a 2.0 port `Connect` is unchanged
-(`SABM`, `modulo = 8`).
+`triedFallback` prevents a second downgrade loop. Exact per-expiry counts are
+pinned by tests asserting the SABME→SABM transition at try 3 and give-up at try
+10. On a 2.0 port `Connect` is unchanged (`SABM`, `modulo = 8`).
 
 **Incoming:**
 
@@ -119,10 +134,12 @@ raw bytes with `c.modulo` (the buffer was encoded at that modulo).
 - Replace every hardcoded `% 8` (send/recv seq advance, `newlyAcked`, ack loop,
   out-of-sequence gap calc, retransmit walk) with `% c.modulo`. Maps keyed by
   `uint8` already hold 0–127; `retransmitBuf` / `iframeTimestamps` unchanged.
-- Window: mod-128 lifts the cap from 7 to 127, but the **baud-derived
-  `MaxWindow` default is unchanged** — slow links keep small windows; we do not
-  inflate. The backwards-N(R) guard (`newlyAcked > MaxWindow`) is correct as-is
-  under either modulo.
+- Window: the `MaxWindow` config clamp becomes modulo-aware — `1..7` for mod-8
+  (unchanged), `1..63` for mod-128 (matching Direwolf's `AX25_K_MAXFRAME_
+  EXTENDED_MAX = 63`, restricted below the theoretical 127). The **default is
+  unchanged at 3** — slow links keep small windows; we do not inflate. The
+  backwards-N(R) guard (`newlyAcked > MaxWindow`) is correct as-is under either
+  modulo.
 - Fallback bookkeeping (`modulo`, `triedFallback`) branches in `dispatchDM`,
   `dispatchFRMR`, `t1Expired`, and mode-selects in `Connect` / `dispatchSABME`.
 
@@ -143,15 +160,19 @@ Direwolf** on the bench.
 - Act only on an XID **command, P=1**, addressed to us (`IsLocal`) for an
   existing connection. An XID **response** is unexpected (we never initiate) →
   log and ignore.
-- **Min-negotiate** against our capabilities: `window = min(theirs, ours)`,
-  `N1 = min(theirs, ours)`, `modulo` = ours (128), **SREJ = none** (never
-  advertise → Direwolf keeps SREJ off), full-duplex = off. Apply the negotiated
-  window / N1 to the conn.
+- **Min-negotiate** against our capabilities, replicating Direwolf's
+  `negotiation_response` ("take the minimum of what he wants and what I can do"):
+  `window = min(theirs, ours)`, `N1 = min(theirs, ours)`, `modulo` = ours (128),
+  **SREJ = none** (never advertise → Direwolf keeps SREJ off), full-duplex = off.
+  Apply the negotiated window / N1 to the conn.
 - Send an `XID` **response, F=1** carrying the negotiated params.
 
-We never initiate XID. As initiator to Direwolf, sending no XID leaves Direwolf
-on its configured defaults, which interoperates as long as our N1 / window ≤ its
-max — which holds for our small defaults.
+**Our advertised values equal Direwolf's defaults**, so with default Direwolf the
+negotiation is a no-op: N1 = **256 bytes** (Direwolf `AX25_N1_PACLEN_DEFAULT =
+256` — identical to our existing 256-byte info default), window = our config
+default **3** (`min(3, Direwolf's extended default 32) = 3`), SREJ off. We never
+initiate XID; as initiator to Direwolf, sending none leaves Direwolf on its
+defaults, which interoperates as long as our N1 / window ≤ its max — which holds.
 
 ## 5. Config & CLI
 
@@ -181,9 +202,11 @@ existing Direwolf harness; the documented machine-specific `TestMultiPort`
 PipeWire flake remains out of scope.
 
 **OTA gate:** **tncd ↔ Direwolf over real radios**, mod-128 Winlink-style
-connected round-trip. Recorded in a new `docs/superpowers/specs/
-phase3-ota-checklist.md`. This is the bench task and the phase exit criterion —
-the implementation plan ends here, not at a tag.
+connected round-trip, using **one TNC** (a single radio/interface on the tncd
+side is sufficient — v2.2 is host-side, so proving it on one TNC proves it for
+all; the full hardware matrix is phase 4's job, not phase 3's). Recorded in a
+new `docs/superpowers/specs/phase3-ota-checklist.md`. This is the bench task and
+the phase exit criterion — the implementation plan ends here, not at a tag.
 
 ## Sequencing
 
