@@ -129,6 +129,7 @@ func makeBridge(t *testing.T, eng *engine.Engine, fp *fakePort) *Bridge {
 
 	// Wire L2 manually (skip real Start to avoid serial open).
 	params := []l2pkg.PortParams{l2pkg.DeriveParams(1200, 3, 10, 0)}
+	params[0].AX25Version = 22 // enable v2.2 so mod-128 SABME is accepted in tests
 	hooks := l2pkg.Hooks{
 		SendAX25: func(port int, f *ax25.Frame) {
 			b.SendAX25(port, f)
@@ -545,5 +546,47 @@ func TestForeignSABMNoUA(t *testing.T) {
 	// No UA (and no DM) must have been sent — W0NE-10 is not our callsign.
 	if got := fp.getSent(); len(got) != 0 {
 		t.Fatalf("foreign SABM: port sent %d frame(s), want 0", len(got))
+	}
+}
+
+// TestOnKISSFrameDecodesExtendedI verifies the two-stage RX decode: when a
+// mod-128 connection is established via SABME, incoming extended I-frames
+// (2-byte control field) are re-parsed at modulo 128 so the second control
+// byte is not misread as the PID.
+func TestOnKISSFrameDecodesExtendedI(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	var b *Bridge
+	onLoop(t, eng, func() { b = makeBridge(t, eng, fp) })
+
+	clientA := newFakeClient(false, "KU0HN-10")
+	onLoop(t, eng, func() { b.AddClient(clientA) })
+
+	// Incoming SABME establishes a mod-128 connection owned by clientA.
+	sabme := &ax25.Frame{Src: mustAddr("N0CALL-2"), Dst: mustAddr("KU0HN-10"), Type: ax25.SABME, PF: true, Command: true}
+	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: sabme.Bytes()}) })
+
+	// Extended I-frame (2-byte control), N(S)=0 in sequence, carrying "hello".
+	iframe := &ax25.Frame{
+		Src: mustAddr("N0CALL-2"), Dst: mustAddr("KU0HN-10"),
+		Type: ax25.I, Modulo: 128, NS: 0, NR: 0, Command: true,
+		PID: 0xF0, Info: []byte("hello"),
+	}
+	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: iframe.Bytes()}) })
+
+	// clientA should receive a 'D' data frame with exactly "hello".
+	// (Without the two-stage fix, the mod-8 parse misreads the 2nd control byte
+	// as PID and delivers "\xf0hello".)
+	var gotData string
+	for _, s := range clientA.getSent() {
+		if s.kind == 'D' {
+			gotData = string(s.data)
+		}
+	}
+	if gotData != "hello" {
+		t.Fatalf("delivered data = %q, want %q", gotData, "hello")
 	}
 }
