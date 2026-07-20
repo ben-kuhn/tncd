@@ -411,8 +411,13 @@ def direwolf_pair(tmp_path, request):
 
 
 def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
-                      kiss_port=None, kiss_device=None, callsign="N0CALL-1"):
-    """Write a tncd INI configuration file."""
+                      kiss_port=None, kiss_device=None, callsign="N0CALL-1",
+                      ax25_version=None):
+    """Write a tncd INI configuration file.
+
+    ax25_version: if "2.0" or "2.2", adds ``ax25_version = <value>`` to the
+    [client] section.  Omitted (None) leaves tncd at its compiled default.
+    """
     lines = [
         "[server]",
         "listen_host = 127.0.0.1",
@@ -428,6 +433,8 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
     elif kiss_type == "serial":
         lines.append(f"device = {kiss_device}")
         lines.append("serial_baudrate = 9600")
+    if ax25_version is not None:
+        lines.append(f"ax25_version = {ax25_version}")
     lines.extend([
         "",
         "[kiss]",
