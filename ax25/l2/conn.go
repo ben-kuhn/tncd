@@ -74,6 +74,9 @@ type Conn struct {
 	lastRRTime time.Time
 	lastRRNR   uint8
 
+	// v2.2 fallback state
+	triedFallback bool // true once a v2.2 connect has downgraded to mod-8
+
 	// Karn RTT estimation (Task 9)
 	srtt   time.Duration
 	rttvar time.Duration

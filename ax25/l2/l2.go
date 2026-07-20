@@ -310,9 +310,16 @@ func (t *Table) t1Expired(c *Conn) {
 	pp := t.portParams(c.Port)
 
 	if c.State == Connecting {
-		// SABM retransmission while waiting for UA (AX.25 6.3.1)
+		// SABM/SABME retransmission while waiting for UA (AX.25 6.3.1)
 		// tncd.py:1512-1539
 		c.t1Polls++
+		maxV22 := pp.N2Retry / 3
+		if c.modulo == 128 && !c.triedFallback && c.t1Polls >= maxV22 {
+			// Direwolf MAXV22 hack: after maxV22 SABMEs, continue as SABM
+			// without resetting the retry counter.
+			c.modulo = 8
+			c.triedFallback = true
+		}
 		if c.t1Polls > pp.N2Retry {
 			// N2 exhausted — give up
 			c.State = Disconnected
@@ -322,7 +329,7 @@ func (t *Table) t1Expired(c *Conn) {
 			t.removeConn(c)
 			return
 		}
-		// Retransmit SABM with exponential backoff (Karn, tncd.py:1536-1538).
+		// Retransmit with exponential backoff (Karn, tncd.py:1536-1538).
 		if c.t1Value > 0 {
 			c.t1Value *= 2
 			const t1Ceil = 60 * time.Second
@@ -330,7 +337,11 @@ func (t *Table) t1Expired(c *Conn) {
 				c.t1Value = t1Ceil
 			}
 		}
-		t.sendSABM(c)
+		if c.modulo == 128 {
+			t.sendSABME(c)
+		} else {
+			t.sendSABM(c)
+		}
 		t.startT1(c)
 		return
 	}
@@ -456,6 +467,20 @@ func (t *Table) sendSABM(c *Conn) {
 func (t *Table) sendSABME(c *Conn) {
 	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.SABME, true)
 	t.sendFrame(c.Port, f)
+}
+
+// fallbackToSABM downgrades a still-connecting mod-128 attempt to mod-8 and
+// resends SABM. Mirrors Direwolf set_version_2_0 + resend. Returns true if a
+// downgrade happened.
+func (t *Table) fallbackToSABM(c *Conn) bool {
+	if c.modulo != 128 || c.triedFallback {
+		return false
+	}
+	c.modulo = 8
+	c.triedFallback = true
+	t.sendSABM(c)
+	t.startT1(c)
+	return true
 }
 
 // Connect initiates an outgoing AX.25 connection (tncd.py:274-304).
@@ -928,6 +953,10 @@ func (t *Table) dispatchDM(port int, f *ax25.Frame, src, dst string) {
 	if c == nil {
 		return
 	}
+	if c.State == Connecting && c.modulo == 128 && !c.triedFallback {
+		t.fallbackToSABM(c)
+		return
+	}
 	if c.State == Connecting {
 		if t.hooks.ConnectFailed != nil {
 			t.hooks.ConnectFailed(c, FailDM)
@@ -978,6 +1007,10 @@ func (t *Table) dispatchDISC(port int, f *ax25.Frame, src, dst string) {
 // Resets the connection and sends a fresh SABM.
 func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	c := t.Get(port, dst, src)
+	if c != nil && c.State == Connecting && c.modulo == 128 && !c.triedFallback {
+		t.fallbackToSABM(c)
+		return
+	}
 	if c == nil || c.State != Connected {
 		return
 	}

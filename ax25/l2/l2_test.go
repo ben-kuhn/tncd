@@ -241,6 +241,49 @@ func TestIncomingSABMERejectedOnV20(t *testing.T) {
 	}
 }
 
+func TestFallbackOnDM(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // sends SABME
+	tbl.OnFrame(0, mkFrame(ax25.DM, "N0CALL-2", "KU0HN-10", pf, resp))
+	if c.State != Connecting || c.modulo != 8 || !c.triedFallback {
+		t.Fatalf("after DM: state=%v modulo=%d triedFallback=%v", c.State, c.modulo, c.triedFallback)
+	}
+	// Last sent frame is a SABM (the fallback).
+	last := rec.sent[len(rec.sent)-1]
+	if last.Type != ax25.SABM {
+		t.Fatalf("fallback frame = %s, want SABM", last.Type)
+	}
+}
+
+func TestFallbackOnTimeoutAtMaxV22(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	setV22(tbl, 0)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // SABME #1
+	// N2Retry=10 → maxV22=3. Expiries 1,2 resend SABME; expiry 3 downgrades.
+	for i := 0; i < 3; i++ {
+		clk.advance(65 * time.Second) // exceed T1 (with backoff)
+	}
+	if c.modulo != 8 {
+		t.Fatalf("modulo = %d after 3 timeouts, want 8", c.modulo)
+	}
+	sabmeCount, sabmCount := 0, 0
+	for _, f := range rec.sent {
+		switch f.Type {
+		case ax25.SABME:
+			sabmeCount++
+		case ax25.SABM:
+			sabmCount++
+		}
+	}
+	if sabmeCount != 3 {
+		t.Fatalf("SABME count = %d, want 3", sabmeCount)
+	}
+	if sabmCount < 1 {
+		t.Fatalf("expected at least one SABM after fallback")
+	}
+}
+
 func TestModuloForDefaultsTo8(t *testing.T) {
 	tbl, _, _ := newHarness(1200)
 	if m := tbl.ModuloFor(0, "KU0HN-10", "N0CALL-2"); m != 8 {
