@@ -28,12 +28,24 @@ In scope:
   window up to 127).
 - Auto-fallback SABME → SABM / mod-128 → mod-8 on DM, FRMR, or T1/N2 timeout.
 - Passive XID: respond to an XID command with a min-negotiated XID response;
-  never initiate XID. SREJ negotiated off in both directions.
+  never initiate XID. We advertise **SREJ off** (`srej_none`), which is what
+  suppresses Direwolf's default-on single-SREJ (see below).
+- **Tolerate received single-SREJ** (interop robustness): decode incoming SREJ
+  S-frames and honor them by retransmitting the specifically requested frame.
+  We never *send* SREJ and never buffer out-of-order frames — that is phase 3.5.
 - Per-port `ax25_version = 2.0 | 2.2` config, default `2.2`.
 
-Explicit non-goals (YAGNI):
+Explicit non-goals — **deferred to phase 3.5** (full selective-repeat; its own
+spec/plan/OTA gate):
 
-- SREJ / selective reject (negotiated off both ways).
+- **Sending** SREJ + the receive-side reassembly buffer (`rxdata_by_ns`-style
+  out-of-order buffering and in-order delivery). This is the part that speeds up
+  the Winlink *download* direction (remote→tncd, where tncd is the receiver) and
+  is the highest-risk change to `dispatchI`; it is intentionally split out.
+- Multi-SREJ (info-field form) and XID up-negotiation of `srej_multi`.
+
+Explicit non-goals — YAGNI (not planned):
+
 - XID **initiation** (we only respond).
 - TEST-frame handling.
 - Per-peer version / noxid config lists (fallback covers old peers).
@@ -52,9 +64,15 @@ Verified in `ax25_link.c`:
 - **XID responder rule:** "take the minimum of what he wants and what I can do,
   adjust my working configuration and send it back" (`5010-5022`,
   `xid_frame` → `negotiation_response`).
-- **SREJ stays off unless both sides advertise it** (`3124`); an XID response
-  that omits SREJ keeps the link at REJ-only, which is what we require since we
-  do not implement SREJ.
+- **SREJ defaults ON for v2.2.** `srej_enable` *"starts out as `srej_none` for
+  v2.0 or `srej_single` for v2.2"* (`ax25_link.c:273-275`); Direwolf implements
+  the full receiver side (`rxdata_by_ns[128]`, `2713-2729`). XID is how it gets
+  negotiated *off* (to `srej_none`) or *up* (to `srej_multi`); negotiation keeps
+  the lower value. So **our XID response advertising `srej_none` is what turns
+  Direwolf's SREJ off** when Direwolf connects to us. In the reverse case (tncd
+  initiates, sends no XID), Direwolf's answerer keeps `srej_single` and may send
+  us an SREJ on loss — which is why phase 3 decodes and honors a received
+  single-SREJ rather than dropping it.
 - **Old-peer handling:** a pre-2.2 station DMs the SABME or FRMRs the XID; the
   initiator then uses v2.0 (`4704-4708`). This is what our fallback consumes
   from the *initiator* side and produces from the *answerer* side.
@@ -107,6 +125,12 @@ modulo-independent. Extended layout: control byte 1 carries N(S)/S-bits + the
 type bit (identical low bits to mod-8, so I/S/U classification is
 modulo-independent); control byte 2 carries `N(R)<<1 | PF`.
 
+Add the fourth supervisory type **`SREJ`** (`SS = 11`) to `ax25.FrameType` and
+the S-frame parse/encode (both moduli). Today the codec maps `SS = 11` to
+`UnknownType` and the engine silently drops it; phase 3 decodes it so a received
+single-SREJ can be honored (§3). We only ever *decode* SREJ in phase 3; encoding
+it is phase 3.5.
+
 **Encode:** add `Frame.Modulo uint8`. `Bytes()` emits the 2-byte control for
 I/S when `Modulo == 128` (else 1 byte, exactly as today). The l2 engine stamps
 `f.Modulo = c.modulo` on every I/S/S-frame it builds.
@@ -142,6 +166,14 @@ raw bytes with `c.modulo` (the buffer was encoded at that modulo).
   modulo.
 - Fallback bookkeeping (`modulo`, `triedFallback`) branches in `dispatchDM`,
   `dispatchFRMR`, `t1Expired`, and mode-selects in `Connect` / `dispatchSABME`.
+- **Received single-SREJ** (`dispatchS`): per AX.25 2.2, `SREJ N(R)=k`
+  acknowledges I-frames **up through k−1** and requests retransmission of
+  **only** frame k. So: `ackFrames(c, k)` (which purges ≤ k−1 and leaves k in
+  `retransmitBuf`), then retransmit exactly frame k (reusing the single-frame
+  send path, **not** `retransmitFrom`'s go-back-N walk), then honor P/F like any
+  S-frame. This path is only exercised in the tncd-initiates-no-XID case; when we
+  answer XID we advertise `srej_none` and Direwolf sends REJ instead. Sending
+  SREJ and out-of-order receive buffering are phase 3.5.
 
 ## 4. XID — passive responder
 
@@ -193,7 +225,9 @@ error. Update `example.go` (commented default) and `tncd genconfig` output. No
   - fallback on DM; fallback on FRMR; fallback on T1/N2 timeout-exhaustion;
   - incoming SABME accepted on a 2.2 port;
   - incoming SABME → DM on a 2.0-only port;
-  - mod-128 sequence advance wrapping past 7 (e.g. N(S) 6 → 7 → 8 … 127 → 0).
+  - mod-128 sequence advance wrapping past 7 (e.g. N(S) 6 → 7 → 8 … 127 → 0);
+  - received single-SREJ acks ≤ k−1 and retransmits exactly frame k (no
+    go-back-N of later frames).
 
 **E2E (`e2e/`):** new test — Direwolf in default v2.2 mode over the existing
 PipeWire audio cross-link, connected-mode data round-trip to tncd, asserting
@@ -214,6 +248,14 @@ The umbrella placed phases on `v2-go-port`, but that branch already merged to
 `main` (73868e9). Phase 3 branches from `main` as `feature/ax25-v22` and merges
 back with `--no-ff` once unit + e2e + OTA all pass. No version bump or tag: v2.2
 rides to the eventual v2.0.0 tag in phase 4, per the umbrella.
+
+**Phase 3.5 (full SREJ)** follows immediately as its own spec + plan + OTA gate,
+branching from `main` after phase 3 merges: adds SREJ *sending* + the
+receive-side out-of-order reassembly buffer + in-order delivery (and optionally
+multi-SREJ via XID up-negotiation). It is the selective-repeat throughput win
+for the Winlink download direction, split out because it is the highest-risk
+change to `dispatchI` and independently benchable. Phase 3 lays the groundwork it
+needs: the `SREJ` frame type, mod-128 codec, and single-SREJ retransmit path.
 
 ## Exit criteria
 
