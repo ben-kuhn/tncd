@@ -158,12 +158,20 @@ raw bytes with `c.modulo` (the buffer was encoded at that modulo).
 - Replace every hardcoded `% 8` (send/recv seq advance, `newlyAcked`, ack loop,
   out-of-sequence gap calc, retransmit walk) with `% c.modulo`. Maps keyed by
   `uint8` already hold 0–127; `retransmitBuf` / `iframeTimestamps` unchanged.
-- Window: the `MaxWindow` config clamp becomes modulo-aware — `1..7` for mod-8
-  (unchanged), `1..63` for mod-128 (matching Direwolf's `AX25_K_MAXFRAME_
-  EXTENDED_MAX = 63`, restricted below the theoretical 127). The **default is
-  unchanged at 3** — slow links keep small windows; we do not inflate. The
-  backwards-N(R) guard (`newlyAcked > MaxWindow`) is correct as-is under either
-  modulo.
+- Window: the **`MaxWindow` clamp stays at `1..7`** (the existing global
+  `[ax25]` clamp in `internal/config/config.go`), and the **default is unchanged
+  at 3**. A modulo-aware clamp (`1..63` for mod-128, per Direwolf's
+  `AX25_K_MAXFRAME_EXTENDED_MAX = 63`) plus per-port window config is
+  **deferred** — it has no benefit at ham baud rates, where small windows are
+  correct, and mod-128's value here is the extended sequence space and (in
+  phase 3.5) selective repeat, not a larger window. Keeping the conservative
+  `1..7` clamp means a mod-128 link simply uses a window ≤ 7; the backwards-N(R)
+  guard (`newlyAcked > MaxWindow`) is correct as-is under either modulo. Revisit
+  in phase 3.5 if a wider window is ever wanted.
+  *(Reconciliation note, 2026-07-20: the original draft claimed a modulo-aware
+  `1..63` clamp; the implementation and this spec now agree on the conservative
+  `1..7` — the whole-branch review flagged the spec-vs-code gap and this is the
+  chosen resolution.)*
 - Fallback bookkeeping (`modulo`, `triedFallback`) branches in `dispatchDM`,
   `dispatchFRMR`, `t1Expired`, and mode-selects in `Connect` / `dispatchSABME`.
 - **Received single-SREJ** (`dispatchS`): per AX.25 2.2, `SREJ N(R)=k`
