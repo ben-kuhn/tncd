@@ -1101,6 +1101,57 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 
 	pp := t.portParams(port)
 	expectedNS := c.recvSeq
+
+	if c.srejEnabled {
+		gap := (f.NS - expectedNS) % c.modulo
+		if gap > 0 {
+			if int(gap) > pp.MaxWindow {
+				// Outside window (or old duplicate): discard; honor a poll.
+				if f.PF {
+					cancelT2(c)
+					t.sendRRGuarded(c, src, dst)
+				} else {
+					t.scheduleT2(c, src, dst)
+				}
+				return
+			}
+			// In-window, ahead of V(R): buffer (copy — f.Info may alias) and
+			// request every not-yet-requested hole in [V(R), N(S)).
+			c.rxBuf[f.NS] = rxEntry{pid: f.PID, info: append([]byte(nil), f.Info...)}
+			delete(c.srejSent, f.NS) // it arrived
+			cancelT2(c)
+			t.sendSREJHoles(c, src, dst, f.NS)
+			return
+		}
+		// gap == 0: in sequence. Deliver, then flush contiguous buffered frames.
+		delete(c.srejSent, f.NS)
+		t.deliverData(c, f.PID, f.Info)
+		c.recvSeq = (f.NS + 1) % c.modulo
+		for {
+			e, ok := c.rxBuf[c.recvSeq]
+			if !ok {
+				break
+			}
+			delete(c.rxBuf, c.recvSeq)
+			delete(c.srejSent, c.recvSeq)
+			t.deliverData(c, e.pid, e.info)
+			c.recvSeq = (c.recvSeq + 1) % c.modulo
+		}
+		// No SREJ needed here: every hole below a still-buffered frame was
+		// already requested when that frame arrived (recvSeq only advances, so
+		// srejSent still covers it). Re-scanning to recvSeq+window would wrongly
+		// SREJ trailing slots the sender has not transmitted.
+		// Acknowledge the advanced V(R).
+		if f.PF {
+			cancelT2(c)
+			t.sendRRGuarded(c, src, dst)
+		} else {
+			t.scheduleT2(c, src, dst)
+		}
+		return
+	}
+
+	// --- SREJ not enabled: existing phase-3 REJ / go-back-N path (unchanged) ---
 	if f.NS != expectedNS {
 		// Out-of-sequence or duplicate frame.
 		gap := (f.NS - expectedNS) % c.modulo
@@ -1123,25 +1174,52 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 		}
 		return
 	}
-
-	// In-sequence frame: advance V(R) and schedule delayed ACK.
-	// Mirrors tncd.py:1816-1832.
 	c.recvSeq = (f.NS + 1) % c.modulo
 	if f.PF {
-		// Poll requires immediate response.
 		cancelT2(c)
 		t.sendRRGuarded(c, src, dst)
 	} else {
-		// Delay the RR to batch-acknowledge a burst.
 		t.scheduleT2(c, src, dst)
 	}
-	// Deliver data to connection owner.
 	if t.hooks.Data != nil {
 		data := f.Info
 		if data == nil {
 			data = []byte{}
 		}
 		t.hooks.Data(c, f.PID, data)
+	}
+}
+
+// deliverData hands an in-sequence payload to the connection owner.
+func (t *Table) deliverData(c *Conn, pid uint8, info []byte) {
+	if t.hooks.Data == nil {
+		return
+	}
+	if info == nil {
+		info = []byte{}
+	}
+	t.hooks.Data(c, pid, info)
+}
+
+// sendSREJHoles sends a single SREJ (response) for each missing sequence number
+// in [V(R), upto) that is not buffered and not already requested, recording each
+// in srejSent (dedup). F=1 only on the SREJ for V(R) itself (also acknowledges).
+func (t *Table) sendSREJHoles(c *Conn, src, dst string, upto uint8) {
+	for i := 0; i < int(c.modulo); i++ { // bound defends against a bad upto
+		ns := (c.recvSeq + uint8(i)) % c.modulo
+		if ns == upto {
+			break
+		}
+		if _, buffered := c.rxBuf[ns]; buffered {
+			continue
+		}
+		if c.srejSent[ns] {
+			continue
+		}
+		srej := respFrame(src, dst, c.Via, ax25.SREJ, ns == c.recvSeq) // F=1 iff V(R)
+		srej.NR = ns
+		c.srejSent[ns] = true
+		t.sendFrame(c.Port, srej)
 	}
 }
 
