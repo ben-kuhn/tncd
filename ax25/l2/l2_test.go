@@ -461,6 +461,60 @@ func TestXIDAnswererSREJOffConfig(t *testing.T) {
 	}
 }
 
+func TestInitiatorSendsXIDOnConnect(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // sends SABME
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp)) // connect confirmed
+	// After UA, tncd should send an XID command advertising SREJSingle.
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.XID || !rec.sent[0].Command {
+		t.Fatalf("want one XID command, got %+v", rec.sent)
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJSingle {
+		t.Errorf("XID cmd SREJ = %v, want SREJSingle", got.SREJ)
+	}
+	if c.srejEnabled {
+		t.Errorf("srejEnabled true before response; want false until response arrives")
+	}
+}
+
+func TestInitiatorEnablesSREJOnXIDResponse(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	rec.sent = nil
+	// Peer's XID response advertising SREJSingle (F=1 response).
+	rsp := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf, resp) // response
+	xf.Info = rsp.Encode(false)
+	tbl.OnFrame(0, xf)
+	if !c.srejEnabled {
+		t.Fatalf("srejEnabled = false after SREJSingle XID response, want true")
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("must not reply to an XID response, sent %+v", rec.sent)
+	}
+}
+
+func TestInitiatorNoXIDWhenSREJOff(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, false)
+	tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	for _, fr := range rec.sent {
+		if fr.Type == ax25.XID {
+			t.Fatalf("XID command sent with srej=off")
+		}
+	}
+}
+
 // TestIncomingSABMESuppressedOnOtherPort mirrors TestOverheardSABMOnOtherPortDropped
 // but for SABME: if (local, remote) already has a Connecting/Connected conn on
 // port 0, an incoming SABME for the same pair on port 1 must be silently dropped

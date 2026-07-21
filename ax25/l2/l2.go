@@ -951,6 +951,11 @@ func (t *Table) dispatchUA(port int, f *ax25.Frame, src, dst string) {
 		if t.hooks.Connected != nil {
 			t.hooks.Connected(c, false)
 		}
+		// Initiator XID: the answering peer does not send XID, so we must, to
+		// negotiate SREJ for the (download) direction where tncd is the receiver.
+		if t.portParams(port).SREJ && c.modulo == 128 {
+			t.sendXIDCommand(c)
+		}
 
 	case Disconnecting:
 		// Disconnect confirmed (tncd.py:1936-1944).
@@ -1224,6 +1229,24 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 	}
 }
 
+// sendXIDCommand sends an XID command (P=1) advertising our SREJ capability, so
+// that when tncd is the connection initiator the peer (which does not initiate
+// XID) learns we support SREJ and negotiates it. Mirrors Direwolf's initiator
+// sending XID after UA.
+func (t *Table) sendXIDCommand(c *Conn) {
+	pp := t.portParams(c.Port)
+	params := ax25.XIDParams{
+		FullDuplex:       false,
+		SREJ:             ax25.SREJSingle,
+		Modulo:           128,
+		IFieldLenRxBytes: 256,
+		WindowRx:         pp.MaxWindow,
+	}
+	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.XID, true) // command, P=1
+	f.Info = params.Encode(true)                            // command form
+	t.sendFrame(c.Port, f)
+}
+
 // negotiateSREJ returns the agreed SREJ mode for the connection: SREJSingle iff
 // the port allows SREJ, the link is mod-128, and the peer advertised
 // >= SREJSingle; otherwise SREJNone. Mirrors Direwolf's "keep the lower value".
@@ -1234,14 +1257,15 @@ func (t *Table) negotiateSREJ(c *Conn, peerSREJ ax25.SREJMode) ax25.SREJMode {
 	return ax25.SREJNone
 }
 
-// dispatchXID answers an XID command with a min-negotiated XID response.
-// tncd is a passive responder: it never initiates XID. We negotiate SREJ
-// when the port has SREJ enabled, the link is mod-128, and the peer supports it.
+// dispatchXID handles both XID commands (answerer role) and XID responses
+// (initiator role, after sendXIDCommand).
+//
+// Command (answerer): negotiate SREJ, enable it, and reply with an XID response.
 // Mirrors Direwolf xid_frame (mdl_state_0_ready, command branch).
+//
+// Response (initiator): adopt the negotiated SREJ from the peer's reply; no
+// further reply is sent. This is the path triggered after Task 3's sendXIDCommand.
 func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
-	if !f.Command || !f.PF {
-		return // command with P=1 only; response handling arrives in Task 3
-	}
 	if !t.isLocal(port, dst) {
 		return
 	}
@@ -1253,6 +1277,18 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 	if err != nil {
 		return
 	}
+
+	if !f.Command {
+		// Response to our initiated XID command: adopt the negotiated SREJ, no reply.
+		neg := t.negotiateSREJ(c, their.SREJ)
+		c.srejEnabled = neg >= ax25.SREJSingle
+		return
+	}
+	if !f.PF {
+		return // command must have P=1
+	}
+
+	// Command (answerer role): negotiate, enable, and respond.
 	pp := t.portParams(port)
 	neg := t.negotiateSREJ(c, their.SREJ)
 	c.srejEnabled = neg >= ax25.SREJSingle
@@ -1260,7 +1296,7 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 	if their.WindowRx > 0 && their.WindowRx < window {
 		window = their.WindowRx
 	}
-	resp := ax25.XIDParams{
+	rsp := ax25.XIDParams{
 		FullDuplex:       false,
 		SREJ:             neg,
 		Modulo:           128,
@@ -1268,7 +1304,7 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 		WindowRx:         window,
 	}
 	out := respFrame(src, dst, c.Via, ax25.XID, true) // response, F=1
-	out.Info = resp.Encode(false)
+	out.Info = rsp.Encode(false)
 	t.sendFrame(port, out)
 }
 
