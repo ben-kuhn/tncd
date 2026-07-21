@@ -1358,6 +1358,11 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 
 	if !f.Command {
 		// Response to our initiated XID command: adopt the negotiated SREJ, no reply.
+		// Only act when Connected — an XID response is only valid on an established
+		// connection; ignore unsolicited or duplicate responses in other states.
+		if c.State != Connected {
+			return
+		}
 		neg := t.negotiateSREJ(c, their.SREJ)
 		c.srejEnabled = neg >= ax25.SREJSingle
 		return

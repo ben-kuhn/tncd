@@ -292,13 +292,10 @@ class TestAX25V22ConnectedMode:
             f"Direwolf-B log tail:\n{log_b[-2000:]}"
         )
 
-        # Negative SREJ-fallback check: the "SREJ not enabled case" string appears in
-        # Direwolf (ax25_link.c:2800) when it tries to send SREJ but srej_enable is
-        # srej_none.  Its presence would mean XID negotiation did not enable SREJ on
-        # Direwolf's end (e.g. tncd sent SREJNone in its XID response).
-        assert "SREJ not enabled case" not in log_b, (
-            "Direwolf hit the 'SREJ not enabled' fallback path — XID negotiation "
-            "may not have correctly advertised SREJ.  "
-            "Check tncd's XID response and srej config.\n"
-            f"Direwolf-B log tail:\n{log_b[-2000:]}"
-        )
+        # NOTE: No "SREJ not enabled case" assertion here.  That Direwolf string is
+        # gated behind s_debug_retry (hardcoded 0 in Direwolf, no runtime setter), so
+        # it is never emitted at runtime regardless of negotiation outcome.  The
+        # assertion would be vacuous and misleading.  Real SREJ coverage is provided by
+        # the Task-4 unit tests (ax25/l2/l2_test.go).  This test's coverage is:
+        #   "(v2.2)" present + "Trying v2.0" absent + successful round-trip
+        # (negotiation/no-regression only, not recovery).

@@ -638,6 +638,46 @@ func TestSREJDisabledUsesREJ(t *testing.T) {
 	}
 }
 
+// TestSREJTrailingHoleFBitZero verifies that an SREJ for a hole *beyond* V(R)
+// (while V(R)'s own hole is still outstanding) carries F=0.  The SREJ for V(R)
+// itself must be F=1; the SREJ for any later hole must be F=0.
+func TestSREJTrailingHoleFBitZero(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	establishIncomingSREJ(t, tbl, rec) // V(R)=0, srejEnabled=true
+
+	// Deliver NS=1 first: gap at 0 (V(R)=0 missing) → SREJ(0) with F=1.
+	iframe(tbl, 1, 'B')
+
+	// Deliver NS=3 next: gap at 2 also outstanding, V(R) still 0 → SREJ(2) with F=0.
+	iframe(tbl, 3, 'D')
+
+	var srejNR0PF, srejNR2PF *bool
+	for _, f := range rec.sent {
+		if f.Type != ax25.SREJ {
+			continue
+		}
+		pf := f.PF
+		switch f.NR {
+		case 0:
+			srejNR0PF = &pf
+		case 2:
+			srejNR2PF = &pf
+		}
+	}
+	if srejNR0PF == nil {
+		t.Fatal("no SREJ(NR=0) emitted for V(R) hole")
+	}
+	if !*srejNR0PF {
+		t.Fatal("SREJ(NR=0) must have F=1 (NR == V(R))")
+	}
+	if srejNR2PF == nil {
+		t.Fatal("no SREJ(NR=2) emitted for trailing hole")
+	}
+	if *srejNR2PF {
+		t.Fatal("SREJ(NR=2) must have F=0 (NR != V(R)=0)")
+	}
+}
+
 func TestIncomingSABMESuppressedOnOtherPort(t *testing.T) {
 	tbl, rec, _ := newHarness(1200)
 	setV22(tbl, 0)
