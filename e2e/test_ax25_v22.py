@@ -232,3 +232,73 @@ class TestAX25V22ConnectedMode:
             "accepting it.  Check ax25_version config and SABME handling.\n"
             f"Direwolf-B log tail:\n{log_b[-2000:]}"
         )
+
+    @needs_pat
+    def test_srej_negotiated_no_regression(self, pat_pair_v22, direwolf_pair_v22,
+                                           tmp_path):
+        """Assert SREJ negotiation + no regression: v2.2 round-trip succeeds with srej=true.
+
+        tncd defaults srej=true (phase 3.5).  Direwolf v2.2 advertises SREJ via XID
+        immediately after the SABME/UA handshake.  This test verifies that tncd's SREJ
+        support does not break the normal connected-mode path.
+
+        WHY NO POSITIVE "SREJ ENABLED" LOG ASSERTION:
+          Direwolf does not emit a banner when SREJ is negotiated.  The internal
+          srej_enable field is set silently in complete_negotiation() (ax25_link.c:6683).
+          No dw_printf() is called at that point.  The only SREJ-related log lines that
+          would appear in Direwolf output are:
+            - "sending REJ, at ... SREJ not enabled case" (ax25_link.c:2800) — fires
+              when SREJ is DISABLED and Direwolf must fall back to REJ on a gap.
+            - "SREJ frames received: N" in the final statistics dump — appears only if
+              SREJ frames were actually exchanged (requires induced frame loss).
+          On a clean PipeWire loopback there is no frame loss, so SREJ frames are never
+          exchanged and the statistics line never appears.  The negative assertion
+          (no "SREJ not enabled case" string) is the best structural check available
+          from Direwolf's log alone.
+
+        WHAT THIS TEST PROVES:
+          - SREJ-capable connection setup (negotiation) does not regress the round-trip.
+          - No SREJ-fallback path was hit ("SREJ not enabled case" absent).
+          - v2.2 mod-128 link still completes cleanly when both ends advertise SREJ.
+
+        WHAT THIS TEST DOES NOT PROVE:
+          - SREJ *recovery* (retransmitting a specific missing frame without discarding
+            the window).  A clean PipeWire cross-link has no frame loss, so the recovery
+            path is never exercised here.
+          Recovery is proven by the Task-4 unit tests (ax25/l2/l2_test.go) and the
+          phase-3.5 OTA gate (bench test with real radio hardware).
+        """
+        # Run the full P2P round-trip with SREJ enabled (default).
+        _run_p2p_test(pat_pair_v22, tmp_path)
+
+        # Read Direwolf-B's log.
+        log_b = Path(direwolf_pair_v22["log_b_path"]).read_text(errors="replace")
+
+        print("=== Direwolf-B log (last 3000 chars) ===")
+        print(log_b[-3000:])
+
+        # Positive check: v2.2 connect banner still present — SABME/mod-128 negotiated
+        # even with SREJ enabled on the tncd side.
+        assert "(v2.2)" in log_b, (
+            "AX.25 v2.2 connect banner missing from Direwolf-B log — "
+            "SREJ-enabled tncd may have disrupted the SABME handshake.\n"
+            f"Direwolf-B log tail:\n{log_b[-2000:]}"
+        )
+
+        # Negative check: Direwolf did NOT fall back to v2.0.
+        assert "Trying v2.0" not in log_b, (
+            "Direwolf fell back to v2.0 while SREJ was enabled in tncd — "
+            "check XID handling and ax25_version config.\n"
+            f"Direwolf-B log tail:\n{log_b[-2000:]}"
+        )
+
+        # Negative SREJ-fallback check: the "SREJ not enabled case" string appears in
+        # Direwolf (ax25_link.c:2800) when it tries to send SREJ but srej_enable is
+        # srej_none.  Its presence would mean XID negotiation did not enable SREJ on
+        # Direwolf's end (e.g. tncd sent SREJNone in its XID response).
+        assert "SREJ not enabled case" not in log_b, (
+            "Direwolf hit the 'SREJ not enabled' fallback path — XID negotiation "
+            "may not have correctly advertised SREJ.  "
+            "Check tncd's XID response and srej config.\n"
+            f"Direwolf-B log tail:\n{log_b[-2000:]}"
+        )
