@@ -25,6 +25,7 @@ type PortParams struct {
 	T2          time.Duration // max(100ms, 1.2*frameTime)
 	T3          time.Duration // 0 disables
 	AX25Version int           // 20 (mod-8 only) or 22 (attempt SABME/mod-128); default 20
+	SREJ        bool          // v2.2 selective reject enabled for this port (default set by bridge)
 }
 
 // DeriveParams computes PortParams from the on-air baud rate and config.

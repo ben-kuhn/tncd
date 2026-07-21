@@ -122,6 +122,28 @@ ax25_version = 3.0
 	}
 }
 
+func TestSREJConfig(t *testing.T) {
+	p := write(t, `
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+[client.1]
+type = serial
+device = /dev/ttyUSB1
+srej = off
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Ports[0].SREJ {
+		t.Errorf("port0 SREJ = false, want true (default)")
+	}
+	if cfg.Ports[1].SREJ {
+		t.Errorf("port1 SREJ = true, want false (srej=off)")
+	}
+}
+
 func TestUppercaseKeysAccepted(t *testing.T) {
 	p := write(t, "[client.0]\nType = serial\nDevice = /dev/x\nSerial_Baudrate = 1200\n")
 	cfg, err := Load(p)
