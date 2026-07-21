@@ -19,11 +19,12 @@ const ax25Overhead = 20
 // PortParams holds the T1/T2/T3 timing and window parameters for one port.
 // Derived from ota_baudrate via DeriveParams (tncd.py:1068-1087).
 type PortParams struct {
-	MaxWindow int
-	N2Retry   int
-	T1        time.Duration // max(3s, 2*(window*frameTime + 1s))
-	T2        time.Duration // max(100ms, 1.2*frameTime)
-	T3        time.Duration // 0 disables
+	MaxWindow   int
+	N2Retry     int
+	T1          time.Duration // max(3s, 2*(window*frameTime + 1s))
+	T2          time.Duration // max(100ms, 1.2*frameTime)
+	T3          time.Duration // 0 disables
+	AX25Version int           // 20 (mod-8 only) or 22 (attempt SABME/mod-128); default 20
 }
 
 // DeriveParams computes PortParams from the on-air baud rate and config.
@@ -309,9 +310,16 @@ func (t *Table) t1Expired(c *Conn) {
 	pp := t.portParams(c.Port)
 
 	if c.State == Connecting {
-		// SABM retransmission while waiting for UA (AX.25 6.3.1)
+		// SABM/SABME retransmission while waiting for UA (AX.25 6.3.1)
 		// tncd.py:1512-1539
 		c.t1Polls++
+		maxV22 := pp.N2Retry / 3
+		if c.modulo == 128 && !c.triedFallback && c.t1Polls >= maxV22 {
+			// Direwolf MAXV22 hack: after maxV22 SABMEs, continue as SABM
+			// without resetting the retry counter.
+			c.modulo = 8
+			c.triedFallback = true
+		}
 		if c.t1Polls > pp.N2Retry {
 			// N2 exhausted — give up
 			c.State = Disconnected
@@ -321,7 +329,7 @@ func (t *Table) t1Expired(c *Conn) {
 			t.removeConn(c)
 			return
 		}
-		// Retransmit SABM with exponential backoff (Karn, tncd.py:1536-1538).
+		// Retransmit with exponential backoff (Karn, tncd.py:1536-1538).
 		if c.t1Value > 0 {
 			c.t1Value *= 2
 			const t1Ceil = 60 * time.Second
@@ -329,7 +337,11 @@ func (t *Table) t1Expired(c *Conn) {
 				c.t1Value = t1Ceil
 			}
 		}
-		t.sendSABM(c)
+		if c.modulo == 128 {
+			t.sendSABME(c)
+		} else {
+			t.sendSABM(c)
+		}
 		t.startT1(c)
 		return
 	}
@@ -386,11 +398,25 @@ func (t *Table) isLocal(port int, call string) bool {
 	return t.hooks.IsLocal(port, call)
 }
 
-// sendFrame is a helper that calls hooks.SendAX25.
+// sendFrame stamps the modulo on outgoing I/S frames (if not already set)
+// then calls hooks.SendAX25.
 func (t *Table) sendFrame(port int, f *ax25.Frame) {
+	if f.Modulo == 0 && (f.Type == ax25.I || f.Type.IsS()) {
+		f.Modulo = uint8(t.ModuloFor(port, f.Src.String(), f.Dst.String()))
+	}
 	if t.hooks.SendAX25 != nil {
 		t.hooks.SendAX25(port, f)
 	}
+}
+
+// ModuloFor returns the negotiated modulo (8 or 128) for the connection
+// addressed by (port, local, remote), or 8 if there is no such connection.
+// The bridge uses this to decode inbound I/S control fields at the right width.
+func (t *Table) ModuloFor(port int, local, remote string) int {
+	if c := t.Get(port, local, remote); c != nil {
+		return int(c.modulo)
+	}
+	return 8
 }
 
 // cmdFrame builds a command frame (dst C-bit=1, src C-bit=0).
@@ -431,15 +457,37 @@ func respFrame(dst, src string, via []string, typ ax25.FrameType, pf bool) *ax25
 	return f
 }
 
-// sendSABM sends a SABM P=1 command frame to the remote.
+// sendSABM sends a SABM P=1 (mod-8 connect) command frame to the remote.
 func (t *Table) sendSABM(c *Conn) {
 	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.SABM, true)
 	t.sendFrame(c.Port, f)
 }
 
+// sendSABME sends a SABME P=1 command frame to the remote (AX.25 v2.2 mod-128).
+func (t *Table) sendSABME(c *Conn) {
+	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.SABME, true)
+	t.sendFrame(c.Port, f)
+}
+
+// fallbackToSABM downgrades a still-connecting mod-128 attempt to mod-8 and
+// resends SABM. Mirrors Direwolf set_version_2_0 + resend. Returns true if a
+// downgrade happened.
+func (t *Table) fallbackToSABM(c *Conn) bool {
+	if c.modulo != 128 || c.triedFallback {
+		return false
+	}
+	c.modulo = 8
+	c.triedFallback = true
+	t.sendSABM(c)
+	t.startT1(c)
+	return true
+}
+
 // Connect initiates an outgoing AX.25 connection (tncd.py:274-304).
-// Sends SABM P=1, sets state=Connecting, starts T1.
-// Returns an error if the connection table is full.
+// Sends SABME P=1 on AX.25 v2.2 ports, SABM P=1 on v2.0 ports.
+// Sets state=Connecting, starts T1. Returns an error if the connection table is full.
+// getOrCreate may return a reused Conn from a prior session; all relevant state
+// (including triedFallback) is reset so that a fresh v2.2 attempt starts clean.
 func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, error) {
 	c := t.getOrCreate(port, local, remote)
 	if c == nil {
@@ -449,10 +497,17 @@ func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, er
 	c.sendSeq = 0
 	c.recvSeq = 0
 	c.t1Polls = 0
+	c.triedFallback = false
 	c.Via = via
 	c.t1Value = t.portParams(port).T1
 
-	t.sendSABM(c)
+	if t.portParams(port).AX25Version >= 22 {
+		c.modulo = 128
+		t.sendSABME(c)
+	} else {
+		c.modulo = 8
+		t.sendSABM(c)
+	}
 	t.startT1(c)
 	return c, nil
 }
@@ -548,6 +603,7 @@ func (t *Table) drainOutbound(c *Conn) {
 			Command: true,
 			PID:     pid,
 			Info:    chunk,
+			Modulo:  c.modulo,
 		}
 		for _, v := range c.Via {
 			a, _ := ax25.ParseAddress(v)
@@ -558,7 +614,7 @@ func (t *Table) drainOutbound(c *Conn) {
 		raw := f.Bytes()
 		c.retransmitBuf[ns] = raw
 		c.iframeTimestamps[ns] = t.clock.Now()
-		c.sendSeq = (ns + 1) % 8
+		c.sendSeq = (ns + 1) % c.modulo
 		c.unacked++
 		sentAny = true
 
@@ -576,7 +632,7 @@ func (t *Table) drainOutbound(c *Conn) {
 // Mirrors tncd.py:1581-1616.
 func (t *Table) ackFrames(c *Conn, nr uint8) {
 	pp := t.portParams(c.Port)
-	newlyAcked := (nr - c.lastAcked) % 8
+	newlyAcked := (nr - c.lastAcked) % c.modulo
 	// Guard: reject backwards N(R) (would appear as a large forward ACK).
 	if int(newlyAcked) > pp.MaxWindow {
 		return
@@ -596,14 +652,14 @@ func (t *Table) ackFrames(c *Conn, nr uint8) {
 			rtt := now.Sub(sendTime)
 			t.updateSRTT(c, rtt)
 		}
-		seq = (seq + 1) % 8
+		seq = (seq + 1) % c.modulo
 	}
 
 	// Purge retransmit buffer for ACKed sequence numbers.
 	seq = c.lastAcked
 	for i := uint8(0); i < newlyAcked; i++ {
 		delete(c.retransmitBuf, seq)
-		seq = (seq + 1) % 8
+		seq = (seq + 1) % c.modulo
 	}
 
 	c.lastAcked = nr
@@ -661,7 +717,7 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 			break
 		}
 		// Parse the stored frame to extract NS/PID/Info.
-		orig, err := ax25.Parse(raw)
+		orig, err := ax25.ParseModulo(raw, int(c.modulo))
 		if err != nil {
 			break
 		}
@@ -676,6 +732,7 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 			Command: true,
 			PID:     orig.PID,
 			Info:    orig.Info,
+			Modulo:  c.modulo,
 		}
 		for _, v := range c.Via {
 			a, _ := ax25.ParseAddress(v)
@@ -686,7 +743,7 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 		// Karn: discard RTT sample for retransmitted frames.
 		delete(c.iframeTimestamps, seq)
 		t.sendFrame(c.Port, f)
-		seq = (seq + 1) % 8
+		seq = (seq + 1) % c.modulo
 	}
 }
 
@@ -720,8 +777,10 @@ func (t *Table) OnFrame(port int, f *ax25.Frame) {
 		t.dispatchFRMR(port, f, src, dst)
 	case ax25.I:
 		t.dispatchI(port, f, src, dst)
-	case ax25.RR, ax25.RNR, ax25.REJ:
+	case ax25.RR, ax25.RNR, ax25.REJ, ax25.SREJ:
 		t.dispatchS(port, f, src, dst)
+	case ax25.XID:
+		t.dispatchXID(port, f, src, dst)
 	}
 
 	// Reset T3 inactive link timer on any received frame for a Connected conn.
@@ -824,16 +883,52 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 	}
 }
 
-// dispatchSABME handles SABME — reject with DM P=1 (tncd.py:1686-1695).
+// dispatchSABME handles SABME (tncd.py:1686-1695 for the DM-reject path;
+// extended here for AX.25 v2.2 accept).
+// On a 2.0-only port: reject with DM P=1 so the peer (e.g. Direwolf) retries SABM.
+// On a 2.2 port: accept with UA, set modulo=128, fire the Connected hook.
 // Like SABM/I/DISC, the response is gated on the destination being one of
 // our registered callsigns; answering foreign SABMEs would transmit DM into
 // other stations' sessions on a shared channel.
 func (t *Table) dispatchSABME(port int, f *ax25.Frame, src, dst string) {
+	// Overheard-frame suppression: if this pair has a connection on a
+	// different port, silently drop (mirrors dispatchSABM logic).
+	for otherPort, c := range t.connsByPair(dst, src) {
+		if otherPort != port && (c.State == Connecting || c.State == Connected) {
+			return
+		}
+	}
+
 	if !t.isLocal(port, dst) {
 		return
 	}
-	dm := respFrame(src, dst, nil, ax25.DM, true)
-	t.sendFrame(port, dm)
+	if t.portParams(port).AX25Version < 22 {
+		// 2.0-only port: reject; the peer (e.g. Direwolf) then retries SABM.
+		dm := respFrame(src, dst, nil, ax25.DM, true)
+		t.sendFrame(port, dm)
+		return
+	}
+	// Accept mod-128. Mirror dispatchSABM but set modulo = 128.
+	incomingVia := addrSliceToStrings(f.Via)
+	returnVia := reversed(incomingVia)
+	c := t.getOrCreate(port, dst, src)
+	if c == nil {
+		dm := respFrame(src, dst, returnVia, ax25.DM, f.PF)
+		t.sendFrame(port, dm)
+		return
+	}
+	ua := respFrame(src, dst, returnVia, ax25.UA, f.PF)
+	t.sendFrame(port, ua)
+	c.Via = returnVia
+	c.State = Connected
+	c.modulo = 128
+	c.resetSeqs()
+	c.t1 = cancelTimer(c.t1)
+	c.t2 = cancelTimer(c.t2)
+	c.t3 = cancelTimer(c.t3)
+	if t.hooks.Connected != nil {
+		t.hooks.Connected(c, true)
+	}
 }
 
 // dispatchUA handles incoming UA (tncd.py:1914-1944).
@@ -869,6 +964,10 @@ func (t *Table) dispatchUA(port int, f *ax25.Frame, src, dst string) {
 func (t *Table) dispatchDM(port int, f *ax25.Frame, src, dst string) {
 	c := t.Get(port, dst, src)
 	if c == nil {
+		return
+	}
+	if c.State == Connecting && c.modulo == 128 && !c.triedFallback {
+		t.fallbackToSABM(c)
 		return
 	}
 	if c.State == Connecting {
@@ -921,6 +1020,10 @@ func (t *Table) dispatchDISC(port int, f *ax25.Frame, src, dst string) {
 // Resets the connection and sends a fresh SABM.
 func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	c := t.Get(port, dst, src)
+	if c != nil && c.State == Connecting && c.modulo == 128 && !c.triedFallback {
+		t.fallbackToSABM(c)
+		return
+	}
 	if c == nil || c.State != Connected {
 		return
 	}
@@ -994,7 +1097,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 	expectedNS := c.recvSeq
 	if f.NS != expectedNS {
 		// Out-of-sequence or duplicate frame.
-		gap := (f.NS - expectedNS) % 8
+		gap := (f.NS - expectedNS) % c.modulo
 		if gap > 0 && int(gap) <= pp.MaxWindow {
 			// Gap within window: send REJ with V(R) = expected, echoing P/F.
 			// Mirrors tncd.py:1791-1805.
@@ -1017,7 +1120,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 
 	// In-sequence frame: advance V(R) and schedule delayed ACK.
 	// Mirrors tncd.py:1816-1832.
-	c.recvSeq = (f.NS + 1) % 8
+	c.recvSeq = (f.NS + 1) % c.modulo
 	if f.PF {
 		// Poll requires immediate response.
 		cancelT2(c)
@@ -1049,6 +1152,31 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 
 	// 1. Process cumulative ACK (always first, per Python order).
 	t.ackFrames(c, f.NR)
+
+	// Single-SREJ (v2.2): ackFrames above already acked <= N(R)-1 and left
+	// frame N(R) in the retransmit buffer. Retransmit ONLY that frame — not
+	// go-back-N. (We never send SREJ ourselves; sending is phase 3.5.)
+	if f.Type == ax25.SREJ {
+		c.remoteBusy = false
+		if raw, ok := c.retransmitBuf[f.NR]; ok {
+			if orig, err := ax25.ParseModulo(raw, int(c.modulo)); err == nil {
+				rf := &ax25.Frame{
+					Dst: mustParseAddr(c.Remote), Src: mustParseAddr(c.Local),
+					Type: ax25.I, Modulo: c.modulo,
+					NS: orig.NS, NR: c.recvSeq, Command: true,
+					PID: orig.PID, Info: orig.Info,
+				}
+				for _, v := range c.Via {
+					a, _ := ax25.ParseAddress(v)
+					rf.Via = append(rf.Via, a)
+				}
+				c.retransmitBuf[f.NR] = rf.Bytes()
+				delete(c.iframeTimestamps, f.NR) // Karn: no RTT sample on retransmit
+				t.sendFrame(c.Port, rf)
+			}
+		}
+		return // SREJ has no REJ/RR busy semantics beyond the above
+	}
 
 	// 2. RNR/RR busy-flag update.
 	switch f.Type {
@@ -1093,6 +1221,43 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 			}
 		}
 	}
+}
+
+// dispatchXID answers an XID command with a min-negotiated XID response.
+// tncd is a passive responder: it never initiates XID. We always advertise
+// SREJ off (which is what turns Direwolf's default-on single-SREJ off) and
+// our fixed N1 = 256, negotiating the window down to the peer's request.
+// Mirrors Direwolf xid_frame (mdl_state_0_ready, command branch).
+func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
+	if !f.Command || !f.PF {
+		return // only XID command with P=1 is actionable; a response is unexpected
+	}
+	if !t.isLocal(port, dst) {
+		return
+	}
+	c := t.Get(port, dst, src)
+	if c == nil {
+		return
+	}
+	their, err := ax25.ParseXID(f.Info)
+	if err != nil {
+		return
+	}
+	pp := t.portParams(port)
+	window := pp.MaxWindow
+	if their.WindowRx > 0 && their.WindowRx < window {
+		window = their.WindowRx
+	}
+	resp := ax25.XIDParams{
+		FullDuplex:       false,
+		SREJ:             ax25.SREJNone,
+		Modulo:           128,
+		IFieldLenRxBytes: 256,
+		WindowRx:         window,
+	}
+	out := respFrame(src, dst, c.Via, ax25.XID, true) // response, F=1
+	out.Info = resp.Encode(false)
+	t.sendFrame(port, out)
 }
 
 // --- helpers ---

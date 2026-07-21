@@ -59,6 +59,8 @@ type Port struct {
 	HostExitString string
 	ExitDelay      float64 // default 1.0
 
+	AX25Version int // 20 or 22; default 22
+
 	KISS kiss.Params // from [kiss.N]; nil fields = don't send
 }
 
@@ -87,6 +89,7 @@ var knownClientKeys = []string{
 	"bdaddr", "channel", "reconnect", "reconnect_delay", "reconnect_max_delay",
 	"ota_baudrate", "init_string", "init_delay", "send_kiss_exit",
 	"host_exit_string", "exit_delay",
+	"ax25_version",
 }
 
 // knownKISSKeys are the recognized keys in [kiss.N].
@@ -432,6 +435,19 @@ func Load(path string) (*Config, error) {
 			}
 		}
 
+		ax25Version := 22
+		if s.HasKey("ax25_version") {
+			switch s.Key("ax25_version").String() {
+			case "2.0":
+				ax25Version = 20
+			case "2.2":
+				ax25Version = 22
+			default:
+				return nil, fmt.Errorf("[%s] invalid ax25_version %q; must be 2.0 or 2.2",
+					pe.name, s.Key("ax25_version").String())
+			}
+		}
+
 		port := Port{
 			Name:              getString(s, "name", fmt.Sprintf("Port %d", i)),
 			Type:              portType,
@@ -453,6 +469,7 @@ func Load(path string) (*Config, error) {
 			SendKISSExit:      getBool(s, "send_kiss_exit", true),
 			HostExitString:    getString(s, "host_exit_string", ""),
 			ExitDelay:         getFloat(s, "exit_delay", 1.0),
+			AX25Version:       ax25Version,
 		}
 
 		// Parse corresponding [kiss.N] section if present

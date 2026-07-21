@@ -206,11 +206,19 @@ def pw_configure_for_test():
     return original
 
 
-def pw_restore_settings(original):
-    """Restore PipeWire settings from saved values."""
-    for key, value in original.items():
+def pw_restore_settings(original=None):
+    """Reset PipeWire clock settings to the system defaults.
+
+    Deletes the runtime overrides applied by pw_configure_for_test() so
+    PipeWire falls back to its configured default.clock.* values.  We
+    deliberately do NOT replay a captured snapshot: replaying a snapshot
+    taken while the graph was already in a bad state would re-break audio.
+    ``original`` is accepted for backwards compatibility and ignored.
+    """
+    for key in ("clock.allowed-rates", "clock.quantum",
+                "clock.min-quantum", "clock.max-quantum"):
         subprocess.run(
-            ["pw-metadata", "-n", "settings", "0", key, value],
+            ["pw-metadata", "-n", "settings", "-d", "0", key],
             capture_output=True, timeout=5,
         )
 
@@ -403,8 +411,13 @@ def direwolf_pair(tmp_path, request):
 
 
 def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
-                      kiss_port=None, kiss_device=None, callsign="N0CALL-1"):
-    """Write a tncd INI configuration file."""
+                      kiss_port=None, kiss_device=None, callsign="N0CALL-1",
+                      ax25_version=None):
+    """Write a tncd INI configuration file.
+
+    ax25_version: if "2.0" or "2.2", adds ``ax25_version = <value>`` to the
+    [client] section.  Omitted (None) leaves tncd at its compiled default.
+    """
     lines = [
         "[server]",
         "listen_host = 127.0.0.1",
@@ -420,6 +433,8 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
     elif kiss_type == "serial":
         lines.append(f"device = {kiss_device}")
         lines.append("serial_baudrate = 9600")
+    if ax25_version is not None:
+        lines.append(f"ax25_version = {ax25_version}")
     lines.extend([
         "",
         "[kiss]",

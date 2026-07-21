@@ -43,7 +43,8 @@ type Conn struct {
 	State         ConnState
 	Owner         any // opaque; set/read by the frontend
 
-	// Sequence numbers (mod 8)
+	// Sequence numbers
+	modulo    uint8 // 8 (mod-8, default) or 128 (mod-128 / v2.2 extended)
 	sendSeq   uint8
 	recvSeq   uint8
 	unacked   uint8
@@ -73,6 +74,9 @@ type Conn struct {
 	lastRRTime time.Time
 	lastRRNR   uint8
 
+	// v2.2 fallback state
+	triedFallback bool // true once a v2.2 connect has downgraded to mod-8
+
 	// Karn RTT estimation (Task 9)
 	srtt   time.Duration
 	rttvar time.Duration
@@ -92,6 +96,7 @@ func newConn(port int, local, remote string) *Conn {
 		Local:            local,
 		Remote:           remote,
 		State:            Disconnected,
+		modulo:           8,
 		retransmitBuf:    make(map[uint8][]byte),
 		iframeTimestamps: make(map[uint8]time.Time),
 	}

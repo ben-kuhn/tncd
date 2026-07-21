@@ -271,12 +271,21 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 		return
 	}
 
-	// Parse the AX.25 frame.
+	// Stage 1: parse mod-8 to get addresses + type (both modulo-independent).
 	frame, err := ax25.Parse(raw)
 	if err != nil {
 		log.Printf("bridge: port %d failed to parse AX.25 frame: %v (len=%d raw=%x)",
 			f.Port, err, len(raw), raw[:min(len(raw), 32)])
 		return
+	}
+	// Stage 2: I/S control fields are 2 bytes on a mod-128 link. Re-decode at
+	// the link's negotiated modulo once we know which connection this is.
+	if frame.Type == ax25.I || frame.Type.IsS() {
+		if b.l2.ModuloFor(f.Port, frame.Dst.String(), frame.Src.String()) == 128 {
+			if ext, err2 := ax25.ParseModulo(raw, 128); err2 == nil {
+				frame = ext
+			}
+		}
 	}
 
 	b.logAX25(frame, "RX")
@@ -380,6 +389,7 @@ func (b *Bridge) Start() error {
 			b.cfg.AX25.N2Retry,
 			b.cfg.AX25.T3Timeout,
 		)
+		params[i].AX25Version = b.cfg.Ports[i].AX25Version
 	}
 
 	hooks := l2pkg.Hooks{

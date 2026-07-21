@@ -88,6 +88,40 @@ func TestExampleLoads(t *testing.T) {
 	}
 }
 
+func TestAX25VersionParsing(t *testing.T) {
+	p := write(t, `
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+[client.1]
+type = serial
+device = /dev/ttyUSB1
+ax25_version = 2.0
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ports[0].AX25Version != 22 {
+		t.Errorf("port0 default = %d, want 22", cfg.Ports[0].AX25Version)
+	}
+	if cfg.Ports[1].AX25Version != 20 {
+		t.Errorf("port1 = %d, want 20", cfg.Ports[1].AX25Version)
+	}
+}
+
+func TestAX25VersionInvalid(t *testing.T) {
+	p := write(t, `
+[client.0]
+type = serial
+device = /dev/ttyUSB0
+ax25_version = 3.0
+`)
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected error for ax25_version = 3.0")
+	}
+}
+
 func TestUppercaseKeysAccepted(t *testing.T) {
 	p := write(t, "[client.0]\nType = serial\nDevice = /dev/x\nSerial_Baudrate = 1200\n")
 	cfg, err := Load(p)

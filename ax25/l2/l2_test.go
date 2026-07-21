@@ -200,3 +200,227 @@ func TestRemovedConnTimerIgnored(t *testing.T) {
 		t.Fatalf("stale T3 sent %d unexpected frame(s) after conn removed", got-framesBefore)
 	}
 }
+
+func setV22(tbl *Table, port int) {
+	tbl.params[port].AX25Version = 22
+}
+
+func TestConnectSendsSABMEOnV22(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	if c.modulo != 128 {
+		t.Fatalf("modulo = %d, want 128", c.modulo)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.SABME {
+		t.Fatalf("sent = %+v, want one SABME", rec.sent)
+	}
+}
+
+func TestIncomingSABMEAcceptedOnV22(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || c.State != Connected || c.modulo != 128 {
+		t.Fatalf("conn = %+v", c)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.UA {
+		t.Fatalf("sent = %+v, want UA", rec.sent)
+	}
+}
+
+func TestIncomingSABMERejectedOnV20(t *testing.T) {
+	tbl, rec, _ := newHarness(1200) // AX25Version stays 0 (== 2.0 only)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	if tbl.Get(0, "KU0HN-10", "N0CALL-2") != nil {
+		t.Fatal("no conn should be created on a 2.0 port")
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.DM {
+		t.Fatalf("sent = %+v, want DM", rec.sent)
+	}
+}
+
+func TestFallbackOnDM(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // sends SABME
+	tbl.OnFrame(0, mkFrame(ax25.DM, "N0CALL-2", "KU0HN-10", pf, resp))
+	if c.State != Connecting || c.modulo != 8 || !c.triedFallback {
+		t.Fatalf("after DM: state=%v modulo=%d triedFallback=%v", c.State, c.modulo, c.triedFallback)
+	}
+	// Last sent frame is a SABM (the fallback).
+	last := rec.sent[len(rec.sent)-1]
+	if last.Type != ax25.SABM {
+		t.Fatalf("fallback frame = %s, want SABM", last.Type)
+	}
+}
+
+func TestFallbackOnTimeoutAtMaxV22(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	setV22(tbl, 0)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // SABME #1
+	// N2Retry=10 → maxV22=3. Expiries 1,2 resend SABME; expiry 3 downgrades.
+	for i := 0; i < 3; i++ {
+		clk.advance(65 * time.Second) // exceed T1 (with backoff)
+	}
+	if c.modulo != 8 {
+		t.Fatalf("modulo = %d after 3 timeouts, want 8", c.modulo)
+	}
+	sabmeCount, sabmCount := 0, 0
+	for _, f := range rec.sent {
+		switch f.Type {
+		case ax25.SABME:
+			sabmeCount++
+		case ax25.SABM:
+			sabmCount++
+		}
+	}
+	if sabmeCount != 3 {
+		t.Fatalf("SABME count = %d, want 3", sabmeCount)
+	}
+	if sabmCount < 1 {
+		t.Fatalf("expected at least one SABM after fallback")
+	}
+}
+
+func TestModuloForDefaultsTo8(t *testing.T) {
+	tbl, _, _ := newHarness(1200)
+	if m := tbl.ModuloFor(0, "KU0HN-10", "N0CALL-2"); m != 8 {
+		t.Fatalf("ModuloFor with no conn = %d, want 8", m)
+	}
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	c.modulo = 128
+	if m := tbl.ModuloFor(0, "KU0HN-10", "N0CALL-2"); m != 128 {
+		t.Fatalf("ModuloFor = %d, want 128", m)
+	}
+}
+
+func TestReceivedSREJRetransmitsOneFrame(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	tbl.params[0].MaxWindow = 7 // ensure all 4 I-frames transmit before SREJ arrives
+	// Establish outgoing mod-128 link.
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // SABME
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	rec.sent = nil
+
+	// Queue 4 I-frames (N(S) 0..3).
+	for i := 0; i < 4; i++ {
+		tbl.SendData(c, 0xF0, []byte{byte('A' + i)})
+	}
+	rec.sent = nil
+
+	// Peer SREJs frame 1: acks 0, requests only 1.
+	srej := mkFrame(ax25.SREJ, "N0CALL-2", "KU0HN-10", resp, nr(1))
+	tbl.OnFrame(0, srej)
+
+	// Exactly one I-frame retransmitted, and it is N(S)=1.
+	var iframes []*ax25.Frame
+	for _, f := range rec.sent {
+		if f.Type == ax25.I {
+			iframes = append(iframes, f)
+		}
+	}
+	if len(iframes) != 1 || iframes[0].NS != 1 {
+		t.Fatalf("SREJ retransmit = %d frames, first NS=%v; want exactly frame 1", len(iframes), iframes)
+	}
+}
+
+func TestXIDCommandGetsResponse(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	// Establish an incoming mod-128 link first.
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	rec.sent = nil
+
+	// Peer's XID command: modulo 128, SREJ single, N1 256, window 7.
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.XID {
+		t.Fatalf("sent = %+v, want one XID response", rec.sent)
+	}
+	got, err := ax25.ParseXID(rec.sent[0].Info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SREJ != ax25.SREJNone {
+		t.Errorf("SREJ = %v, want none (must suppress Direwolf SREJ)", got.SREJ)
+	}
+	if got.Modulo != 128 || got.IFieldLenRxBytes != 256 {
+		t.Errorf("params = %+v", got)
+	}
+	if got.WindowRx != 3 { // min(7, MaxWindow=3)
+		t.Errorf("window = %d, want 3", got.WindowRx)
+	}
+}
+
+// TestConnectResetsTriedFallback verifies that calling Connect on a reused Conn
+// resets triedFallback so that a fresh v2.2 attempt can still downgrade to SABM
+// if needed. getOrCreate returns the same Conn object on reconnect, so the reset
+// must happen inside Connect itself.
+func TestConnectResetsTriedFallback(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+
+	// First connect — sends SABME; force DM fallback so triedFallback becomes true.
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	tbl.OnFrame(0, mkFrame(ax25.DM, "N0CALL-2", "KU0HN-10", pf, resp))
+	if !c.triedFallback || c.modulo != 8 {
+		t.Fatalf("precondition: triedFallback=%v modulo=%d", c.triedFallback, c.modulo)
+	}
+
+	// Reconnect using the same (port, local, remote) — getOrCreate returns the
+	// same Conn. Connect must reset triedFallback and send SABME (not SABM).
+	rec.sent = nil
+	c2, err := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	if c2 != c {
+		t.Fatal("expected getOrCreate to return the same Conn object")
+	}
+	if c.triedFallback {
+		t.Error("triedFallback must be false after Connect (was not reset)")
+	}
+	if c.modulo != 128 {
+		t.Errorf("modulo = %d, want 128 (v2.2 port reset)", c.modulo)
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.SABME {
+		t.Errorf("sent = %+v, want exactly one SABME after reconnect", rec.sent)
+	}
+}
+
+// TestIncomingSABMESuppressedOnOtherPort mirrors TestOverheardSABMOnOtherPortDropped
+// but for SABME: if (local, remote) already has a Connecting/Connected conn on
+// port 0, an incoming SABME for the same pair on port 1 must be silently dropped
+// (no UA, no DM, no conn created on port 1).
+func TestIncomingSABMESuppressedOnOtherPort(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setV22(tbl, 1)
+
+	// Establish mod-128 conn for (KU0HN-10, N0CALL-2) on port 0 via incoming SABME.
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	c0 := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c0 == nil || c0.State != Connected {
+		t.Fatalf("precondition: port-0 conn not Connected (got %+v)", c0)
+	}
+
+	// Record frame count after port-0 setup, then deliver SABME on port 1.
+	n := len(rec.sent)
+	tbl.OnFrame(1, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+
+	// No new frames must have been sent (no UA, no DM).
+	if len(rec.sent) != n {
+		t.Errorf("overheard SABME sent %d unexpected frame(s) on port 1: %+v",
+			len(rec.sent)-n, rec.sent[n:])
+	}
+	// No conn must have been created on port 1.
+	if tbl.Get(1, "KU0HN-10", "N0CALL-2") != nil {
+		t.Error("phantom connection created on port 1 for overheard SABME")
+	}
+}
