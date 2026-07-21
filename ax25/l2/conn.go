@@ -77,6 +77,11 @@ type Conn struct {
 	// v2.2 fallback state
 	triedFallback bool // true once a v2.2 connect has downgraded to mod-8
 
+	// SREJ selective repeat (v2.2, phase 3.5)
+	srejEnabled bool              // negotiated SREJ receiver mode active
+	rxBuf       map[uint8]rxEntry // out-of-order I-frames keyed by N(S)
+	srejSent    map[uint8]bool    // N(S) already requested via SREJ (dedup)
+
 	// Karn RTT estimation (Task 9)
 	srtt   time.Duration
 	rttvar time.Duration
@@ -90,6 +95,12 @@ type outEntry struct {
 	data []byte
 }
 
+// rxEntry is a buffered out-of-order I-frame awaiting in-order delivery (SREJ).
+type rxEntry struct {
+	pid  uint8
+	info []byte
+}
+
 func newConn(port int, local, remote string) *Conn {
 	return &Conn{
 		Port:             port,
@@ -99,6 +110,8 @@ func newConn(port int, local, remote string) *Conn {
 		modulo:           8,
 		retransmitBuf:    make(map[uint8][]byte),
 		iframeTimestamps: make(map[uint8]time.Time),
+		rxBuf:            make(map[uint8]rxEntry),
+		srejSent:         make(map[uint8]bool),
 	}
 }
 
@@ -120,4 +133,7 @@ func (c *Conn) resetSeqs() {
 	c.iframeTimestamps = make(map[uint8]time.Time)
 	c.outQueue = c.outQueue[:0]
 	c.remoteBusy = false
+	c.srejEnabled = false
+	c.rxBuf = make(map[uint8]rxEntry)
+	c.srejSent = make(map[uint8]bool)
 }

@@ -1224,14 +1224,23 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 	}
 }
 
+// negotiateSREJ returns the agreed SREJ mode for the connection: SREJSingle iff
+// the port allows SREJ, the link is mod-128, and the peer advertised
+// >= SREJSingle; otherwise SREJNone. Mirrors Direwolf's "keep the lower value".
+func (t *Table) negotiateSREJ(c *Conn, peerSREJ ax25.SREJMode) ax25.SREJMode {
+	if t.portParams(c.Port).SREJ && c.modulo == 128 && peerSREJ >= ax25.SREJSingle {
+		return ax25.SREJSingle
+	}
+	return ax25.SREJNone
+}
+
 // dispatchXID answers an XID command with a min-negotiated XID response.
-// tncd is a passive responder: it never initiates XID. We always advertise
-// SREJ off (which is what turns Direwolf's default-on single-SREJ off) and
-// our fixed N1 = 256, negotiating the window down to the peer's request.
+// tncd is a passive responder: it never initiates XID. We negotiate SREJ
+// when the port has SREJ enabled, the link is mod-128, and the peer supports it.
 // Mirrors Direwolf xid_frame (mdl_state_0_ready, command branch).
 func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 	if !f.Command || !f.PF {
-		return // only XID command with P=1 is actionable; a response is unexpected
+		return // command with P=1 only; response handling arrives in Task 3
 	}
 	if !t.isLocal(port, dst) {
 		return
@@ -1245,13 +1254,15 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 		return
 	}
 	pp := t.portParams(port)
+	neg := t.negotiateSREJ(c, their.SREJ)
+	c.srejEnabled = neg >= ax25.SREJSingle
 	window := pp.MaxWindow
 	if their.WindowRx > 0 && their.WindowRx < window {
 		window = their.WindowRx
 	}
 	resp := ax25.XIDParams{
 		FullDuplex:       false,
-		SREJ:             ax25.SREJNone,
+		SREJ:             neg,
 		Modulo:           128,
 		IFieldLenRxBytes: 256,
 		WindowRx:         window,

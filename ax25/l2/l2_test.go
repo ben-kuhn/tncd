@@ -394,6 +394,73 @@ func TestConnectResetsTriedFallback(t *testing.T) {
 	}
 }
 
+func setSREJ(tbl *Table, port int, on bool) { tbl.params[port].SREJ = on }
+
+func TestXIDAnswererEnablesSREJ(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf)) // mod-128 conn
+	rec.sent = nil
+
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || !c.srejEnabled {
+		t.Fatalf("srejEnabled = false, want true")
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.XID {
+		t.Fatalf("want one XID response, got %+v", rec.sent)
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJSingle {
+		t.Errorf("response SREJ = %v, want SREJSingle", got.SREJ)
+	}
+}
+
+func TestXIDAnswererSREJNoneWhenPeerNone(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	rec.sent = nil
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJNone, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled = true, want false (peer advertised none)")
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJNone {
+		t.Errorf("response SREJ = %v, want SREJNone", got.SREJ)
+	}
+}
+
+func TestXIDAnswererSREJOffConfig(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, false) // config off
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	rec.sent = nil
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled = true, want false (srej config off)")
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJNone {
+		t.Errorf("response SREJ = %v, want SREJNone (config off)", got.SREJ)
+	}
+}
+
 // TestIncomingSABMESuppressedOnOtherPort mirrors TestOverheardSABMOnOtherPortDropped
 // but for SABME: if (local, remote) already has a Connecting/Connected conn on
 // port 0, an incoming SABME for the same pair on port 1 must be silently dropped
