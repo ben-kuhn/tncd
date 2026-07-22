@@ -678,6 +678,44 @@ func TestSREJTrailingHoleFBitZero(t *testing.T) {
 	}
 }
 
+func TestFRMROfXIDPreservesConnection(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)                 // SABME
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))  // -> Connected + XID sent
+	rec.sent = nil
+	// Peer FRMRs our XID (partial v2.2: accepted SABME, rejects XID).
+	tbl.OnFrame(0, mkFrame(ax25.FRMR, "N0CALL-2", "KU0HN-10", resp))
+	if c.State != Connected {
+		t.Fatalf("state = %v, want Connected (must not reset)", c.State)
+	}
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled true, want false after XID rejected")
+	}
+	for _, f := range rec.sent {
+		if f.Type == ax25.SABM || f.Type == ax25.SABME {
+			t.Fatalf("re-SABM sent after FRMR-of-XID (loop risk): %+v", rec.sent)
+		}
+	}
+}
+
+func TestDMOfXIDPreservesConnection(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.DM, "N0CALL-2", "KU0HN-10", resp))
+	if tbl.Get(0, "KU0HN-10", "N0CALL-2") == nil || c.State != Connected {
+		t.Fatalf("connection torn down by DM-of-XID; want preserved")
+	}
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled true, want false")
+	}
+}
+
 func TestIncomingSABMESuppressedOnOtherPort(t *testing.T) {
 	tbl, rec, _ := newHarness(1200)
 	setV22(tbl, 0)

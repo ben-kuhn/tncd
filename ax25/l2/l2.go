@@ -976,6 +976,13 @@ func (t *Table) dispatchDM(port int, f *ax25.Frame, src, dst string) {
 		t.fallbackToSABM(c)
 		return
 	}
+	// A DM while awaiting our XID response = peer rejects XID; keep the
+	// connection (do not tear it down over an XID the peer didn't understand).
+	if c.State == Connected && c.xidPending {
+		c.xidPending = false
+		c.srejEnabled = false
+		return
+	}
 	if c.State == Connecting {
 		if t.hooks.ConnectFailed != nil {
 			t.hooks.ConnectFailed(c, FailDM)
@@ -1028,6 +1035,15 @@ func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	c := t.Get(port, dst, src)
 	if c != nil && c.State == Connecting && c.modulo == 128 && !c.triedFallback {
 		t.fallbackToSABM(c)
+		return
+	}
+	// A FRMR while we are awaiting our XID response means the peer does not
+	// understand XID (partial v2.2). Disable SREJ and keep the connection on
+	// REJ — do NOT reset+re-SABM (that would re-send XID and loop). Mirrors
+	// Direwolf's "FRMR of XID -> use v2.0 params, stay connected".
+	if c != nil && c.State == Connected && c.xidPending {
+		c.xidPending = false
+		c.srejEnabled = false
 		return
 	}
 	if c == nil || c.State != Connected {
@@ -1323,6 +1339,7 @@ func (t *Table) sendXIDCommand(c *Conn) {
 	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.XID, true) // command, P=1
 	f.Info = params.Encode(true)                            // command form
 	t.sendFrame(c.Port, f)
+	c.xidPending = true
 }
 
 // negotiateSREJ returns the agreed SREJ mode for the connection: SREJSingle iff
@@ -1364,6 +1381,7 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 			return
 		}
 		neg := t.negotiateSREJ(c, their.SREJ)
+		c.xidPending = false
 		c.srejEnabled = neg >= ax25.SREJSingle
 		return
 	}

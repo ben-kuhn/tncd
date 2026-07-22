@@ -78,6 +78,7 @@ type Conn struct {
 	triedFallback bool // true once a v2.2 connect has downgraded to mod-8
 
 	// SREJ selective repeat (v2.2, phase 3.5)
+	xidPending  bool              // we sent an XID command and await its response
 	srejEnabled bool              // negotiated SREJ receiver mode active
 	rxBuf       map[uint8]rxEntry // out-of-order I-frames keyed by N(S)
 	srejSent    map[uint8]bool    // N(S) already requested via SREJ (dedup)
@@ -133,6 +134,7 @@ func (c *Conn) resetSeqs() {
 	c.iframeTimestamps = make(map[uint8]time.Time)
 	c.outQueue = c.outQueue[:0]
 	c.remoteBusy = false
+	c.xidPending = false
 	c.srejEnabled = false
 	c.rxBuf = make(map[uint8]rxEntry)
 	c.srejSent = make(map[uint8]bool)
