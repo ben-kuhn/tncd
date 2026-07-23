@@ -96,12 +96,29 @@ Triage the deferred Minor findings from the phase-3/3.5 review ledger. **Fix**
 the worthwhile ones; **leave** the intentional/unreachable ones (a short note in
 the report is enough — no code change).
 
+**Policy shift (Python parity).** The Go port was written to mirror the frozen
+`tncd.py` 1.3.1 reference, and several edge cases were previously left "to match
+Python." Now that the port is OTA-proven and stands on its own, **bug-for-bug
+Python parity is no longer a hard constraint.** Noticed edge cases where the
+Python behavior is wrong or a footgun may be fixed as genuine improvements,
+recorded as deliberate divergences. This sweep is the first application of that
+policy; it also applies going forward.
+
 **Fix:**
 - **KISS param escaping (real bug).** The KISS command/param builder does not
   KISS-escape value bytes, so a param value of `0xC0` (FEND) or `0xDB` (FESC) —
   e.g. `persistence = 192` in a user config — corrupts the frame. Escape the
   value bytes per the KISS spec (`0xC0`→`0xDB 0xDC`, `0xDB`→`0xDB 0xDD`). Add a
   test with a `0xC0`/`0xDB` value.
+- **Callsign length validation (now fixable — deviates from Python).** `Build`
+  silently truncates a callsign longer than 6 characters / SSID out of range.
+  Python does the same, but silent truncation can put a *wrong* callsign on the
+  air. Validate instead: reject an over-long callsign or out-of-range SSID with
+  an error at the point of construction (and surface it clearly for config-time
+  callsigns) rather than silently truncating. Add tests.
+- **SSID range in `encode()` (now fixable — deviates from Python).** `encode()`
+  does not mask/validate SSID > 15; an out-of-range SSID corrupts the address
+  byte. Validate or mask defensively. (Pairs with the callsign validation above.)
 - Dead code: remove genuinely unused fields/helpers/test vars still present
   (e.g. unused `Timer.fired`, `serialPort` field, `dupFD` helper, `rawWithVia`
   test var, dead `shouldStop` read) — verify each is truly unused before removing.
@@ -112,16 +129,17 @@ the report is enough — no code change).
   `sabmCount == 1`; add a `ParseModulo(<short>, 128)` error-path test; add a
   `SREJMulti` XID encode/parse round-trip test.
 
-**Leave (note only, no change):** intentional or unreachable items — `encode()`
-SSID>15 not masked (unreachable via production paths), callsign truncation >10
-bytes (matches the Python reference by design), `MaxPayload` enforced at the
-frontend not the codec, `sweepIdleClients` iterating a live slice (safe by
-convention), the XID response branch not gating `f.PF` (accepted; can't loop),
-packaging `postInstall` guards and `platforms.linux` (phase-4 packaging scope),
-and documented CLI limitations (`-vt` clusters, `K` raw frames vs `-t`).
+**Leave (note only, no change):** genuinely fine items — `MaxPayload` enforced
+at the frontend not the codec (a design boundary, not a bug), `sweepIdleClients`
+iterating a live slice (safe by convention), the XID response branch not gating
+`f.PF` (accepted; can't loop), packaging `postInstall` guards and
+`platforms.linux` (phase-4 packaging scope), and documented CLI limitations
+(`-vt` clusters, `K` raw frames vs `-t`).
 
 Each item verified individually before change; anything that turns out to be
-load-bearing is left and noted rather than removed.
+load-bearing is left and noted rather than removed. Where a fix deviates from the
+Python reference, note it as a deliberate divergence (in the code comment and the
+report).
 
 ## Non-goals
 
