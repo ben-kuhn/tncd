@@ -44,6 +44,17 @@ func TestParseXIDRoundTrip(t *testing.T) {
 	}
 }
 
+func TestXIDMultiSREJRoundTrip(t *testing.T) {
+	p := XIDParams{SREJ: SREJMulti, Modulo: 128, IFieldLenRxBytes: 256, WindowRx: 7}
+	got, err := ParseXID(p.Encode(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SREJ != SREJMulti {
+		t.Fatalf("round-trip SREJ = %v, want SREJMulti", got.SREJ)
+	}
+}
+
 func stripSpaces(s string) string {
 	out := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
