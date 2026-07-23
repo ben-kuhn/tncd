@@ -6,9 +6,44 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+// fakeHandlePort mimics go.bug.st/serial's *unixPort: a modemPort with an
+// unexported int "handle" field. It guards the libSerialFD reflection mechanism
+// against a local regression. (It cannot catch an upstream field rename — see
+// the pin comment in go.mod.)
+type fakeHandlePort struct{ handle int }
+
+func (fakeHandlePort) SetDTR(bool) error                  { return nil }
+func (fakeHandlePort) SetRTS(bool) error                  { return nil }
+func (fakeHandlePort) SetReadTimeout(time.Duration) error { return nil }
+func (fakeHandlePort) Close() error                       { return nil }
+
+// noHandlePort is a modemPort with no "handle" field.
+type noHandlePort struct{}
+
+func (noHandlePort) SetDTR(bool) error                  { return nil }
+func (noHandlePort) SetRTS(bool) error                  { return nil }
+func (noHandlePort) SetReadTimeout(time.Duration) error { return nil }
+func (noHandlePort) Close() error                       { return nil }
+
+func TestLibSerialFD(t *testing.T) {
+	if fd, ok := libSerialFD(&fakeHandlePort{handle: 42}); !ok || fd != 42 {
+		t.Errorf("libSerialFD(&fakeHandlePort{42}) = (%d, %v), want (42, true)", fd, ok)
+	}
+	if _, ok := libSerialFD(&noHandlePort{}); ok {
+		t.Errorf("libSerialFD(&noHandlePort) = ok, want false (no handle field)")
+	}
+	if _, ok := libSerialFD(fakeHandlePort{handle: 1}); ok {
+		t.Errorf("libSerialFD(non-pointer) = ok, want false")
+	}
+	if _, ok := libSerialFD((*fakeHandlePort)(nil)); ok {
+		t.Errorf("libSerialFD(nil pointer) = ok, want false")
+	}
+}
 
 // TestApplyRTSCTS verifies applyRTSCTS sets the CRTSCTS termios flag on a tty.
 // A pty slave is a tty that stores termios flags, so we can set and read back
