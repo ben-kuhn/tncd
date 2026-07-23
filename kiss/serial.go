@@ -101,10 +101,12 @@ func (s *serialTransport) Open() error {
 	if err := port.SetDTR(true); err != nil {
 		log.Printf("serial: SetDTR not supported on %s (non-fatal): %v", s.cfg.Device, err)
 	}
-	// Hold RTS low: some interfaces (e.g. Digirig) wire RTS to PTT, so
-	// asserting it on open would key the transmitter.
-	// Same non-fatal rationale as DTR above.
-	if err := port.SetRTS(false); err != nil {
+	// RTS polarity depends on the interface. With hardware flow control the TNC
+	// needs RTS asserted (host ready); CRTSCTS below then manages it. Without
+	// flow control, hold RTS low — some interfaces (e.g. Digirig) wire RTS to
+	// PTT, so asserting it on open would key the transmitter.
+	rts := s.cfg.RTSCTS
+	if err := port.SetRTS(rts); err != nil {
 		log.Printf("serial: SetRTS not supported on %s (non-fatal): %v", s.cfg.Device, err)
 	}
 
@@ -128,7 +130,7 @@ func (s *serialTransport) Open() error {
 	// SetReadTimeout (the library's last termios write) so it isn't clobbered.
 	// Non-fatal: a device without flow-control lines still works without it.
 	if s.cfg.RTSCTS {
-		if err := applyRTSCTS(s.cfg.Device); err != nil {
+		if err := applyRTSCTS(port); err != nil {
 			log.Printf("serial: WARNING: could not enable RTSCTS on %s (non-fatal): %v", s.cfg.Device, err)
 		} else {
 			log.Printf("serial: hardware flow control (RTSCTS) enabled on %s", s.cfg.Device)

@@ -29,15 +29,16 @@ func TestApplyRTSCTS(t *testing.T) {
 	}
 	slave := fmt.Sprintf("/dev/pts/%d", n)
 
-	if err := applyRTSCTS(slave); err != nil {
-		t.Fatalf("applyRTSCTS: %v", err)
-	}
-
 	fd, err := unix.Open(slave, unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		t.Fatalf("open slave: %v", err)
 	}
 	defer unix.Close(fd)
+
+	if err := applyRTSCTSFD(fd); err != nil {
+		t.Fatalf("applyRTSCTSFD: %v", err)
+	}
+
 	tio, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
 		t.Fatalf("TCGETS: %v", err)
