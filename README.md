@@ -1,5 +1,16 @@
 # tncd — AGWPE-to-KISS Bridge
 
+> **Two release lines.** The stable **1.3.x** line (Python) documented here is the
+> recommended version for production stations, and is what the public
+> `apt.tncd.dev` / `rpm.tncd.dev` repositories serve. A **2.0 line** (`v1.9x-Beta`
+> tags) is a from-scratch **Go rewrite** — a single static binary with no Python
+> runtime, plus AX.25 v2.2 (SABME/modulo-128, XID, SREJ) and native Bluetooth SPP.
+> The 2.0 line is a **beta** and **not yet as thoroughly tested as the 1.3.x Python
+> line** — try it if you want the standalone binary, but keep 1.3.x if you need
+> proven stability. Grab 2.0 betas from the
+> [GitHub releases](https://github.com/ben-kuhn/tncd/releases) or the
+> [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) overlay.
+
 A userspace bridge that lets AGWPE-compatible applications (PAT/Winlink, Paracon,
 Xastir) communicate with KISS TNCs, including full AX.25 connected-mode support.
 Tested over the air with real BBS andWinlink sessions at 1200 baud. Developed

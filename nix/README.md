@@ -1,8 +1,14 @@
 # Nix / NixOS support
 
+> **Beta (2.0 Go line).** The `tncd` package in the overlay now tracks the **2.0
+> Go rewrite** (`v1.9x-Beta` tags) — a single static binary built with
+> `buildGoModule`, no Python dependencies. It is a **beta** and **not yet as
+> thoroughly tested as the stable 1.3.x Python line**. If you need proven
+> stability, install a 1.3.x package from `apt.tncd.dev` / `rpm.tncd.dev` instead.
+
 tncd is packaged in [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages),
-which provides the `tncd` package and all its dependencies (`kiss3`, `pyham-ax25`, etc.)
-as a nixpkgs overlay.
+which provides the `tncd` package as a nixpkgs overlay. The 2.0 package is a pure-Go
+build (`buildGoModule`, `CGO_ENABLED=0`) with no runtime dependencies.
 
 The NixOS service module is also in
 [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) and provides

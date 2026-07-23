@@ -100,6 +100,17 @@
       text-decoration: none;
     }
     .release-header .tag:hover { border-color: var(--accent); text-decoration: none; }
+    .release-header .tag.beta { color: var(--yellow); }
+    .beta-note {
+      background: rgba(210, 153, 34, 0.08);
+      border: 1px solid var(--yellow);
+      border-left-width: 4px;
+      border-radius: 6px;
+      padding: 0.85rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.92rem;
+    }
+    .beta-note strong { color: var(--yellow); }
     .release-body {
       padding: 1.25rem;
     }
@@ -153,6 +164,73 @@
 </header>
 
 <main>
+
+  <!-- v1.98-Beta -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.98-Beta</h2>
+      <span class="date">July 2026</span>
+      <a class="tag beta" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.98-Beta">release</a>
+    </div>
+    <div class="release-body">
+      <div class="beta-note">
+        <strong>Beta &mdash; tncd 2.0 line.</strong> This is the pure-Go rewrite of tncd.
+        It is newer and <strong>not yet as thoroughly tested as the stable 1.3.x Python
+        line</strong>, which remains the recommended version for production stations
+        (and is what the public <code>apt.tncd.dev</code> / <code>rpm.tncd.dev</code>
+        repositories continue to serve). Try the 2.0 beta if you want the single static
+        binary with no Python runtime &mdash; but keep 1.3.x if you need proven stability.
+      </div>
+      <h3>Bug Fixes</h3>
+      <ul>
+        <li>Clearer error when a serial port is busy &mdash; opening a port that is
+          already in use (or exclusively locked by another program) now reports a plain
+          "port is busy" message instead of a cryptic <code>device or resource busy</code>
+          errno.</li>
+        <li>KISS-entry probe hardening &mdash; when an <code>init_string</code> is
+          configured, tncd now retries the command-mode probe a few times (spaced by
+          <code>init_delay</code>) to give a TNC time to finish rebooting after
+          <code>RESET</code>. On no response it sends the init string anyway and logs an
+          honest warning, instead of silently assuming the TNC was already in KISS mode
+          and skipping initialization.</li>
+      </ul>
+      <h3>Internal</h3>
+      <ul>
+        <li>Defensive AX.25 SSID masking in the address encoder; additional codec test
+          coverage (mod-128 short-frame handling, multi-SREJ XID round-trip) and comment
+          cleanup.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- v1.97-Beta -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.97-Beta</h2>
+      <span class="date">July 2026</span>
+      <a class="tag beta" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.97-Beta">release</a>
+    </div>
+    <div class="release-body">
+      <div class="beta-note">
+        <strong>Beta &mdash; first tncd 2.0 release.</strong> The initial pure-Go rewrite.
+        See the note on v1.98-Beta above: the 1.3.x Python line remains the stable,
+        recommended version.
+      </div>
+      <h3>New</h3>
+      <ul>
+        <li>Complete rewrite of tncd in Go &mdash; the daemon is now a single, fully
+          static binary (<code>CGO_ENABLED=0</code>) with no <code>python3</code> runtime
+          dependency.</li>
+        <li>AX.25 v2.2 support: SABME / modulo-128 with automatic fallback to v2.0
+          modulo-8, XID parameter negotiation, and selective reject (SREJ) recovery
+          &mdash; validated over the air against a Direwolf reference in both directions.</li>
+        <li>Native Bluetooth SPP support via BlueZ D-Bus (no <code>rfcomm</code> setup).</li>
+        <li>Packaging moves from fpm/Python to nfpm/Go cross-compilation; prebuilt
+          <code>.deb</code>, <code>.rpm</code>, and static binaries for amd64, arm64,
+          armhf, i386, and riscv64 on each GitHub release.</li>
+      </ul>
+    </div>
+  </div>
 
   <!-- v1.3.2 -->
   <div class="release">
