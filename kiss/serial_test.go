@@ -149,6 +149,30 @@ func TestOpenNonFatalDTRRTSError(t *testing.T) {
 	}
 }
 
+func TestEnterKISSRetryCatchesSlowTNC(t *testing.T) {
+	// Silent on the first two probes (TNC still rebooting), cmd text on the 3rd.
+	fs := &fakeSerial{responses: [][]byte{{}, {}, []byte("cmd:"), {}}}
+	st := newTestSerial(fs, SerialConfig{InitString: `INT KISS\rRESET\r`, InitDelay: time.Millisecond})
+	if err := st.EnterKISS(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fs.written.String(), "INT KISS\r") {
+		t.Fatalf("init not sent after retry caught cmd mode; written=%q", fs.written.String())
+	}
+}
+
+func TestEnterKISSSendsInitOnSilence(t *testing.T) {
+	// Never any response: ambiguous. Init must be sent anyway; no error.
+	fs := &fakeSerial{responses: [][]byte{{}, {}, {}}}
+	st := newTestSerial(fs, SerialConfig{InitString: `INT KISS\rRESET\r`, InitDelay: time.Millisecond})
+	if err := st.EnterKISS(); err != nil {
+		t.Fatalf("silence should not error: %v", err)
+	}
+	if !strings.Contains(fs.written.String(), "INT KISS\r") {
+		t.Fatalf("init not sent on silence; written=%q", fs.written.String())
+	}
+}
+
 func TestOpenBusyPortClearError(t *testing.T) {
 	st := NewSerialTransport(SerialConfig{Device: "/dev/ttyUSB9"}).(*serialTransport)
 	st.openPort = func(string, *goserial.Mode) (modemPort, error) {
