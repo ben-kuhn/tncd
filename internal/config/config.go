@@ -59,7 +59,8 @@ type Port struct {
 	HostExitString string
 	ExitDelay      float64 // default 1.0
 
-	AX25Version int // 20 or 22; default 22
+	AX25Version int  // 20 or 22; default 22
+	SREJ        bool // v2.2 selective reject; default true, effective only on mod-128 links
 
 	KISS kiss.Params // from [kiss.N]; nil fields = don't send
 }
@@ -89,7 +90,7 @@ var knownClientKeys = []string{
 	"bdaddr", "channel", "reconnect", "reconnect_delay", "reconnect_max_delay",
 	"ota_baudrate", "init_string", "init_delay", "send_kiss_exit",
 	"host_exit_string", "exit_delay",
-	"ax25_version",
+	"ax25_version", "srej",
 }
 
 // knownKISSKeys are the recognized keys in [kiss.N].
@@ -470,6 +471,7 @@ func Load(path string) (*Config, error) {
 			HostExitString:    getString(s, "host_exit_string", ""),
 			ExitDelay:         getFloat(s, "exit_delay", 1.0),
 			AX25Version:       ax25Version,
+			SREJ:              getBool(s, "srej", true),
 		}
 
 		// Parse corresponding [kiss.N] section if present

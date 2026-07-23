@@ -390,6 +390,7 @@ func (b *Bridge) Start() error {
 			b.cfg.AX25.T3Timeout,
 		)
 		params[i].AX25Version = b.cfg.Ports[i].AX25Version
+		params[i].SREJ = b.cfg.Ports[i].SREJ
 	}
 
 	hooks := l2pkg.Hooks{

@@ -25,6 +25,7 @@ type PortParams struct {
 	T2          time.Duration // max(100ms, 1.2*frameTime)
 	T3          time.Duration // 0 disables
 	AX25Version int           // 20 (mod-8 only) or 22 (attempt SABME/mod-128); default 20
+	SREJ        bool          // v2.2 selective reject enabled for this port (default set by bridge)
 }
 
 // DeriveParams computes PortParams from the on-air baud rate and config.
@@ -950,6 +951,11 @@ func (t *Table) dispatchUA(port int, f *ax25.Frame, src, dst string) {
 		if t.hooks.Connected != nil {
 			t.hooks.Connected(c, false)
 		}
+		// Initiator XID: the answering peer does not send XID, so we must, to
+		// negotiate SREJ for the (download) direction where tncd is the receiver.
+		if t.portParams(port).SREJ && c.modulo == 128 {
+			t.sendXIDCommand(c)
+		}
 
 	case Disconnecting:
 		// Disconnect confirmed (tncd.py:1936-1944).
@@ -968,6 +974,13 @@ func (t *Table) dispatchDM(port int, f *ax25.Frame, src, dst string) {
 	}
 	if c.State == Connecting && c.modulo == 128 && !c.triedFallback {
 		t.fallbackToSABM(c)
+		return
+	}
+	// A DM while awaiting our XID response = peer rejects XID; keep the
+	// connection (do not tear it down over an XID the peer didn't understand).
+	if c.State == Connected && c.xidPending {
+		c.xidPending = false
+		c.srejEnabled = false
 		return
 	}
 	if c.State == Connecting {
@@ -1022,6 +1035,15 @@ func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	c := t.Get(port, dst, src)
 	if c != nil && c.State == Connecting && c.modulo == 128 && !c.triedFallback {
 		t.fallbackToSABM(c)
+		return
+	}
+	// A FRMR while we are awaiting our XID response means the peer does not
+	// understand XID (partial v2.2). Disable SREJ and keep the connection on
+	// REJ — do NOT reset+re-SABM (that would re-send XID and loop). Mirrors
+	// Direwolf's "FRMR of XID -> use v2.0 params, stay connected".
+	if c != nil && c.State == Connected && c.xidPending {
+		c.xidPending = false
+		c.srejEnabled = false
 		return
 	}
 	if c == nil || c.State != Connected {
@@ -1095,6 +1117,57 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 
 	pp := t.portParams(port)
 	expectedNS := c.recvSeq
+
+	if c.srejEnabled {
+		gap := (f.NS - expectedNS) % c.modulo
+		if gap > 0 {
+			if int(gap) > pp.MaxWindow {
+				// Outside window (or old duplicate): discard; honor a poll.
+				if f.PF {
+					cancelT2(c)
+					t.sendRRGuarded(c, src, dst)
+				} else {
+					t.scheduleT2(c, src, dst)
+				}
+				return
+			}
+			// In-window, ahead of V(R): buffer (copy — f.Info may alias) and
+			// request every not-yet-requested hole in [V(R), N(S)).
+			c.rxBuf[f.NS] = rxEntry{pid: f.PID, info: append([]byte(nil), f.Info...)}
+			delete(c.srejSent, f.NS) // it arrived
+			cancelT2(c)
+			t.sendSREJHoles(c, src, dst, f.NS)
+			return
+		}
+		// gap == 0: in sequence. Deliver, then flush contiguous buffered frames.
+		delete(c.srejSent, f.NS)
+		t.deliverData(c, f.PID, f.Info)
+		c.recvSeq = (f.NS + 1) % c.modulo
+		for {
+			e, ok := c.rxBuf[c.recvSeq]
+			if !ok {
+				break
+			}
+			delete(c.rxBuf, c.recvSeq)
+			delete(c.srejSent, c.recvSeq)
+			t.deliverData(c, e.pid, e.info)
+			c.recvSeq = (c.recvSeq + 1) % c.modulo
+		}
+		// No SREJ needed here: every hole below a still-buffered frame was
+		// already requested when that frame arrived (recvSeq only advances, so
+		// srejSent still covers it). Re-scanning to recvSeq+window would wrongly
+		// SREJ trailing slots the sender has not transmitted.
+		// Acknowledge the advanced V(R).
+		if f.PF {
+			cancelT2(c)
+			t.sendRRGuarded(c, src, dst)
+		} else {
+			t.scheduleT2(c, src, dst)
+		}
+		return
+	}
+
+	// --- SREJ not enabled: existing phase-3 REJ / go-back-N path (unchanged) ---
 	if f.NS != expectedNS {
 		// Out-of-sequence or duplicate frame.
 		gap := (f.NS - expectedNS) % c.modulo
@@ -1117,25 +1190,52 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 		}
 		return
 	}
-
-	// In-sequence frame: advance V(R) and schedule delayed ACK.
-	// Mirrors tncd.py:1816-1832.
 	c.recvSeq = (f.NS + 1) % c.modulo
 	if f.PF {
-		// Poll requires immediate response.
 		cancelT2(c)
 		t.sendRRGuarded(c, src, dst)
 	} else {
-		// Delay the RR to batch-acknowledge a burst.
 		t.scheduleT2(c, src, dst)
 	}
-	// Deliver data to connection owner.
 	if t.hooks.Data != nil {
 		data := f.Info
 		if data == nil {
 			data = []byte{}
 		}
 		t.hooks.Data(c, f.PID, data)
+	}
+}
+
+// deliverData hands an in-sequence payload to the connection owner.
+func (t *Table) deliverData(c *Conn, pid uint8, info []byte) {
+	if t.hooks.Data == nil {
+		return
+	}
+	if info == nil {
+		info = []byte{}
+	}
+	t.hooks.Data(c, pid, info)
+}
+
+// sendSREJHoles sends a single SREJ (response) for each missing sequence number
+// in [V(R), upto) that is not buffered and not already requested, recording each
+// in srejSent (dedup). F=1 only on the SREJ for V(R) itself (also acknowledges).
+func (t *Table) sendSREJHoles(c *Conn, src, dst string, upto uint8) {
+	for i := 0; i < int(c.modulo); i++ { // bound defends against a bad upto
+		ns := (c.recvSeq + uint8(i)) % c.modulo
+		if ns == upto {
+			break
+		}
+		if _, buffered := c.rxBuf[ns]; buffered {
+			continue
+		}
+		if c.srejSent[ns] {
+			continue
+		}
+		srej := respFrame(src, dst, c.Via, ax25.SREJ, ns == c.recvSeq) // F=1 iff V(R)
+		srej.NR = ns
+		c.srejSent[ns] = true
+		t.sendFrame(c.Port, srej)
 	}
 }
 
@@ -1223,15 +1323,44 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 	}
 }
 
-// dispatchXID answers an XID command with a min-negotiated XID response.
-// tncd is a passive responder: it never initiates XID. We always advertise
-// SREJ off (which is what turns Direwolf's default-on single-SREJ off) and
-// our fixed N1 = 256, negotiating the window down to the peer's request.
-// Mirrors Direwolf xid_frame (mdl_state_0_ready, command branch).
-func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
-	if !f.Command || !f.PF {
-		return // only XID command with P=1 is actionable; a response is unexpected
+// sendXIDCommand sends an XID command (P=1) advertising our SREJ capability, so
+// that when tncd is the connection initiator the peer (which does not initiate
+// XID) learns we support SREJ and negotiates it. Mirrors Direwolf's initiator
+// sending XID after UA.
+func (t *Table) sendXIDCommand(c *Conn) {
+	pp := t.portParams(c.Port)
+	params := ax25.XIDParams{
+		FullDuplex:       false,
+		SREJ:             ax25.SREJSingle,
+		Modulo:           128,
+		IFieldLenRxBytes: 256,
+		WindowRx:         pp.MaxWindow,
 	}
+	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.XID, true) // command, P=1
+	f.Info = params.Encode(true)                            // command form
+	t.sendFrame(c.Port, f)
+	c.xidPending = true
+}
+
+// negotiateSREJ returns the agreed SREJ mode for the connection: SREJSingle iff
+// the port allows SREJ, the link is mod-128, and the peer advertised
+// >= SREJSingle; otherwise SREJNone. Mirrors Direwolf's "keep the lower value".
+func (t *Table) negotiateSREJ(c *Conn, peerSREJ ax25.SREJMode) ax25.SREJMode {
+	if t.portParams(c.Port).SREJ && c.modulo == 128 && peerSREJ >= ax25.SREJSingle {
+		return ax25.SREJSingle
+	}
+	return ax25.SREJNone
+}
+
+// dispatchXID handles both XID commands (answerer role) and XID responses
+// (initiator role, after sendXIDCommand).
+//
+// Command (answerer): negotiate SREJ, enable it, and reply with an XID response.
+// Mirrors Direwolf xid_frame (mdl_state_0_ready, command branch).
+//
+// Response (initiator): adopt the negotiated SREJ from the peer's reply; no
+// further reply is sent. This is the path triggered after Task 3's sendXIDCommand.
+func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 	if !t.isLocal(port, dst) {
 		return
 	}
@@ -1243,20 +1372,40 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 	if err != nil {
 		return
 	}
+
+	if !f.Command {
+		// Response to our initiated XID command: adopt the negotiated SREJ, no reply.
+		// Only act when Connected — an XID response is only valid on an established
+		// connection; ignore unsolicited or duplicate responses in other states.
+		if c.State != Connected {
+			return
+		}
+		neg := t.negotiateSREJ(c, their.SREJ)
+		c.xidPending = false
+		c.srejEnabled = neg >= ax25.SREJSingle
+		return
+	}
+	if !f.PF {
+		return // command must have P=1
+	}
+
+	// Command (answerer role): negotiate, enable, and respond.
 	pp := t.portParams(port)
+	neg := t.negotiateSREJ(c, their.SREJ)
+	c.srejEnabled = neg >= ax25.SREJSingle
 	window := pp.MaxWindow
 	if their.WindowRx > 0 && their.WindowRx < window {
 		window = their.WindowRx
 	}
-	resp := ax25.XIDParams{
+	rsp := ax25.XIDParams{
 		FullDuplex:       false,
-		SREJ:             ax25.SREJNone,
+		SREJ:             neg,
 		Modulo:           128,
 		IFieldLenRxBytes: 256,
 		WindowRx:         window,
 	}
 	out := respFrame(src, dst, c.Via, ax25.XID, true) // response, F=1
-	out.Info = resp.Encode(false)
+	out.Info = rsp.Encode(false)
 	t.sendFrame(port, out)
 }
 

@@ -394,10 +394,328 @@ func TestConnectResetsTriedFallback(t *testing.T) {
 	}
 }
 
+func setSREJ(tbl *Table, port int, on bool) { tbl.params[port].SREJ = on }
+
+func TestXIDAnswererEnablesSREJ(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf)) // mod-128 conn
+	rec.sent = nil
+
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || !c.srejEnabled {
+		t.Fatalf("srejEnabled = false, want true")
+	}
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.XID {
+		t.Fatalf("want one XID response, got %+v", rec.sent)
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJSingle {
+		t.Errorf("response SREJ = %v, want SREJSingle", got.SREJ)
+	}
+}
+
+func TestXIDAnswererSREJNoneWhenPeerNone(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	rec.sent = nil
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJNone, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled = true, want false (peer advertised none)")
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJNone {
+		t.Errorf("response SREJ = %v, want SREJNone", got.SREJ)
+	}
+}
+
+func TestXIDAnswererSREJOffConfig(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, false) // config off
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	rec.sent = nil
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled = true, want false (srej config off)")
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJNone {
+		t.Errorf("response SREJ = %v, want SREJNone (config off)", got.SREJ)
+	}
+}
+
+func TestInitiatorSendsXIDOnConnect(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // sends SABME
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp)) // connect confirmed
+	// After UA, tncd should send an XID command advertising SREJSingle.
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.XID || !rec.sent[0].Command {
+		t.Fatalf("want one XID command, got %+v", rec.sent)
+	}
+	got, _ := ax25.ParseXID(rec.sent[0].Info)
+	if got.SREJ != ax25.SREJSingle {
+		t.Errorf("XID cmd SREJ = %v, want SREJSingle", got.SREJ)
+	}
+	if c.srejEnabled {
+		t.Errorf("srejEnabled true before response; want false until response arrives")
+	}
+}
+
+func TestInitiatorEnablesSREJOnXIDResponse(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	rec.sent = nil
+	// Peer's XID response advertising SREJSingle (F=1 response).
+	rsp := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf, resp) // response
+	xf.Info = rsp.Encode(false)
+	tbl.OnFrame(0, xf)
+	if !c.srejEnabled {
+		t.Fatalf("srejEnabled = false after SREJSingle XID response, want true")
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("must not reply to an XID response, sent %+v", rec.sent)
+	}
+}
+
+func TestInitiatorNoXIDWhenSREJOff(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, false)
+	tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	for _, fr := range rec.sent {
+		if fr.Type == ax25.XID {
+			t.Fatalf("XID command sent with srej=off")
+		}
+	}
+}
+
 // TestIncomingSABMESuppressedOnOtherPort mirrors TestOverheardSABMOnOtherPortDropped
 // but for SABME: if (local, remote) already has a Connecting/Connected conn on
 // port 0, an incoming SABME for the same pair on port 1 must be silently dropped
 // (no UA, no DM, no conn created on port 1).
+// establishIncomingSREJ brings up a mod-128 conn with srejEnabled=true and
+// returns it, clearing rec.sent.
+func establishIncomingSREJ(t *testing.T, tbl *Table, rec *recorder) *Conn {
+	t.Helper()
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	tbl.params[0].MaxWindow = 7
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	cmd := ax25.XIDParams{Modulo: 128, SREJ: ax25.SREJSingle, IFieldLenRxBytes: 256, WindowRx: 7}
+	xf := mkFrame(ax25.XID, "N0CALL-2", "KU0HN-10", pf)
+	xf.Info = cmd.Encode(true)
+	tbl.OnFrame(0, xf)
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c == nil || !c.srejEnabled {
+		t.Fatalf("setup: srejEnabled not true")
+	}
+	rec.sent = nil
+	rec.data = nil
+	return c
+}
+
+// iframe delivers an incoming I-frame with N(S)=ns carrying one payload byte.
+func iframe(tbl *Table, ns uint8, payload byte) {
+	f := mkFrame(ax25.I, "N0CALL-2", "KU0HN-10")
+	f.Modulo = 128
+	f.NS = ns
+	f.NR = 0
+	f.PID = 0xF0
+	f.Info = []byte{payload}
+	tbl.OnFrame(0, f)
+}
+
+func TestSREJReceiverBuffersAndDelivers(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	c := establishIncomingSREJ(t, tbl, rec)
+
+	iframe(tbl, 0, 'A') // in sequence → delivered
+	if len(rec.data) != 1 || rec.data[0][0] != 'A' {
+		t.Fatalf("after NS=0, data=%v want [A]", rec.data)
+	}
+	iframe(tbl, 2, 'C') // ahead → buffered, SREJ(1)
+	iframe(tbl, 3, 'D') // ahead → buffered, SREJ(1) already sent (dedup)
+	if len(rec.data) != 1 {
+		t.Fatalf("frames 2,3 must not be delivered yet, data=%v", rec.data)
+	}
+	// Exactly one SREJ for N(R)=1 emitted.
+	srejCount, srejNR := 0, uint8(255)
+	for _, f := range rec.sent {
+		if f.Type == ax25.SREJ {
+			srejCount++
+			srejNR = f.NR
+		}
+	}
+	if srejCount != 1 || srejNR != 1 {
+		t.Fatalf("want exactly one SREJ for NR=1, got count=%d nr=%d", srejCount, srejNR)
+	}
+	// Fill the gap.
+	iframe(tbl, 1, 'B')
+	// Now B, C, D delivered in order; V(R) advanced to 4.
+	if len(rec.data) != 4 ||
+		rec.data[1][0] != 'B' || rec.data[2][0] != 'C' || rec.data[3][0] != 'D' {
+		t.Fatalf("after fill, data=%v want [A B C D]", rec.data)
+	}
+	if c.recvSeq != 4 {
+		t.Fatalf("recvSeq=%d want 4", c.recvSeq)
+	}
+	if len(c.rxBuf) != 0 {
+		t.Fatalf("rxBuf not drained: %v", c.rxBuf)
+	}
+}
+
+func TestSREJFBitOnVR(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	establishIncomingSREJ(t, tbl, rec)
+	iframe(tbl, 0, 'A')
+	iframe(tbl, 1, 'B') // in seq → delivered, V(R)=2
+	iframe(tbl, 3, 'D') // gap at 2 → SREJ(2) with F=1 (2 == V(R))
+	for _, f := range rec.sent {
+		if f.Type == ax25.SREJ && f.NR == 2 {
+			if !f.PF {
+				t.Fatalf("SREJ for V(R)=2 must have F=1")
+			}
+			return
+		}
+	}
+	t.Fatalf("no SREJ(2) emitted")
+}
+
+func TestSREJDisabledUsesREJ(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, false) // SREJ off → REJ path
+	tbl.params[0].MaxWindow = 7
+	tbl.OnFrame(0, mkFrame(ax25.SABME, "N0CALL-2", "KU0HN-10", pf))
+	c := tbl.Get(0, "KU0HN-10", "N0CALL-2")
+	if c.srejEnabled {
+		t.Fatal("srejEnabled must be false")
+	}
+	rec.sent = nil
+	rec.data = nil
+	iframe(tbl, 0, 'A')
+	iframe(tbl, 2, 'C') // gap → REJ (phase-3 behavior), not SREJ
+	sawREJ, sawSREJ := false, false
+	for _, f := range rec.sent {
+		switch f.Type {
+		case ax25.REJ:
+			sawREJ = true
+		case ax25.SREJ:
+			sawSREJ = true
+		}
+	}
+	if !sawREJ || sawSREJ {
+		t.Fatalf("SREJ-off path: sawREJ=%v sawSREJ=%v (want REJ, no SREJ)", sawREJ, sawSREJ)
+	}
+	if len(c.rxBuf) != 0 {
+		t.Fatalf("REJ path must not buffer: %v", c.rxBuf)
+	}
+}
+
+// TestSREJTrailingHoleFBitZero verifies that an SREJ for a hole *beyond* V(R)
+// (while V(R)'s own hole is still outstanding) carries F=0.  The SREJ for V(R)
+// itself must be F=1; the SREJ for any later hole must be F=0.
+func TestSREJTrailingHoleFBitZero(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	establishIncomingSREJ(t, tbl, rec) // V(R)=0, srejEnabled=true
+
+	// Deliver NS=1 first: gap at 0 (V(R)=0 missing) → SREJ(0) with F=1.
+	iframe(tbl, 1, 'B')
+
+	// Deliver NS=3 next: gap at 2 also outstanding, V(R) still 0 → SREJ(2) with F=0.
+	iframe(tbl, 3, 'D')
+
+	var srejNR0PF, srejNR2PF *bool
+	for _, f := range rec.sent {
+		if f.Type != ax25.SREJ {
+			continue
+		}
+		pf := f.PF
+		switch f.NR {
+		case 0:
+			srejNR0PF = &pf
+		case 2:
+			srejNR2PF = &pf
+		}
+	}
+	if srejNR0PF == nil {
+		t.Fatal("no SREJ(NR=0) emitted for V(R) hole")
+	}
+	if !*srejNR0PF {
+		t.Fatal("SREJ(NR=0) must have F=1 (NR == V(R))")
+	}
+	if srejNR2PF == nil {
+		t.Fatal("no SREJ(NR=2) emitted for trailing hole")
+	}
+	if *srejNR2PF {
+		t.Fatal("SREJ(NR=2) must have F=0 (NR != V(R)=0)")
+	}
+}
+
+func TestFRMROfXIDPreservesConnection(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)                 // SABME
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))  // -> Connected + XID sent
+	rec.sent = nil
+	// Peer FRMRs our XID (partial v2.2: accepted SABME, rejects XID).
+	tbl.OnFrame(0, mkFrame(ax25.FRMR, "N0CALL-2", "KU0HN-10", resp))
+	if c.State != Connected {
+		t.Fatalf("state = %v, want Connected (must not reset)", c.State)
+	}
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled true, want false after XID rejected")
+	}
+	for _, f := range rec.sent {
+		if f.Type == ax25.SABM || f.Type == ax25.SABME {
+			t.Fatalf("re-SABM sent after FRMR-of-XID (loop risk): %+v", rec.sent)
+		}
+	}
+}
+
+func TestDMOfXIDPreservesConnection(t *testing.T) {
+	tbl, rec, _ := newHarness(1200)
+	setV22(tbl, 0)
+	setSREJ(tbl, 0, true)
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))
+	rec.sent = nil
+	tbl.OnFrame(0, mkFrame(ax25.DM, "N0CALL-2", "KU0HN-10", resp))
+	if tbl.Get(0, "KU0HN-10", "N0CALL-2") == nil || c.State != Connected {
+		t.Fatalf("connection torn down by DM-of-XID; want preserved")
+	}
+	if c.srejEnabled {
+		t.Fatalf("srejEnabled true, want false")
+	}
+}
+
 func TestIncomingSABMESuppressedOnOtherPort(t *testing.T) {
 	tbl, rec, _ := newHarness(1200)
 	setV22(tbl, 0)
