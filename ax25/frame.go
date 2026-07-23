@@ -89,7 +89,7 @@ type Frame struct {
 	Dst, Src Address
 	Via      []Address
 	Type     FrameType
-	NR, NS   uint8 // mod-8; NS only for I, NR for I and S frames
+	NR, NS   uint8 // 0–7 (mod-8) or 0–127 (mod-128); NS only for I, NR for I and S frames
 	PF       bool
 	Modulo   uint8 // 8 (default/mod-8) or 128 (mod-128 extended I/S control)
 	Command  bool  // true = command (dst C-bit set), false = response
