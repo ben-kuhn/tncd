@@ -437,7 +437,7 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 - [x] BTECH UV-Pro/Radioddity GA-5WB/Vero NR N76 (Bluetooth)
 - [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A
 - [x] Mobilinkd TNC3 (Bluetooth SPP) — OTA-verified at 1200 baud via native D-Bus SPP, full Winlink CMS round-trip with 10KB attachment; 2-hop digipeater verified
-- [ ] Mobilinkd TNC2 (APRS Only, Bluetooth)
+- [x] Mobilinkd TNC2 (Bluetooth) — OTA-verified for APRS. APRS-only hardware (no connected-mode/Winlink use), tested via native D-Bus SPP.
 - [x] Kenwood TH-D7A (built-in TNC) — OTA-verified at 1200 baud, programmatic KISS init
 - [x] Kenwood TS-2000 (built-in TNC) — OTA-verified at 1200 baud, serial KISS at 57600 baud
 - [x] Kantronics KPC+ (KPC-3+ / KPC-9612+) — OTA-verified at 1200 baud serial, programmatic KISS init via `INTFACE KISS\r` + `RESET\r`. Other Kantronics TNCs are likely to work.
