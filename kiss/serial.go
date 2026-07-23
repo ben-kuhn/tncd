@@ -1,10 +1,12 @@
 package kiss
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"strings"
+	"syscall"
 	"time"
 
 	goserial "go.bug.st/serial"
@@ -89,6 +91,9 @@ func (s *serialTransport) Open() error {
 
 	port, err := openFn(s.cfg.Device, mode)
 	if err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf("serial: cannot open %s: port is busy (in use or exclusively locked) — free it and retry", s.cfg.Device)
+		}
 		return fmt.Errorf("serial: open %s: %w", s.cfg.Device, err)
 	}
 

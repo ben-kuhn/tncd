@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -145,5 +146,29 @@ func TestOpenNonFatalDTRRTSError(t *testing.T) {
 	data := []byte{0xC0, 0x00, 0xC0}
 	if _, err := st.rw.(io.Writer).Write(data); err != nil {
 		t.Fatalf("Write after Open() failed: %v", err)
+	}
+}
+
+func TestOpenBusyPortClearError(t *testing.T) {
+	st := NewSerialTransport(SerialConfig{Device: "/dev/ttyUSB9"}).(*serialTransport)
+	st.openPort = func(string, *goserial.Mode) (modemPort, error) {
+		return nil, syscall.EBUSY
+	}
+	err := st.Open()
+	// Assert the FRIENDLY wording ("in use"), which is NOT in the raw errno
+	// ("device or resource busy") — so this genuinely fails before the fix.
+	if err == nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("EBUSY open error = %v, want the friendly \"in use\" wording", err)
+	}
+}
+
+func TestOpenOtherErrorUnchanged(t *testing.T) {
+	st := NewSerialTransport(SerialConfig{Device: "/dev/ttyUSB9"}).(*serialTransport)
+	st.openPort = func(string, *goserial.Mode) (modemPort, error) {
+		return nil, errors.New("boom")
+	}
+	err := st.Open()
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("non-EBUSY error = %v, want it wrapped through", err)
 	}
 }
