@@ -279,8 +279,8 @@ func TestFallbackOnTimeoutAtMaxV22(t *testing.T) {
 	if sabmeCount != 3 {
 		t.Fatalf("SABME count = %d, want 3", sabmeCount)
 	}
-	if sabmCount < 1 {
-		t.Fatalf("expected at least one SABM after fallback")
+	if sabmCount != 1 {
+		t.Fatalf("SABM count = %d, want exactly 1 after fallback", sabmCount)
 	}
 }
 

@@ -1,10 +1,12 @@
 package kiss
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"strings"
+	"syscall"
 	"time"
 
 	goserial "go.bug.st/serial"
@@ -89,6 +91,9 @@ func (s *serialTransport) Open() error {
 
 	port, err := openFn(s.cfg.Device, mode)
 	if err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf("serial: cannot open %s: port is busy (in use or exclusively locked) — free it and retry", s.cfg.Device)
+		}
 		return fmt.Errorf("serial: open %s: %w", s.cfg.Device, err)
 	}
 
@@ -167,21 +172,65 @@ func (s *serialTransport) Close() error {
 // mode, mirroring tncd.py:652–677.
 //
 // If InitString is empty, EnterKISS is a no-op (TNC assumed already in KISS).
-// If the TNC is not in command mode (probe returns no text), the init is
-// skipped (TNC already in KISS). After sending all lines, the probe is run
-// again; if the TNC is still in command mode, an error is returned.
+// The probe is retried up to 3 times (spaced by InitDelay) to handle TNCs
+// that are still rebooting after RESET. On command-mode detection, the init is
+// sent and verified. On silence across all retries (ambiguous: already-KISS or
+// wedged TNC), the init is sent anyway with a WARNING log. On non-command
+// bytes (already-KISS echo), nothing is done.
 func (s *serialTransport) EnterKISS() error {
 	if s.cfg.InitString == "" {
 		return nil
 	}
 
-	if !s.tnc_in_command_mode() {
-		// Already in KISS mode — nothing to do.
+	// Probe with retries: a TNC rebooting after RESET may not answer immediately.
+	const probeAttempts = 3
+	inCmd, sawBytes := false, false
+	for i := 0; i < probeAttempts; i++ {
+		c, saw := s.probeCommandMode()
+		if saw {
+			sawBytes = true
+		}
+		if c {
+			inCmd = true
+			break
+		}
+		if i < probeAttempts-1 {
+			time.Sleep(s.cfg.InitDelay)
+		}
+	}
+
+	if inCmd {
+		if err := s.sendInit(); err != nil {
+			return err
+		}
+		if c, _ := s.probeCommandMode(); c {
+			return fmt.Errorf("serial: TNC still in command mode after init_string — " +
+				"check that the init commands are correct for this TNC")
+		}
+		log.Printf("serial: TNC confirmed in KISS mode after init")
 		return nil
 	}
 
-	// Split on the literal two-character sequence backslash-n (the escape for
-	// newline in init strings), mirroring tncd.py:663.
+	if sawBytes {
+		// Saw only KISS framing/non-printable bytes → already in KISS. Nothing to do.
+		return nil
+	}
+
+	// Silence across all retries: ambiguous (already-KISS-but-silent, or a
+	// wedged/mis-configured TNC). Send the init anyway — it is harmless if the
+	// TNC is already in KISS (non-C0 bytes are ignored) and rescues one that is
+	// stuck — then warn honestly rather than claiming success.
+	if err := s.sendInit(); err != nil {
+		return err
+	}
+	log.Printf("serial: WARNING: could not confirm KISS entry on %s (no probe response); "+
+		"normal if the TNC was already in KISS, but if it does not transmit check "+
+		"baud rate, flow control (rtscts), and cabling", s.cfg.Device)
+	return nil
+}
+
+// sendInit writes the init_string command lines (split on the literal \n escape).
+func (s *serialTransport) sendInit() error {
 	lines := strings.Split(s.cfg.InitString, `\n`)
 	for _, line := range lines {
 		cmd := resolveEscapes(line)
@@ -191,13 +240,6 @@ func (s *serialTransport) EnterKISS() error {
 		}
 		time.Sleep(s.cfg.InitDelay)
 	}
-
-	// Verify the TNC left command mode (tncd.py:669–673).
-	if s.tnc_in_command_mode() {
-		return fmt.Errorf("serial: TNC still in command mode after init_string — " +
-			"check that the init commands are correct for this TNC")
-	}
-	log.Printf("serial: TNC confirmed in KISS mode after init")
 	return nil
 }
 
@@ -232,15 +274,16 @@ func (s *serialTransport) ExitKISS() {
 	}
 }
 
-// tnc_in_command_mode probes the TNC to determine if it is in command mode,
-// mirroring tncd.py:623–643.
+// probeCommandMode probes the TNC. Returns (inCmd, sawBytes): inCmd is true if
+// the response is printable command-mode text; sawBytes is true if any bytes
+// were read at all (used to tell silence from a KISS-mode echo).
 //
 // The probe works by flushing the input buffer, sending a bare CR, waiting
 // probeWait (default 1s), then reading whatever is available. KISS framing
 // bytes (0xC0) and NUL bytes are stripped. If the remaining bytes are all
 // printable ASCII (0x20–0x7E) or CR/LF, and non-empty, the TNC is in command
 // mode.
-func (s *serialTransport) tnc_in_command_mode() bool {
+func (s *serialTransport) probeCommandMode() (inCmd, sawBytes bool) {
 	// Drain any pending input by reading with a short timeout.
 	// We use a fixed-size read of up to 256 bytes; the fake serial's Read
 	// returns 0,io.EOF on empty — that is fine.
@@ -266,8 +309,7 @@ func (s *serialTransport) tnc_in_command_mode() bool {
 	log.Printf("serial: TNC probe raw response: %q", resp)
 
 	if len(resp) == 0 {
-		log.Printf("serial: TNC probe: no response, assuming KISS mode")
-		return false
+		return false, false
 	}
 
 	// Strip KISS FENDs (0xC0) and NUL bytes — a TNC already in KISS mode may
@@ -283,20 +325,18 @@ func (s *serialTransport) tnc_in_command_mode() bool {
 	filtered = trimSpace(filtered)
 
 	if len(filtered) == 0 {
-		log.Printf("serial: TNC probe: no command-mode response after strip, assuming KISS mode")
-		return false
+		return false, true // saw only KISS framing/NULs → already in KISS
 	}
 
 	// All remaining bytes must be printable ASCII or CR/LF.
 	for _, b := range filtered {
 		if !((b >= 0x20 && b < 0x7F) || b == 0x0A || b == 0x0D) {
-			log.Printf("serial: TNC probe: non-printable byte 0x%02x, assuming KISS mode", b)
-			return false
+			return false, true // non-printable → treat as KISS
 		}
 	}
 
 	log.Printf("serial: TNC probe: command-mode response %q", filtered)
-	return true
+	return true, true
 }
 
 // resolveEscapes converts literal two-character backslash escape sequences

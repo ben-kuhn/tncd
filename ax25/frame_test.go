@@ -155,3 +155,13 @@ func TestMod8SREJDecode(t *testing.T) {
 		t.Fatalf("mod-8 SREJ decode: %+v", g)
 	}
 }
+
+func TestParseModuloExtendedShort(t *testing.T) {
+	// 14 address bytes + 1 control byte = 15: enough for mod-8, but an extended
+	// I/S frame needs a 2nd control byte. ParseModulo(...,128) must error, not panic.
+	raw := make([]byte, 15)
+	raw[14] = 0x00 // I-frame marker (bit0=0)
+	if _, err := ParseModulo(raw, 128); err == nil {
+		t.Fatal("ParseModulo(15-byte, 128) on an I-frame: expected error for missing 2nd control byte")
+	}
+}

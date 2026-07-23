@@ -748,8 +748,8 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 	}
 }
 
-// mustParseAddr parses an AX.25 address, panicking on failure (used only
-// for known-good strings in retransmitFrom).
+// mustParseAddr parses an AX.25 address, returning the zero Address on failure.
+// Used only for known-good strings where parse errors cannot occur in practice.
 func mustParseAddr(s string) ax25.Address {
 	a, _ := ax25.ParseAddress(s)
 	return a

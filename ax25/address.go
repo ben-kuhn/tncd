@@ -72,7 +72,10 @@ func (a Address) encode(crh bool, ext bool) [7]byte {
 	for i := 0; i < 6; i++ {
 		b[i] = padded[i] << 1
 	}
-	// SSID byte: crhBit<<7 | 0x60 | ssid<<1 | extBit
+	// SSID byte: crhBit<<7 | 0x60 | ssid<<1 | extBit.
+	// Mask SSID to 4 bits: a directly-constructed Address with SSID>15 must not
+	// corrupt the CRH/reserved bits. (Deliberate divergence from tncd.py, which
+	// does not mask; ParseAddress already rejects >15 for parsed callsigns.)
 	crhBit := uint8(0)
 	if crh {
 		crhBit = 1
@@ -81,7 +84,7 @@ func (a Address) encode(crh bool, ext bool) [7]byte {
 	if ext {
 		extBit = 1
 	}
-	b[6] = crhBit<<7 | 0x60 | a.SSID<<1 | extBit
+	b[6] = crhBit<<7 | 0x60 | (a.SSID&0x0F)<<1 | extBit
 	return b
 }
 
