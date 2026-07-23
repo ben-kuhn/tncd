@@ -1,5 +1,5 @@
 Name:           tncd
-Version:        1.97~beta
+Version:        1.98~beta
 Release:        1%{?dist}
 Summary:        AGWPE-to-KISS Translation Bridge
 License:        GPL-3.0-only
@@ -16,7 +16,7 @@ with KISS TNCs (serial or TCP). Implements full AX.25 connected mode including
 SABM/UA handshake, I-frame sequencing, and RR acknowledgement. This is the Go
 port (tncd 2.0 line).
 
-%global vertag 1.97-Beta
+%global vertag 1.98-Beta
 
 %prep
 %autosetup
@@ -58,6 +58,12 @@ sed \
 %{_unitdir}/tncd.service
 
 %changelog
+* Thu Jul 23 2026 KU0HN <ku0hn@ku0hn.radio> - 1.98~beta-1
+- Clearer error when a serial port is busy (in use / exclusively locked)
+- KISS-entry probe retries and sends init on silence with an honest warning
+  instead of falsely assuming KISS mode
+- Defensive AX.25 SSID masking; codec test coverage and comment cleanup
+
 * Thu Jul 17 2026 KU0HN <ku0hn@ku0hn.radio> - 1.97~beta-1
 - Go port (tncd 2.0 beta line); static binary, no python3 dependency
 - Packaging moves from fpm/Python to nfpm/Go cross-compilation

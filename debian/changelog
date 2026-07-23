@@ -1,3 +1,12 @@
+tncd (1.98~beta) UNRELEASED; urgency=medium
+
+  * Clearer error when a serial port is busy (in use / exclusively locked)
+  * KISS-entry probe now retries and sends the init string on silence with an
+    honest warning, instead of falsely assuming the TNC is already in KISS
+  * Defensive AX.25 SSID masking; codec test coverage and comment cleanup
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Thu, 23 Jul 2026 15:19:33 -0500
+
 tncd (1.97~beta) UNRELEASED; urgency=medium
 
   * Go port (tncd 2.0 beta line): the daemon is now a single static Go binary

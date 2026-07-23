@@ -4,7 +4,7 @@
 
 override_dh_auto_build:
 	CGO_ENABLED=0 GOFLAGS=-mod=readonly go build \
-	    -ldflags "-s -w -X github.com/ben-kuhn/tncd/v2/internal/version.Version=1.97-Beta" \
+	    -ldflags "-s -w -X github.com/ben-kuhn/tncd/v2/internal/version.Version=1.98-Beta" \
 	    -o tncd ./cmd/tncd
 
 override_dh_auto_test:
