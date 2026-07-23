@@ -59,17 +59,10 @@ func NewSerialTransport(cfg SerialConfig) Transport {
 
 // Open opens the serial port and asserts DTR/RTS.
 //
-// NOTE: go.bug.st/serial v1.8.0 Mode has no RTSCTS field; the library
-// unconditionally disables hardware flow control (CRTSCTS) during open.
-// If cfg.RTSCTS is true, a warning is logged and the setting is not applied.
-// This is a known limitation of go.bug.st/serial v1.8.0; tracked as a concern.
+// go.bug.st/serial v1.8.0 has no flow-control API and disables CRTSCTS on open.
+// When cfg.RTSCTS is set, applyRTSCTS re-enables hardware flow control via a
+// termios ioctl after the library's last termios write (SetReadTimeout).
 func (s *serialTransport) Open() error {
-	if s.cfg.RTSCTS {
-		log.Printf("serial: WARNING: RTSCTS=true requested for %s but "+
-			"go.bug.st/serial v1.8.0 does not support hardware flow control "+
-			"via Mode; RTSCTS will NOT be applied", s.cfg.Device)
-	}
-
 	parity, err := parseParity(s.cfg.Parity)
 	if err != nil {
 		return fmt.Errorf("serial: %w", err)
@@ -129,6 +122,17 @@ func (s *serialTransport) Open() error {
 	if err := port.SetReadTimeout(100 * time.Millisecond); err != nil {
 		_ = port.Close()
 		return fmt.Errorf("serial: SetReadTimeout: %w", err)
+	}
+
+	// Enable hardware (RTS/CTS) flow control if requested. Must come after
+	// SetReadTimeout (the library's last termios write) so it isn't clobbered.
+	// Non-fatal: a device without flow-control lines still works without it.
+	if s.cfg.RTSCTS {
+		if err := applyRTSCTS(s.cfg.Device); err != nil {
+			log.Printf("serial: WARNING: could not enable RTSCTS on %s (non-fatal): %v", s.cfg.Device, err)
+		} else {
+			log.Printf("serial: hardware flow control (RTSCTS) enabled on %s", s.cfg.Device)
+		}
 	}
 
 	s.rw = port.(io.ReadWriteCloser)
