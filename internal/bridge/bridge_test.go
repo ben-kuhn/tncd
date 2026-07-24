@@ -1,7 +1,6 @@
 package bridge
 
 import (
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -239,46 +238,34 @@ func makeUIFrameWithVia(src, dst, via string, hBit bool, data []byte) []byte {
 	return f.Bytes()
 }
 
-// TestMonitorDistribution: monitoring clients get 'U' with the expected prefix;
-// non-monitoring clients get nothing.
+type fakeMonitorSink struct {
+	port int
+	typ  ax25.FrameType
+	src  string
+	dst  string
+	n    int
+}
+func (s *fakeMonitorSink) OnRXFrame(port int, f *ax25.Frame) {
+	s.n++; s.port = port; s.typ = f.Type; s.src = f.Src.String(); s.dst = f.Dst.String()
+}
+
+// TestMonitorDistribution: bus emits decoded frame to registered MonitorSink;
+// wire-format ('U' AGWPE header) is verified in the agwpe package test.
 func TestMonitorDistribution(t *testing.T) {
 	eng := engine.New()
 	go eng.Run()
 	defer eng.Stop()
-
 	fp := newFakePort(true)
 	var b *Bridge
-	onLoop(t, eng, func() { b = makeBridge(t, eng, fp) })
-
-	monClient := newFakeClient(true)
-	nonMon := newFakeClient(false)
+	sink := &fakeMonitorSink{}
+	raw := makeUIFrame("A", "B", []byte("hello")) // existing helper; 5-byte payload
 	onLoop(t, eng, func() {
-		b.AddClient(monClient)
-		b.AddClient(nonMon)
+		b = makeBridge(t, eng, fp)
+		b.RegisterMonitorSink(sink)
+		b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: raw})
 	})
-
-	raw := makeUIFrame("A", "B", []byte("hello"))
-
-	// Don't send via SendToKISS (would echo-suppress); deliver directly.
-	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: raw}) })
-
-	// Check monitoring client got 'U' with the right prefix.
-	got := monClient.getSent()
-	if len(got) != 1 {
-		t.Fatalf("monitor client got %d frames, want 1", len(got))
-	}
-	s := got[0]
-	if s.kind != 'U' {
-		t.Fatalf("kind = %c, want U", s.kind)
-	}
-	prefix := "Fm A To B <UI pid=F0 Len=5 >["
-	if !strings.HasPrefix(string(s.data), prefix) {
-		t.Fatalf("data prefix mismatch:\ngot:  %q\nwant: %q...", string(s.data), prefix)
-	}
-
-	// Non-monitoring client must receive nothing.
-	if got2 := nonMon.getSent(); len(got2) != 0 {
-		t.Fatalf("non-monitor client got %d frames, want 0", len(got2))
+	if sink.n != 1 || sink.typ != ax25.UI || sink.src != "A" || sink.dst != "B" {
+		t.Fatalf("emit = {n:%d typ:%v src:%s dst:%s}, want 1 UI A→B", sink.n, sink.typ, sink.src, sink.dst)
 	}
 }
 

@@ -48,6 +48,9 @@ type Bridge struct {
 	ports   []PortSender
 	clients []Client
 
+	rawSinks     []RawRXSink
+	monitorSinks []MonitorSink
+
 	// sentFrames is a ring buffer of normalised AX.25 bytes recently sent to
 	// KISS, used to suppress echoes on RX. Mirrors Python _sent_frames deque(maxlen=20).
 	sentFrames [][]byte
@@ -293,8 +296,9 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 	// Forward to L2 state machine (handles SABM/UA/DM/DISC/FRMR/I/RR/RNR/REJ).
 	b.l2.OnFrame(f.Port, frame)
 
-	// Distribute monitor frames to monitoring clients.
-	distributeMonitor(b.clients, f.Port, frame)
+	// Fan out to the frontend subscriber bus.
+	b.emitRawRX(f.Port, raw)
+	b.emitMonitor(f.Port, frame)
 }
 
 // normalizeHBits clears the H-bit (bit 7) of the SSID byte of every via
