@@ -51,7 +51,11 @@ func TestKISSTCPRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() {
+		done := make(chan struct{})
+		eng.Do(func() { srv.Close(); close(done) })
+		<-done
+	}()
 
 	conn, err := net.Dial("tcp", srv.Addr())
 	if err != nil {
@@ -93,9 +97,19 @@ func TestKISSTCPExitKISSDropped(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng, fs); close(done) })
 	<-done
-	srv, _ := Serve(eng, b, "127.0.0.1", 0, 16)
-	defer srv.Close()
-	conn, _ := net.Dial("tcp", srv.Addr())
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		done := make(chan struct{})
+		eng.Do(func() { srv.Close(); close(done) })
+		<-done
+	}()
+	conn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
 
 	conn.Write([]byte{kiss.FEND, 0xFF, kiss.FEND}) // exit-KISS

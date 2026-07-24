@@ -71,8 +71,10 @@ func (s *Server) add(c *client) bool {
 }
 func (s *Server) remove(c *client) { delete(s.clients, c) }
 
-// Close stops accepting, unregisters the sink, and closes all clients.
-// Called on the engine loop from the shutdown sequence.
+// Close stops accepting, unregisters the sink, and closes all clients. It
+// accesses engine-loop-only state (the bridge sink registry and the clients
+// map), so it MUST be called on the engine loop — e.g. from within eng.Do(...)
+// in the shutdown sequence. Do not call it directly from another goroutine.
 func (s *Server) Close() {
 	s.b.UnregisterRawRXSink(s)
 	s.ln.Close()
