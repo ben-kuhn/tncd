@@ -48,3 +48,54 @@ func (b *Bridge) emitMonitor(port int, f *ax25.Frame) {
 		s.OnRXFrame(port, f)
 	}
 }
+
+// TxFrameSink receives decoded frames tncd transmits (all TX: L2, AGWPE, kisstcp).
+type TxFrameSink interface {
+	OnTXFrame(port int, f *ax25.Frame)
+}
+
+// ConnSink receives connection lifecycle events.
+type ConnSink interface {
+	OnConn(e ConnEvent)
+}
+
+// ConnEvent is a connection lifecycle change. State is "connected" or "disconnected".
+type ConnEvent struct {
+	Port          int
+	Local, Remote string
+	State         string
+	Incoming      bool // meaningful for "connected"
+}
+
+func (b *Bridge) RegisterTxFrameSink(s TxFrameSink) { b.txSinks = append(b.txSinks, s) }
+func (b *Bridge) RegisterConnSink(s ConnSink)       { b.connSinks = append(b.connSinks, s) }
+
+func (b *Bridge) UnregisterTxFrameSink(s TxFrameSink) {
+	for i, x := range b.txSinks {
+		if x == s {
+			b.txSinks = append(b.txSinks[:i], b.txSinks[i+1:]...)
+			return
+		}
+	}
+}
+
+func (b *Bridge) UnregisterConnSink(s ConnSink) {
+	for i, x := range b.connSinks {
+		if x == s {
+			b.connSinks = append(b.connSinks[:i], b.connSinks[i+1:]...)
+			return
+		}
+	}
+}
+
+func (b *Bridge) emitTXFrame(port int, f *ax25.Frame) {
+	for _, s := range b.txSinks {
+		s.OnTXFrame(port, f)
+	}
+}
+
+func (b *Bridge) emitConn(e ConnEvent) {
+	for _, s := range b.connSinks {
+		s.OnConn(e)
+	}
+}

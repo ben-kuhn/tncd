@@ -51,6 +51,8 @@ type Bridge struct {
 
 	rawSinks     []RawRXSink
 	monitorSinks []MonitorSink
+	txSinks      []TxFrameSink
+	connSinks    []ConnSink
 
 	// sentFrames is a ring buffer of normalised AX.25 bytes recently sent to
 	// KISS, used to suppress echoes on RX. Mirrors Python _sent_frames deque(maxlen=20).
@@ -224,6 +226,14 @@ func (b *Bridge) SendToKISS(port int, raw []byte) {
 	norm := normalizeHBits(raw)
 	b.trackSent(norm)
 	p.Send(raw)
+
+	// Emit a decoded copy to TX-frame sinks (API monitor). Our own TX is
+	// normally well-formed; a parse failure just skips emission.
+	if len(b.txSinks) > 0 {
+		if f, err := ax25.Parse(raw); err == nil {
+			b.emitTXFrame(port, f)
+		}
+	}
 }
 
 // SendKISSCommand forwards a KISS command frame (timing params 1..6) to the
@@ -601,6 +611,7 @@ func (b *Bridge) notifyConnected(c *l2pkg.Conn, incoming bool) {
 			c.Owner.(Client).SendAGWPE(uint8(c.Port), 'C', 0, c.Remote, c.Local, msg)
 		}
 	}
+	b.emitConn(ConnEvent{Port: c.Port, Local: c.Local, Remote: c.Remote, State: "connected", Incoming: incoming})
 }
 
 // notifyConnectFailed is called by L2 when an outgoing connection attempt fails.
@@ -638,6 +649,7 @@ func (b *Bridge) notifyDisconnected(c *l2pkg.Conn) {
 	}
 	msg := []byte("*** DISCONNECTED From " + c.Remote + "\r")
 	c.Owner.(Client).SendAGWPE(uint8(c.Port), 'd', 0, c.Remote, c.Local, msg)
+	b.emitConn(ConnEvent{Port: c.Port, Local: c.Local, Remote: c.Remote, State: "disconnected"})
 }
 
 // --- Idle sweep ---
