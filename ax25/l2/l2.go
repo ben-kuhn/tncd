@@ -880,6 +880,7 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 
 	// Notify hook (tncd.py:1907-1912).
 	if t.hooks.Connected != nil {
+		c.incoming = true
 		t.hooks.Connected(c, true)
 	}
 }
@@ -928,6 +929,7 @@ func (t *Table) dispatchSABME(port int, f *ax25.Frame, src, dst string) {
 	c.t2 = cancelTimer(c.t2)
 	c.t3 = cancelTimer(c.t3)
 	if t.hooks.Connected != nil {
+		c.incoming = true
 		t.hooks.Connected(c, true)
 	}
 }
@@ -949,6 +951,7 @@ func (t *Table) dispatchUA(port int, f *ax25.Frame, src, dst string) {
 		c.recvSeq = 0
 		c.t1Polls = 0
 		if t.hooks.Connected != nil {
+			c.incoming = false
 			t.hooks.Connected(c, false)
 		}
 		// Initiator XID: the answering peer does not send XID, so we must, to
@@ -1088,6 +1091,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 		c.sendSeq = 0
 		c.recvSeq = 0
 		if t.hooks.Connected != nil {
+			c.incoming = false
 			t.hooks.Connected(c, false) // outgoing — we initiated
 		}
 	}

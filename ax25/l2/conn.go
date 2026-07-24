@@ -74,6 +74,8 @@ type Conn struct {
 	lastRRTime time.Time
 	lastRRNR   uint8
 
+	incoming bool // true if this connection was remote-initiated
+
 	// v2.2 fallback state
 	triedFallback bool // true once a v2.2 connect has downgraded to mod-8
 
