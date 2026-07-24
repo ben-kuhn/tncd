@@ -14,6 +14,7 @@ import (
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
 	agwpeserver "github.com/ben-kuhn/tncd/v2/internal/frontend/agwpe"
+	kisstcpserver "github.com/ben-kuhn/tncd/v2/internal/frontend/kisstcp"
 	"github.com/ben-kuhn/tncd/v2/internal/version"
 )
 
@@ -230,10 +231,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	b.RegisterMonitorSink(agwpeserver.NewMonitorSink(b))
+
 	ln, err := agwpeserver.Serve(eng, b, cfg.Server.ListenHost, cfg.Server.ListenPort)
 	if err != nil {
 		slog.Error("agwpe server failed to start", "err", err)
 		os.Exit(1)
+	}
+
+	var kissSrv *kisstcpserver.Server
+	if cfg.KISSTCP.Enabled {
+		kissSrv, err = kisstcpserver.Serve(eng, b, cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort, cfg.KISSTCP.MaxClients)
+		if err != nil {
+			slog.Error("kisstcp server failed to start", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("KISS-over-TCP passthrough started",
+			"listen", fmt.Sprintf("%s:%d", cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort))
 	}
 
 	slog.Info("tncd running", "version", version.Version,
@@ -264,6 +278,11 @@ func main() {
 
 			// Step 2: close the listener (stops accepting new clients).
 			ln.Close()
+
+			// Step 2b: close the KISS-over-TCP server (listener + clients).
+			if kissSrv != nil {
+				kissSrv.Close()
+			}
 
 			// Step 3: graceful port shutdown (sends KISS exit, closes serial/TCP).
 			b.Shutdown()
