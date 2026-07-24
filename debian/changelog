@@ -1,3 +1,12 @@
+tncd (1.99~beta) UNRELEASED; urgency=medium
+
+  * KISS-over-TCP passthrough: KISS-native apps (woad, mobile clients) can share
+    one TNC alongside AGWPE clients — new [kisstcp] section, disabled by default
+  * Internal: generalized frontend subscriber bus; the AGWPE monitor is now a
+    consumer of that bus (behaviour unchanged)
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Fri, 24 Jul 2026 10:00:12 -0500
+
 tncd (1.98~beta) UNRELEASED; urgency=medium
 
   * Clearer error when a serial port is busy (in use / exclusively locked)

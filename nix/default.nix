@@ -4,7 +4,7 @@
 
 buildGoModule rec {
   pname = "tncd";
-  version = "1.98-Beta";
+  version = "1.99-Beta";
 
   src = lib.cleanSource ../.;
 
