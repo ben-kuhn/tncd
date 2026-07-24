@@ -54,6 +54,14 @@ func (s *Server) Addr() string { return s.ln.Addr().String() }
 
 // OnRawRX wraps a heard frame as a KISS data frame (port nibble = port) and
 // enqueues it to every connected client. Called on the engine loop.
+//
+// Multiport nibble contract: the KISS command-byte high nibble carries the
+// tncd port index in both directions. RX frames are wrapped with the frame's
+// port in the high nibble (WrapData(port, raw)), so connected clients can
+// distinguish which tncd port a frame arrived on. When a client transmits, the
+// high nibble N in its KISS command byte routes the frame to SendToKISS(N, …).
+// The nibble written to each physical TNC is always 0 (one TNC per tncd port).
+// This asymmetry is intentional, not a bug.
 func (s *Server) OnRawRX(port int, raw []byte) {
 	frame := kiss.WrapData(uint8(port), raw)
 	for c := range s.clients {

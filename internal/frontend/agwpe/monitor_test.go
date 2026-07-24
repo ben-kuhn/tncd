@@ -51,3 +51,36 @@ func TestMonitorSinkUIFormat(t *testing.T) {
 		t.Fatalf("UI payload missing data: %q", cc.last.data)
 	}
 }
+
+// TestMonitorSinkNonMonitoringClientReceivesNothing verifies that a client
+// with Monitoring()==false is skipped: only the monitoring client receives the
+// frame, and the non-monitoring client receives nothing.
+func TestMonitorSinkNonMonitoringClientReceivesNothing(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	b := bridge.New(eng, &config.Config{Server: config.Server{MaxClients: 8}})
+	monClient := &capClient{mon: true}
+	nonMonClient := &capClient{mon: false}
+	done := make(chan struct{})
+	eng.Do(func() {
+		b.AddClient(monClient)
+		b.AddClient(nonMonClient)
+		close(done)
+	})
+	<-done
+
+	f := &ax25.Frame{Type: ax25.UI, PID: 0xF0,
+		Src: ax25.Address{Call: "KU0HN"}, Dst: ax25.Address{Call: "CQ"}, Info: []byte("hi")}
+	sink := NewMonitorSink(b)
+	d2 := make(chan struct{})
+	eng.Do(func() { sink.OnRXFrame(0, f); close(d2) })
+	<-d2
+
+	if monClient.n != 1 {
+		t.Fatalf("monitoring client: got n=%d, want 1", monClient.n)
+	}
+	if nonMonClient.n != 0 {
+		t.Fatalf("non-monitoring client: got n=%d, want 0", nonMonClient.n)
+	}
+}

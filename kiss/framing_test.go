@@ -92,9 +92,6 @@ func TestDecoderDropsEmptyAndGarbage(t *testing.T) {
 	}
 }
 
-// TestDecoderSingleFENDDelimiter verifies that a stream using single-FEND
-// frame delimiters (FEND+f1+FEND+f2+FEND) produces both frames.
-// kiss3 splits on FEND and keeps every non-empty segment.
 func TestWrapCommandBytesMultiByteAndEscape(t *testing.T) {
 	// SetHardware (cmd 6) on port 0 with a value containing FEND(0xC0) and FESC(0xDB).
 	got := WrapCommandBytes(0, 0x06, []byte{0x01, FEND, FESC, 0x02})
@@ -104,6 +101,9 @@ func TestWrapCommandBytesMultiByteAndEscape(t *testing.T) {
 	}
 }
 
+// TestDecoderSingleFENDDelimiter verifies that a stream using single-FEND
+// frame delimiters (FEND+f1+FEND+f2+FEND) produces both frames.
+// kiss3 splits on FEND and keeps every non-empty segment.
 func TestDecoderSingleFENDDelimiter(t *testing.T) {
 	f1 := []byte{0x00, 0xAA, 0xBB} // cmd+payload for frame 1
 	f2 := []byte{0x10, 0xCC, 0xDD} // cmd+payload for frame 2

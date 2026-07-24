@@ -88,6 +88,82 @@ func TestKISSTCPRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKISSTCPNoLoopback verifies the no-loopback invariant: when a KISS-TCP
+// client sends a data frame, the raw AX.25 payload reaches the fake port and
+// NEITHER the sending client NOR a second connected client receives any RX
+// bytes back (a client's TX must never be re-delivered as RX).
+func TestKISSTCPNoLoopback(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fs := newFakeSender()
+	var b *bridge.Bridge
+	done := make(chan struct{})
+	eng.Do(func() { b = newBridge(t, eng, fs); close(done) })
+	<-done
+
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		done := make(chan struct{})
+		eng.Do(func() { srv.Close(); close(done) })
+		<-done
+	}()
+
+	connA, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connA.Close()
+
+	connB, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connB.Close()
+
+	// Client A sends a KISS data frame with AX.25 payload {0xCC, 0xDD}.
+	if _, err := connA.Write(kiss.WrapData(0, []byte{0xCC, 0xDD})); err != nil {
+		t.Fatal(err)
+	}
+
+	// Assert the fake port received A's AX.25 payload.
+	select {
+	case got := <-fs.ch:
+		if len(got) != 2 || got[0] != 0xCC || got[1] != 0xDD {
+			t.Fatalf("port got % x, want CC DD", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for TX to reach port")
+	}
+
+	// Assert neither client A nor client B receives any RX bytes back.
+	rbuf := make([]byte, 64)
+	connA.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	n, err := connA.Read(rbuf)
+	if n != 0 || !isTimeout(err) {
+		t.Fatalf("client A got loopback: n=%d err=%v", n, err)
+	}
+	connB.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	n, err = connB.Read(rbuf)
+	if n != 0 || !isTimeout(err) {
+		t.Fatalf("client B got unexpected RX: n=%d err=%v", n, err)
+	}
+}
+
+// isTimeout reports whether err is a network timeout error.
+func isTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if ne, ok := err.(net.Error); ok {
+		return ne.Timeout()
+	}
+	return false
+}
+
 func TestKISSTCPExitKISSDropped(t *testing.T) {
 	eng := engine.New()
 	go eng.Run()

@@ -619,3 +619,20 @@ func TestSendKISSCommandRoutesToPort(t *testing.T) {
 		t.Fatalf("commands = %+v, want one TXDELAY=40", cmds)
 	}
 }
+
+// TestSendKISSCommandOfflinePortSkipped verifies that SendKISSCommand is a
+// no-op when the target port exists but is offline (!p.Online()).
+func TestSendKISSCommandOfflinePortSkipped(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fp := newFakePort(false) // offline
+	var b *Bridge
+	onLoop(t, eng, func() {
+		b = makeBridge(t, eng, fp)
+		b.SendKISSCommand(0, 0x01, []byte{40})
+	})
+	if cmds := fp.getCommands(); len(cmds) != 0 {
+		t.Fatalf("offline port: got %d command(s), want 0", len(cmds))
+	}
+}
