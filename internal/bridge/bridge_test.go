@@ -88,8 +88,12 @@ func (c *fakeClient) getSent() []agwpeSend {
 
 // fakePort implements PortSender for testing.
 type fakePort struct {
-	mu     sync.Mutex
-	frames [][]byte
+	mu       sync.Mutex
+	frames   [][]byte
+	commands []struct {
+		cmd uint8
+		val []byte
+	}
 	online bool
 }
 
@@ -100,6 +104,27 @@ func (p *fakePort) Send(raw []byte) {
 	cp := make([]byte, len(raw))
 	copy(cp, raw)
 	p.frames = append(p.frames, cp)
+}
+func (p *fakePort) SendCommand(cmdType uint8, value []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.commands = append(p.commands, struct {
+		cmd uint8
+		val []byte
+	}{cmdType, append([]byte{}, value...)})
+}
+func (p *fakePort) getCommands() []struct {
+	cmd uint8
+	val []byte
+} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]struct {
+		cmd uint8
+		val []byte
+	}, len(p.commands))
+	copy(out, p.commands)
+	return out
 }
 func (p *fakePort) Online() bool {
 	p.mu.Lock()
@@ -575,5 +600,22 @@ func TestOnKISSFrameDecodesExtendedI(t *testing.T) {
 	}
 	if gotData != "hello" {
 		t.Fatalf("delivered data = %q, want %q", gotData, "hello")
+	}
+}
+
+func TestSendKISSCommandRoutesToPort(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fp := newFakePort(true)
+	var b *Bridge
+	onLoop(t, eng, func() {
+		b = makeBridge(t, eng, fp)
+		b.SendKISSCommand(0, 0x01, []byte{40})
+		b.SendKISSCommand(5, 0x01, []byte{40}) // out of range → no-op
+	})
+	cmds := fp.getCommands()
+	if len(cmds) != 1 || cmds[0].cmd != 0x01 || len(cmds[0].val) != 1 || cmds[0].val[0] != 40 {
+		t.Fatalf("commands = %+v, want one TXDELAY=40", cmds)
 	}
 }

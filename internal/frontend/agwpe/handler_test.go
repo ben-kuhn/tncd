@@ -42,6 +42,8 @@ func (p *fakePort) Send(raw []byte) {
 	p.frames = append(p.frames, cp)
 }
 
+func (p *fakePort) SendCommand(_ uint8, _ []byte) {}
+
 func (p *fakePort) Online() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

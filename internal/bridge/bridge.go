@@ -33,6 +33,7 @@ type Client interface {
 // inject fake senders without a real kiss.Port.
 type PortSender interface {
 	Send([]byte)
+	SendCommand(cmdType uint8, value []byte)
 	Online() bool
 }
 
@@ -223,6 +224,20 @@ func (b *Bridge) SendToKISS(port int, raw []byte) {
 	norm := normalizeHBits(raw)
 	b.trackSent(norm)
 	p.Send(raw)
+}
+
+// SendKISSCommand forwards a KISS command frame (timing params 1..6) to the
+// given port's TNC. No-op for an out-of-range or offline port.
+// Must be called on the engine loop.
+func (b *Bridge) SendKISSCommand(port int, cmdType uint8, value []byte) {
+	if port < 0 || port >= len(b.ports) {
+		return
+	}
+	p := b.ports[port]
+	if !p.Online() {
+		return
+	}
+	p.SendCommand(cmdType, value)
 }
 
 // SendAX25 serialises a frame and sends it to the given KISS port.
@@ -657,5 +672,6 @@ func (b *Bridge) sweepIdleClients() {
 // offlineSentinel is used before a port's goroutine posts online.
 type offlineSentinel struct{}
 
-func (*offlineSentinel) Send([]byte)  {}
-func (*offlineSentinel) Online() bool { return false }
+func (*offlineSentinel) Send([]byte)              {}
+func (*offlineSentinel) SendCommand(uint8, []byte) {}
+func (*offlineSentinel) Online() bool              { return false }
