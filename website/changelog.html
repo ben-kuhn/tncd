@@ -165,6 +165,39 @@
 
 <main>
 
+  <!-- v1.99-Beta -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.99-Beta</h2>
+      <span class="date">July 2026</span>
+      <a class="tag beta" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.99-Beta">release</a>
+    </div>
+    <div class="release-body">
+      <div class="beta-note">
+        <strong>Beta &mdash; tncd 2.0 line.</strong> The pure-Go rewrite. Newer and
+        <strong>not yet as thoroughly tested as the stable 1.3.x Python line</strong>,
+        which remains the recommended version for production stations and is what the
+        public <code>apt.tncd.dev</code> / <code>rpm.tncd.dev</code> repositories serve.
+      </div>
+      <h3>New Features</h3>
+      <ul>
+        <li><strong>KISS-over-TCP passthrough</strong> &mdash; a Direwolf-8001-style KISS
+          listener lets KISS-native applications (woad, mobile clients, <code>kissutil</code>)
+          share one TNC alongside AGWPE clients. Connected clients hear every frame received
+          from the air and can transmit, sharing the same channel-timing discipline as the
+          AX.25 engine. New <code>[kisstcp]</code> section, <strong>disabled by default</strong>
+          (<code>127.0.0.1:8001</code> when enabled). Client timing / SetHardware KISS commands
+          are forwarded to the TNC; the exit-KISS command is never forwarded, so one client
+          cannot take the shared TNC out of KISS mode.</li>
+      </ul>
+      <h3>Internal</h3>
+      <ul>
+        <li>Generalized frontend subscriber bus in the bridge; the AGWPE monitor is now a
+          consumer of that bus (monitor output unchanged).</li>
+      </ul>
+    </div>
+  </div>
+
   <!-- v1.98-Beta -->
   <div class="release">
     <div class="release-header">
