@@ -33,6 +33,7 @@ type Client interface {
 // inject fake senders without a real kiss.Port.
 type PortSender interface {
 	Send([]byte)
+	SendCommand(cmdType uint8, value []byte)
 	Online() bool
 }
 
@@ -47,6 +48,9 @@ type Bridge struct {
 	l2      *l2pkg.Table
 	ports   []PortSender
 	clients []Client
+
+	rawSinks     []RawRXSink
+	monitorSinks []MonitorSink
 
 	// sentFrames is a ring buffer of normalised AX.25 bytes recently sent to
 	// KISS, used to suppress echoes on RX. Mirrors Python _sent_frames deque(maxlen=20).
@@ -222,6 +226,20 @@ func (b *Bridge) SendToKISS(port int, raw []byte) {
 	p.Send(raw)
 }
 
+// SendKISSCommand forwards a KISS command frame (timing params 1..6) to the
+// given port's TNC. No-op for an out-of-range or offline port.
+// Must be called on the engine loop.
+func (b *Bridge) SendKISSCommand(port int, cmdType uint8, value []byte) {
+	if port < 0 || port >= len(b.ports) {
+		return
+	}
+	p := b.ports[port]
+	if !p.Online() {
+		return
+	}
+	p.SendCommand(cmdType, value)
+}
+
 // SendAX25 serialises a frame and sends it to the given KISS port.
 // Must be called on the engine loop.
 func (b *Bridge) SendAX25(port int, f *ax25.Frame) {
@@ -293,8 +311,9 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 	// Forward to L2 state machine (handles SABM/UA/DM/DISC/FRMR/I/RR/RNR/REJ).
 	b.l2.OnFrame(f.Port, frame)
 
-	// Distribute monitor frames to monitoring clients.
-	distributeMonitor(b.clients, f.Port, frame)
+	// Fan out to the frontend subscriber bus.
+	b.emitRawRX(f.Port, raw)
+	b.emitMonitor(f.Port, frame)
 }
 
 // normalizeHBits clears the H-bit (bit 7) of the SSID byte of every via
@@ -653,5 +672,6 @@ func (b *Bridge) sweepIdleClients() {
 // offlineSentinel is used before a port's goroutine posts online.
 type offlineSentinel struct{}
 
-func (*offlineSentinel) Send([]byte)  {}
-func (*offlineSentinel) Online() bool { return false }
+func (*offlineSentinel) Send([]byte)              {}
+func (*offlineSentinel) SendCommand(uint8, []byte) {}
+func (*offlineSentinel) Online() bool              { return false }

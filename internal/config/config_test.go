@@ -154,3 +154,40 @@ func TestUppercaseKeysAccepted(t *testing.T) {
 		t.Errorf("port = %+v", cfg.Ports[0])
 	}
 }
+
+func TestKISSTCPSectionParsed(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/t.ini"
+	os.WriteFile(path, []byte(`
+[client.0]
+type = serial
+device = /dev/null
+
+[kisstcp]
+enabled = true
+listen_port = 8010
+`), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.KISSTCP.Enabled || cfg.KISSTCP.ListenPort != 8010 {
+		t.Fatalf("KISSTCP = %+v, want enabled + port 8010", cfg.KISSTCP)
+	}
+	if cfg.KISSTCP.ListenHost != "127.0.0.1" || cfg.KISSTCP.MaxClients != 16 {
+		t.Fatalf("defaults wrong: %+v", cfg.KISSTCP)
+	}
+}
+
+func TestKISSTCPAbsentDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/t.ini"
+	os.WriteFile(path, []byte("[client.0]\ntype = serial\ndevice = /dev/null\n"), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KISSTCP.Enabled {
+		t.Fatal("KISSTCP should default disabled when section absent")
+	}
+}

@@ -53,6 +53,24 @@ func WrapCommand(kissPort uint8, cmd uint8, value uint8) []byte {
 	return result
 }
 
+// WrapCommandBytes builds a KISS command frame with a multi-byte value (e.g.
+// SetHardware, cmd 6). cmd goes in the low nibble, kissPort in the high nibble;
+// every value byte is escaped. WrapCommand remains the single-value convenience.
+func WrapCommandBytes(kissPort uint8, cmd uint8, value []byte) []byte {
+	result := []byte{FEND, (kissPort << 4) | cmd}
+	for _, b := range value {
+		switch b {
+		case FEND:
+			result = append(result, FESC, TFEND)
+		case FESC:
+			result = append(result, FESC, TFESC)
+		default:
+			result = append(result, b)
+		}
+	}
+	return append(result, FEND)
+}
+
 // ExitFrame is the standard KISS exit sequence C0 FF C0.
 func ExitFrame() []byte {
 	return []byte{0xC0, 0xFF, 0xC0}

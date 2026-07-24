@@ -261,6 +261,34 @@ func TestReaderEOFSendDoesNotPanic(t *testing.T) {
 	p.Send([]byte("after-eof"))
 }
 
+func TestPortSendCommandWritesToTransport(t *testing.T) {
+	a, b := net.Pipe()
+	p := NewPort(0, &pipeTransport{c: a}, Params{}, func(RXFrame) {}, func(int) {})
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	// Read the framed command bytes from the far end while SendCommand writes.
+	got := make([]byte, 8)
+	readDone := make(chan int, 1)
+	go func() {
+		n, _ := b.Read(got)
+		readDone <- n
+	}()
+	p.SendCommand(0x01, []byte{40}) // TXDELAY=40 → FEND 01 28 FEND
+
+	select {
+	case n := <-readDone:
+		want := []byte{FEND, 0x01, 40, FEND}
+		if !bytes.Equal(got[:n], want) {
+			t.Fatalf("far end got % x, want % x", got[:n], want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for command bytes")
+	}
+}
+
 // TestCloseAfterReaderEOFTeardownJoins verifies that after a reader-error
 // teardown completes (onOffline observed), calling Close() returns promptly
 // (join works, no deadlock).

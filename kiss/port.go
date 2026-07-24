@@ -148,6 +148,18 @@ func (p *Port) Send(ax25Frame []byte) {
 	}
 }
 
+// SendCommand queues a KISS command frame (cmdType in 1..6) for transmission on
+// this port's TNC. The wire port nibble is 0 (one physical TNC per Port).
+// Dropped with a log if the TX queue is full.
+func (p *Port) SendCommand(cmdType uint8, value []byte) {
+	frame := WrapCommandBytes(0, cmdType, value)
+	select {
+	case p.txCh <- frame:
+	default:
+		log.Printf("kiss: port %d TX queue full, dropping command frame", p.num)
+	}
+}
+
 // Online returns true while the reader loop is running without error.
 func (p *Port) Online() bool {
 	return p.online.Load()
