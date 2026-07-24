@@ -28,6 +28,14 @@ type AX25 struct {
 	T3Timeout int // seconds, default 180, <=0 disables
 }
 
+// KISSTCP holds the [kisstcp] section: a KISS-over-TCP passthrough listener.
+type KISSTCP struct {
+	Enabled    bool   // default false
+	ListenHost string // default "127.0.0.1"
+	ListenPort int    // default 8001
+	MaxClients int    // default 16
+}
+
 // Port holds one [client.N] section's settings plus the associated [kiss.N] params.
 type Port struct {
 	Name string // default "Port N"
@@ -67,9 +75,10 @@ type Port struct {
 
 // Config is the parsed configuration.
 type Config struct {
-	Server Server
-	AX25   AX25
-	Ports  []Port
+	Server  Server
+	AX25    AX25
+	KISSTCP KISSTCP
+	Ports   []Port
 }
 
 // knownServerKeys are the recognized keys in [server].
@@ -80,6 +89,11 @@ var knownServerKeys = []string{
 // knownAX25Keys are the recognized keys in [ax25].
 var knownAX25Keys = []string{
 	"max_window", "n2_retry", "t3_timeout",
+}
+
+// knownKISSTCPKeys are the recognized keys in [kisstcp].
+var knownKISSTCPKeys = []string{
+	"enabled", "listen_host", "listen_port", "max_clients",
 }
 
 // knownClientKeys are the recognized keys in [client.N].
@@ -340,6 +354,16 @@ func Load(path string) (*Config, error) {
 		MaxWindow: maxWindow,
 		N2Retry:   getInt(ax25Sec, "n2_retry", 10),
 		T3Timeout: getInt(ax25Sec, "t3_timeout", 180),
+	}
+
+	// --- Parse [kisstcp] ---
+	kisstcpSec := f.Section("kisstcp")
+	warnUnknownKeys(kisstcpSec, knownKISSTCPKeys)
+	cfg.KISSTCP = KISSTCP{
+		Enabled:    getBool(kisstcpSec, "enabled", false),
+		ListenHost: getString(kisstcpSec, "listen_host", "127.0.0.1"),
+		ListenPort: getInt(kisstcpSec, "listen_port", 8001),
+		MaxClients: getInt(kisstcpSec, "max_clients", 16),
 	}
 
 	// --- Collect client.N and kiss.N sections ---
