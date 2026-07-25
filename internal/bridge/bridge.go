@@ -58,6 +58,9 @@ type Bridge struct {
 	// KISS, used to suppress echoes on RX. Mirrors Python _sent_frames deque(maxlen=20).
 	sentFrames [][]byte
 
+	rxFrames []uint64 // per-port, live-scoped (reset on offline)
+	txFrames []uint64
+
 	// idleSweepTimer is held so we can cancel it on Shutdown.
 	idleSweepTimer *engine.Timer
 
@@ -226,6 +229,9 @@ func (b *Bridge) SendToKISS(port int, raw []byte) {
 	norm := normalizeHBits(raw)
 	b.trackSent(norm)
 	p.Send(raw)
+	if port >= 0 && port < len(b.txFrames) {
+		b.txFrames[port]++
+	}
 
 	// Emit a decoded copy to TX-frame sinks (API monitor). Our own TX is
 	// normally well-formed; a parse failure just skips emission.
@@ -318,6 +324,10 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 
 	b.logAX25(frame, "RX")
 
+	if f.Port >= 0 && f.Port < len(b.rxFrames) {
+		b.rxFrames[f.Port]++
+	}
+
 	// Forward to L2 state machine (handles SABM/UA/DM/DISC/FRMR/I/RR/RNR/REJ).
 	b.l2.OnFrame(f.Port, frame)
 
@@ -401,6 +411,8 @@ func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, sende
 	}
 	b.l2 = l2pkg.NewTable(eng, hooks, params)
 	b.ports = senders
+	b.rxFrames = make([]uint64, len(b.ports))
+	b.txFrames = make([]uint64, len(b.ports))
 }
 
 // Start opens all KISS ports asynchronously (one goroutine per port so a dead
@@ -454,6 +466,8 @@ func (b *Bridge) Start() error {
 	for i := range b.cfg.Ports {
 		b.ports[i] = &offlineSentinel{}
 	}
+	b.rxFrames = make([]uint64, len(b.ports))
+	b.txFrames = make([]uint64, len(b.ports))
 
 	for i, portCfg := range b.cfg.Ports {
 		idx := i
@@ -508,6 +522,11 @@ func (b *Bridge) connectPort(idx int, pc config.Port) {
 func (b *Bridge) portWentOffline(portNum int) {
 	log.Printf("bridge: port %d went offline", portNum)
 	b.l2.PortOffline(portNum)
+
+	if portNum >= 0 && portNum < len(b.rxFrames) {
+		b.rxFrames[portNum] = 0
+		b.txFrames[portNum] = 0
+	}
 
 	// Schedule reconnect for bluetooth ports configured for it.
 	if portNum < len(b.cfg.Ports) {
@@ -678,6 +697,39 @@ func (b *Bridge) sweepIdleClients() {
 	}
 	b.scheduleIdleSweep()
 }
+
+// --- Per-port status snapshot ---
+
+// PortStatus is a read-only per-port snapshot for /api/status.
+type PortStatus struct {
+	Port     int    `json:"port"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Online   bool   `json:"online"`
+	RxFrames uint64 `json:"rx_frames"`
+	TxFrames uint64 `json:"tx_frames"`
+}
+
+// StatusPorts returns a per-port snapshot. Must be called on the engine loop.
+func (b *Bridge) StatusPorts() []PortStatus {
+	out := make([]PortStatus, 0, len(b.ports))
+	for i := range b.ports {
+		ps := PortStatus{Port: i, Online: b.PortOnline(i)}
+		if i < len(b.cfg.Ports) {
+			ps.Name = b.cfg.Ports[i].Name
+			ps.Type = b.cfg.Ports[i].Type
+		}
+		if i < len(b.rxFrames) {
+			ps.RxFrames = b.rxFrames[i]
+			ps.TxFrames = b.txFrames[i]
+		}
+		out = append(out, ps)
+	}
+	return out
+}
+
+// ConnectionSnapshot returns active AX.25 connections. Must be called on the loop.
+func (b *Bridge) ConnectionSnapshot() []l2pkg.ConnInfo { return b.l2.Snapshot() }
 
 // --- Sentinel for offline port slots ---
 
