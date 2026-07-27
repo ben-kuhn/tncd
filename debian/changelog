@@ -1,3 +1,13 @@
+tncd (1.100~beta) UNRELEASED; urgency=medium
+
+  * Read-only monitoring API (JSON + Server-Sent Events): GET /api/status,
+    GET /api/connections, and an /api/events stream. New [api] section,
+    disabled by default; unauthenticated, so localhost-only by default.
+  * Both new 2.0 frontends (KISS-over-TCP passthrough and this API) validated
+    over the air using Direwolf as the local TNC.
+
+ -- KU0HN <ku0hn@ku0hn.radio>  Mon, 27 Jul 2026 14:13:57 -0500
+
 tncd (1.99~beta) UNRELEASED; urgency=medium
 
   * KISS-over-TCP passthrough: KISS-native apps (woad, mobile clients) can share
