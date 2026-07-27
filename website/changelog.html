@@ -165,6 +165,41 @@
 
 <main>
 
+  <!-- v1.100-Beta -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.100-Beta</h2>
+      <span class="date">July 2026</span>
+      <a class="tag beta" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.100-Beta">release</a>
+    </div>
+    <div class="release-body">
+      <div class="beta-note">
+        <strong>Beta &mdash; tncd 2.0 line.</strong> The pure-Go rewrite. Newer and
+        <strong>not yet as thoroughly tested as the stable 1.3.x Python line</strong>,
+        which remains the recommended version for production stations and is what the
+        public <code>apt.tncd.dev</code> / <code>rpm.tncd.dev</code> repositories serve.
+      </div>
+      <h3>New Features</h3>
+      <ul>
+        <li><strong>Read-only monitoring API</strong> &mdash; an optional HTTP API for
+          dashboards and web tooling: <code>GET /api/status</code> (version, per-port state
+          and live frame counters), <code>GET /api/connections</code> (active AX.25
+          connections with troubleshooting detail &mdash; sequence numbers, window, T1
+          retries, RNR, RTT, SREJ), and <code>GET /api/events</code> (a Server-Sent Events
+          stream of <code>rx</code> / <code>tx</code> / <code>connect</code> /
+          <code>disconnect</code> events with base64 payloads). New <code>[api]</code>
+          section, <strong>disabled by default</strong>. It is unauthenticated, so it binds
+          <code>127.0.0.1</code> by default &mdash; enable it only on a trusted host.</li>
+      </ul>
+      <h3>Tested</h3>
+      <ul>
+        <li>Both 2.0 frontends &mdash; the KISS-over-TCP passthrough and this API &mdash;
+          validated over the air using Direwolf as the local TNC (PAT and a BPQ node
+          sharing one radio through tncd, monitored live via the API).</li>
+      </ul>
+    </div>
+  </div>
+
   <!-- v1.99-Beta -->
   <div class="release">
     <div class="release-header">
