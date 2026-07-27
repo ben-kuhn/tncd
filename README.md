@@ -207,6 +207,42 @@ ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
 # slot_time = 20
 # tx_tail = 30
 # full_duplex = 0
+
+# --- 2.0 (Go line) only: optional extra frontends, disabled by default ---
+
+# KISS-over-TCP passthrough (Direwolf-8001 style): lets KISS-native apps
+# (woad, mobile clients, kissutil) share this TNC alongside AGWPE clients.
+# [kisstcp]
+# enabled = true
+# listen_host = 127.0.0.1
+# listen_port = 8001
+
+# Read-only monitoring API (JSON + Server-Sent Events). UNAUTHENTICATED —
+# enable only on a trusted host.
+# [api]
+# enabled = true
+# listen_host = 127.0.0.1
+# listen_port = 8002
+```
+
+### Read-only Monitoring API (2.0 Go line)
+
+The 2.0 Go build can expose a small read-only HTTP API for dashboards and web
+tooling. It is **disabled by default**; enable it with an `[api]` section. It is
+**unauthenticated** — its only protections are that it is read-only, bound to
+`127.0.0.1` by default, and off unless you turn it on. Do not expose it to an
+untrusted network.
+
+- `GET /api/status` — tncd version and per-port state with live frame counters.
+- `GET /api/connections` — active AX.25 connections with troubleshooting detail
+  (V(S)/V(R) sequence numbers, unacked/queued frames, T1 retries, RNR busy,
+  smoothed RTT, SREJ).
+- `GET /api/events` — a Server-Sent Events stream of `rx` / `tx` / `connect` /
+  `disconnect` events (decoded frame metadata; frame payloads base64-encoded).
+
+```bash
+curl http://127.0.0.1:8002/api/status
+curl -N http://127.0.0.1:8002/api/events   # live event stream
 ```
 
 ### Bluetooth TNC (Linux)

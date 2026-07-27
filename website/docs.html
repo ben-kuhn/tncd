@@ -694,6 +694,40 @@ tx_delay = 50</code></pre>
       frames &mdash; packets received by the wrong TNC are silently dropped rather than
       causing duplicate connections or spurious responses.
     </div>
+
+    <h3>[kisstcp] &mdash; KISS-over-TCP Passthrough <span style="color:var(--yellow,#d29922)">(2.0)</span></h3>
+    <p>
+      The 2.0 (Go) line can expose a Direwolf-8001-style KISS-over-TCP listener so
+      KISS-native applications (woad, mobile clients, <code>kissutil</code>) can share
+      a TNC alongside AGWPE clients. Disabled by default.
+    </p>
+    <pre><code>[kisstcp]
+enabled = true
+listen_host = 127.0.0.1
+listen_port = 8001</code></pre>
+
+    <h3>[api] &mdash; Read-only Monitoring API <span style="color:var(--yellow,#d29922)">(2.0)</span></h3>
+    <p>
+      The 2.0 (Go) line can expose a small read-only HTTP API for dashboards and web
+      tooling. Disabled by default.
+    </p>
+    <ul>
+      <li><code>GET /api/status</code> &mdash; version and per-port state with live frame counters.</li>
+      <li><code>GET /api/connections</code> &mdash; active AX.25 connections with troubleshooting
+        detail (sequence numbers, unacked/queued frames, T1 retries, RNR, RTT, SREJ).</li>
+      <li><code>GET /api/events</code> &mdash; a Server-Sent Events stream of
+        <code>rx</code> / <code>tx</code> / <code>connect</code> / <code>disconnect</code>
+        events (frame payloads base64-encoded).</li>
+    </ul>
+    <pre><code>[api]
+enabled = true
+listen_host = 127.0.0.1
+listen_port = 8002</code></pre>
+    <div class="note">
+      The API is <strong>unauthenticated</strong>. Its only protections are that it is
+      read-only, bound to <code>127.0.0.1</code> by default, and off unless you enable it.
+      Do not expose it to an untrusted network.
+    </div>
   </section>
 
   <!-- ============================================================ -->
