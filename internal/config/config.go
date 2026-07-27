@@ -42,6 +42,7 @@ type APIConfig struct {
 	ListenHost string // default "127.0.0.1"
 	ListenPort int    // default 8002
 	MaxClients int    // default 16
+	ServeUI    bool   // default true — serve the embedded web monitor at /
 }
 
 // Port holds one [client.N] section's settings plus the associated [kiss.N] params.
@@ -107,7 +108,7 @@ var knownKISSTCPKeys = []string{
 
 // knownAPIKeys are the recognized keys in [api].
 var knownAPIKeys = []string{
-	"enabled", "listen_host", "listen_port", "max_clients",
+	"enabled", "listen_host", "listen_port", "max_clients", "serve_ui",
 }
 
 // knownClientKeys are the recognized keys in [client.N].
@@ -388,6 +389,7 @@ func Load(path string) (*Config, error) {
 		ListenHost: getString(apiSec, "listen_host", "127.0.0.1"),
 		ListenPort: getInt(apiSec, "listen_port", 8002),
 		MaxClients: getInt(apiSec, "max_clients", 16),
+		ServeUI:    getBool(apiSec, "serve_ui", true),
 	}
 
 	// --- Collect client.N and kiss.N sections ---
