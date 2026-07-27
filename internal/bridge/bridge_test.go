@@ -176,6 +176,8 @@ func makeBridge(t *testing.T, eng *engine.Engine, fp *fakePort) *Bridge {
 	}
 	b.l2 = l2pkg.NewTable(eng, hooks, params)
 	b.ports = []PortSender{fp}
+	b.rxFrames = make([]uint64, 1)
+	b.txFrames = make([]uint64, 1)
 	return b
 }
 
@@ -617,6 +619,27 @@ func TestSendKISSCommandRoutesToPort(t *testing.T) {
 	cmds := fp.getCommands()
 	if len(cmds) != 1 || cmds[0].cmd != 0x01 || len(cmds[0].val) != 1 || cmds[0].val[0] != 40 {
 		t.Fatalf("commands = %+v, want one TXDELAY=40", cmds)
+	}
+}
+
+// TestStatusPortsCounters verifies per-port frame counters and StatusPorts snapshot.
+func TestStatusPortsCounters(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fp := newFakePort(true)
+	var ports []PortStatus
+	onLoop(t, eng, func() {
+		b := makeBridge(t, eng, fp)
+		b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: makeUIFrame("A", "B", []byte("hi"))})
+		b.SendToKISS(0, makeUIFrame("A", "B", []byte("hi")))
+		ports = b.StatusPorts()
+	})
+	if len(ports) != 1 {
+		t.Fatalf("ports len = %d, want 1", len(ports))
+	}
+	if ports[0].RxFrames != 1 || ports[0].TxFrames != 1 || !ports[0].Online {
+		t.Fatalf("counters wrong: %+v", ports[0])
 	}
 }
 

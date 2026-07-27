@@ -36,6 +36,14 @@ type KISSTCP struct {
 	MaxClients int    // default 16
 }
 
+// APIConfig holds the [api] section: a read-only HTTP monitoring API.
+type APIConfig struct {
+	Enabled    bool   // default false
+	ListenHost string // default "127.0.0.1"
+	ListenPort int    // default 8002
+	MaxClients int    // default 16
+}
+
 // Port holds one [client.N] section's settings plus the associated [kiss.N] params.
 type Port struct {
 	Name string // default "Port N"
@@ -78,6 +86,7 @@ type Config struct {
 	Server  Server
 	AX25    AX25
 	KISSTCP KISSTCP
+	API     APIConfig
 	Ports   []Port
 }
 
@@ -93,6 +102,11 @@ var knownAX25Keys = []string{
 
 // knownKISSTCPKeys are the recognized keys in [kisstcp].
 var knownKISSTCPKeys = []string{
+	"enabled", "listen_host", "listen_port", "max_clients",
+}
+
+// knownAPIKeys are the recognized keys in [api].
+var knownAPIKeys = []string{
 	"enabled", "listen_host", "listen_port", "max_clients",
 }
 
@@ -364,6 +378,16 @@ func Load(path string) (*Config, error) {
 		ListenHost: getString(kisstcpSec, "listen_host", "127.0.0.1"),
 		ListenPort: getInt(kisstcpSec, "listen_port", 8001),
 		MaxClients: getInt(kisstcpSec, "max_clients", 16),
+	}
+
+	// --- Parse [api] ---
+	apiSec := f.Section("api")
+	warnUnknownKeys(apiSec, knownAPIKeys)
+	cfg.API = APIConfig{
+		Enabled:    getBool(apiSec, "enabled", false),
+		ListenHost: getString(apiSec, "listen_host", "127.0.0.1"),
+		ListenPort: getInt(apiSec, "listen_port", 8002),
+		MaxClients: getInt(apiSec, "max_clients", 16),
 	}
 
 	// --- Collect client.N and kiss.N sections ---

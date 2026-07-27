@@ -14,6 +14,7 @@ import (
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
 	agwpeserver "github.com/ben-kuhn/tncd/v2/internal/frontend/agwpe"
+	apiserver "github.com/ben-kuhn/tncd/v2/internal/frontend/api"
 	kisstcpserver "github.com/ben-kuhn/tncd/v2/internal/frontend/kisstcp"
 	"github.com/ben-kuhn/tncd/v2/internal/version"
 )
@@ -250,6 +251,17 @@ func main() {
 			"listen", fmt.Sprintf("%s:%d", cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort))
 	}
 
+	var apiSrv *apiserver.Server
+	if cfg.API.Enabled {
+		apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients)
+		if err != nil {
+			slog.Error("api server failed to start", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("read-only API started",
+			"listen", fmt.Sprintf("%s:%d", cfg.API.ListenHost, cfg.API.ListenPort))
+	}
+
 	slog.Info("tncd running", "version", version.Version,
 		"listen", fmt.Sprintf("%s:%d", cfg.Server.ListenHost, cfg.Server.ListenPort))
 	slog.Info("Press Ctrl+C to stop")
@@ -282,6 +294,11 @@ func main() {
 			// Step 2b: close the KISS-over-TCP server (listener + clients).
 			if kissSrv != nil {
 				kissSrv.Close()
+			}
+
+			// Step 2c: close the read-only API server.
+			if apiSrv != nil {
+				apiSrv.Close()
 			}
 
 			// Step 3: graceful port shutdown (sends KISS exit, closes serial/TCP).

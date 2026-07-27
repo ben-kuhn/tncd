@@ -191,3 +191,26 @@ func TestKISSTCPAbsentDisabled(t *testing.T) {
 		t.Fatal("KISSTCP should default disabled when section absent")
 	}
 }
+
+func TestAPISectionParsed(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/t.ini"
+	os.WriteFile(path, []byte("[client.0]\ntype=serial\ndevice=/dev/null\n\n[api]\nenabled=true\nlisten_port=9002\n"), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.API.Enabled || cfg.API.ListenPort != 9002 || cfg.API.ListenHost != "127.0.0.1" || cfg.API.MaxClients != 16 {
+		t.Fatalf("API cfg wrong: %+v", cfg.API)
+	}
+}
+
+func TestAPIAbsentDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/t.ini"
+	os.WriteFile(path, []byte("[client.0]\ntype=serial\ndevice=/dev/null\n"), 0o644)
+	cfg, _ := Load(path)
+	if cfg.API.Enabled {
+		t.Fatal("API should default disabled")
+	}
+}

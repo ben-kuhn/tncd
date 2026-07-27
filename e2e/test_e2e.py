@@ -8,7 +8,9 @@ import shutil
 import sys
 import socket
 import subprocess
+import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -412,11 +414,14 @@ def direwolf_pair(tmp_path, request):
 
 def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
                       kiss_port=None, kiss_device=None, callsign="N0CALL-1",
-                      ax25_version=None):
+                      ax25_version=None, api_port=None):
     """Write a tncd INI configuration file.
 
     ax25_version: if "2.0" or "2.2", adds ``ax25_version = <value>`` to the
     [client] section.  Omitted (None) leaves tncd at its compiled default.
+
+    api_port: if set, appends an [api] section enabling the HTTP API on
+    127.0.0.1 at the given port.
     """
     lines = [
         "[server]",
@@ -444,6 +449,14 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
         "tx_tail = 5",
         "full_duplex = 1",
     ])
+    if api_port is not None:
+        lines.extend([
+            "",
+            "[api]",
+            "enabled = true",
+            "listen_host = 127.0.0.1",
+            f"listen_port = {api_port}",
+        ])
     Path(path).write_text("\n".join(lines) + "\n")
 
 
@@ -453,21 +466,25 @@ def tncd_instance(direwolf_pair, tmp_path):
 
     Yields a dict with:
       - agwpe_port: tncd's AGWPE listen port
+      - api_port: tncd's HTTP API port
       - proc: tncd subprocess
     """
     agwpe_port = free_port()
+    api_port = free_port()
     config_path = tmp_path / "tncd.ini"
 
     if direwolf_pair["kiss_pty_a"]:
         write_tncd_config(
             config_path, agwpe_port, "serial",
             kiss_device=direwolf_pair["kiss_pty_a"],
+            api_port=api_port,
         )
     else:
         write_tncd_config(
             config_path, agwpe_port, "tcp",
             kiss_host="127.0.0.1",
             kiss_port=direwolf_pair["kiss_port_a"],
+            api_port=api_port,
         )
 
     proc = subprocess.Popen(
@@ -478,8 +495,10 @@ def tncd_instance(direwolf_pair, tmp_path):
 
     try:
         wait_for_port(agwpe_port)
+        wait_for_port(api_port)
         yield {
             "agwpe_port": agwpe_port,
+            "api_port": api_port,
             "proc": proc,
         }
     finally:
@@ -889,6 +908,27 @@ def _run_p2p_test(pat_pair, tmp_path, attachment_size=1024):
     assert len(msgs_a) > 0, "PAT-A did not receive any messages"
 
 
+def _api_get(port, path):
+    """Fetch a JSON endpoint from the tncd HTTP API."""
+    with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+        return json.load(r)
+
+
+def _sse_first_event(port, timeout=10):
+    """Read the SSE stream and return the first (event_type, data) pair."""
+    with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/events", timeout=timeout) as r:
+        etype = None
+        for raw in r:
+            line = raw.decode().rstrip("\r\n")
+            if line.startswith("event: "):
+                etype = line[len("event: "):]
+            elif line.startswith("data: ") and etype:
+                return etype, json.loads(line[len("data: "):])
+    return None, None
+
+
 class TestConnectedModeKISSTCP:
     """Connected-mode P2P messaging over KISS TCP."""
 
@@ -896,6 +936,111 @@ class TestConnectedModeKISSTCP:
     def test_p2p_message_both_directions(self, pat_pair, tmp_path):
         """Send a P2P message with attachment in both directions."""
         _run_p2p_test(pat_pair, tmp_path)
+
+    @needs_pat
+    def test_p2p_api_reflects_live_session(self, pat_pair, tncd_instance,
+                                           tmp_path):
+        """API endpoints reflect a live PAT P2P session through tncd.
+
+        After a successful A-to-B message transfer (which exercises SABM/UA,
+        I-frames, RR ACKs, and DISC), assert that:
+          - /api/status shows port 0 online with nonzero frame counters
+          - /api/connections is polled in the background during the live
+            session and must show at least one 'connected' entry in-window
+          - /api/events yields at least one rx/tx/connect/disconnect event
+        """
+        api_port = tncd_instance["api_port"]
+
+        attachment_data = os.urandom(512)
+        attachment_file = tmp_path / "api_test_attachment.bin"
+        attachment_file.write_bytes(attachment_data)
+
+        # Start PAT-B listening so a live AX.25 connection will form
+        listener_b = pat_listen(
+            pat_pair["config_b"], pat_pair["mbox_b"], pat_pair["call_b"],
+        )
+        try:
+            # Kick off the SSE reader in a thread before traffic flows so it
+            # can capture events generated during the connection setup.
+            sse_result = [None, None]
+            sse_done = threading.Event()
+
+            def _sse_reader():
+                try:
+                    etype, edata = _sse_first_event(api_port, timeout=120)
+                    sse_result[0] = etype
+                    sse_result[1] = edata
+                except Exception as e:
+                    print(f"SSE reader error: {e}", file=sys.stderr)
+                finally:
+                    sse_done.set()
+
+            sse_thread = threading.Thread(target=_sse_reader, daemon=True)
+            sse_thread.start()
+
+            # Poll /api/connections in the background during the live session
+            # so we can assert a 'connected' entry was visible in-window.
+            conn_saw_connected = threading.Event()
+
+            def _conn_poller():
+                deadline = time.monotonic() + 240
+                while time.monotonic() < deadline:
+                    try:
+                        resp = _api_get(api_port, "/api/connections")
+                        if any(
+                            c.get("state") == "connected"
+                            for c in resp.get("connections", [])
+                        ):
+                            conn_saw_connected.set()
+                            return
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+
+            conn_thread = threading.Thread(target=_conn_poller, daemon=True)
+            conn_thread.start()
+
+            # Send the message — this opens and closes an AX.25 connection
+            pat_compose_and_send(
+                config_path=pat_pair["config_a"],
+                mbox_path=pat_pair["mbox_a"],
+                from_call=pat_pair["call_a"],
+                to_call=pat_pair["call_b"],
+                subject="API e2e test",
+                body="Testing API reflects live session",
+                attachment_path=attachment_file,
+                timeout=180,
+            )
+
+            # Brief pause so tncd can process the final frames before we query
+            time.sleep(2.0)
+
+            # Assert /api/status shows port online with traffic
+            status = _api_get(api_port, "/api/status")
+            assert status["ports"][0]["online"] is True
+            assert (
+                status["ports"][0]["rx_frames"] > 0
+                or status["ports"][0]["tx_frames"] > 0
+            ), f"Expected nonzero frame counters: {status}"
+
+            # Assert /api/connections showed a live 'connected' entry in-window
+            # during the session (polled by the background thread above).
+            conns = _api_get(api_port, "/api/connections")
+            assert isinstance(conns["connections"], list), conns
+            assert conn_saw_connected.is_set(), (
+                f"/api/connections never showed state='connected' during the "
+                f"session; final snapshot: {conns}"
+            )
+
+        finally:
+            kill_proc(listener_b)
+
+        # Wait for the SSE reader to capture at least one event (it was
+        # running during the live session)
+        sse_done.wait(timeout=5.0)
+        assert sse_result[0] in ("rx", "tx", "connect", "disconnect"), (
+            f"Expected rx/tx/connect/disconnect SSE event, got: {sse_result[0]}"
+        )
 
 
 # --- KISS PTY fixtures and tests ---
