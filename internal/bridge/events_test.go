@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/ben-kuhn/tncd/v2/ax25"
+	l2pkg "github.com/ben-kuhn/tncd/v2/ax25/l2"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
 )
 
@@ -54,6 +55,36 @@ func TestTxAndConnSinkRegistration(t *testing.T) {
 	b.emitConn(ConnEvent{})
 	if len(tx.ports) != 1 || len(cn.evs) != 1 {
 		t.Fatalf("unregister failed: tx=%d conn=%d", len(tx.ports), len(cn.evs))
+	}
+}
+
+// TestDisconnectEventFiredWithoutOwner verifies that notifyDisconnected emits a
+// ConnSink event even when the connection has no AGWPE owner, so the API
+// stream always gets a paired disconnect for every connect.
+func TestDisconnectEventFiredWithoutOwner(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	cn := &recConn{}
+	var b *Bridge
+	onLoop(t, eng, func() {
+		b = makeBridge(t, eng, fp)
+		b.RegisterConnSink(cn)
+		// Construct a Conn with Owner == nil (un-owned connection).
+		c := &l2pkg.Conn{Port: 0, Local: "KU0HN", Remote: "N0CALL"}
+		b.notifyDisconnected(c)
+	})
+
+	if len(cn.evs) != 1 {
+		t.Fatalf("expected 1 disconnect event, got %d", len(cn.evs))
+	}
+	if cn.evs[0].State != "disconnected" {
+		t.Fatalf("expected state=disconnected, got %q", cn.evs[0].State)
+	}
+	if cn.evs[0].Remote != "N0CALL" {
+		t.Fatalf("expected remote=N0CALL, got %q", cn.evs[0].Remote)
 	}
 }
 

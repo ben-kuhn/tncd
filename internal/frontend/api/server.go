@@ -62,6 +62,9 @@ func (s *Server) Close() {
 	s.b.UnregisterMonitorSink(s)
 	s.b.UnregisterTxFrameSink(s)
 	s.b.UnregisterConnSink(s)
+	// http.Server.Close force-closes listeners+connections and returns without
+	// joining handler goroutines (unlike Shutdown), so calling it on the engine
+	// loop cannot deadlock against a handler parked in eng.Do.
 	s.httpSrv.Close()
 	for c := range s.clients {
 		close(c.ch)

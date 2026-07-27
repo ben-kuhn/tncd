@@ -662,13 +662,15 @@ func (b *Bridge) notifyData(c *l2pkg.Conn, pid uint8, data []byte) {
 
 // notifyDisconnected notifies the connection owner of a disconnect.
 // Mirrors tncd.py:1550 and 1938 (*** DISCONNECTED From {remote}\r).
+// emitConn is called unconditionally so API consumers see a disconnect event
+// for every connection, matching the unconditional connect emit in notifyConnected.
 func (b *Bridge) notifyDisconnected(c *l2pkg.Conn) {
+	b.emitConn(ConnEvent{Port: c.Port, Local: c.Local, Remote: c.Remote, State: "disconnected"})
 	if c.Owner == nil {
 		return
 	}
 	msg := []byte("*** DISCONNECTED From " + c.Remote + "\r")
 	c.Owner.(Client).SendAGWPE(uint8(c.Port), 'd', 0, c.Remote, c.Local, msg)
-	b.emitConn(ConnEvent{Port: c.Port, Local: c.Local, Remote: c.Remote, State: "disconnected"})
 }
 
 // --- Idle sweep ---

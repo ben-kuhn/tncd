@@ -90,8 +90,9 @@ func TestEventsSSE(t *testing.T) {
 	// Read one SSE event.
 	// Read lines until the first complete event. The RX frame was pushed above;
 	// the http client blocks on ReadString until the server flushes it. A
-	// watchdog goroutine closes the body if nothing arrives, bounding the test.
-	go func() { time.Sleep(3 * time.Second); resp.Body.Close() }()
+	// cancelable watchdog closes the body after 3s if nothing arrives, bounding
+	// the test; it is stopped as soon as the event is captured.
+	watchdog := time.AfterFunc(3*time.Second, func() { resp.Body.Close() })
 	rd := bufio.NewReader(resp.Body)
 	var evType, data string
 	for {
@@ -107,6 +108,7 @@ func TestEventsSSE(t *testing.T) {
 			break
 		}
 	}
+	watchdog.Stop()
 	if evType != "rx" || !strings.Contains(data, `"from":"A"`) {
 		t.Fatalf("SSE event wrong: type=%q data=%q", evType, data)
 	}
