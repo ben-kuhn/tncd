@@ -8,6 +8,7 @@ import shutil
 import sys
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -944,8 +945,8 @@ class TestConnectedModeKISSTCP:
         After a successful A-to-B message transfer (which exercises SABM/UA,
         I-frames, RR ACKs, and DISC), assert that:
           - /api/status shows port 0 online with nonzero frame counters
-          - /api/connections shows at least one 'connected' entry while the
-            session is active (checked mid-session via listener)
+          - /api/connections is polled in the background during the live
+            session and must show at least one 'connected' entry in-window
           - /api/events yields at least one rx/tx/connect/disconnect event
         """
         api_port = tncd_instance["api_port"]
@@ -961,7 +962,6 @@ class TestConnectedModeKISSTCP:
         try:
             # Kick off the SSE reader in a thread before traffic flows so it
             # can capture events generated during the connection setup.
-            import threading
             sse_result = [None, None]
             sse_done = threading.Event()
 
@@ -970,13 +970,35 @@ class TestConnectedModeKISSTCP:
                     etype, edata = _sse_first_event(api_port, timeout=120)
                     sse_result[0] = etype
                     sse_result[1] = edata
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"SSE reader error: {e}", file=sys.stderr)
                 finally:
                     sse_done.set()
 
             sse_thread = threading.Thread(target=_sse_reader, daemon=True)
             sse_thread.start()
+
+            # Poll /api/connections in the background during the live session
+            # so we can assert a 'connected' entry was visible in-window.
+            conn_saw_connected = threading.Event()
+
+            def _conn_poller():
+                deadline = time.monotonic() + 240
+                while time.monotonic() < deadline:
+                    try:
+                        resp = _api_get(api_port, "/api/connections")
+                        if any(
+                            c.get("state") == "connected"
+                            for c in resp.get("connections", [])
+                        ):
+                            conn_saw_connected.set()
+                            return
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+
+            conn_thread = threading.Thread(target=_conn_poller, daemon=True)
+            conn_thread.start()
 
             # Send the message — this opens and closes an AX.25 connection
             pat_compose_and_send(
@@ -1001,10 +1023,14 @@ class TestConnectedModeKISSTCP:
                 or status["ports"][0]["tx_frames"] > 0
             ), f"Expected nonzero frame counters: {status}"
 
-            # Assert /api/connections (may be empty post-disconnect; that's
-            # fine — the session went through 'connected' during transfer)
+            # Assert /api/connections showed a live 'connected' entry in-window
+            # during the session (polled by the background thread above).
             conns = _api_get(api_port, "/api/connections")
-            assert "connections" in conns, conns
+            assert isinstance(conns["connections"], list), conns
+            assert conn_saw_connected.is_set(), (
+                f"/api/connections never showed state='connected' during the "
+                f"session; final snapshot: {conns}"
+            )
 
         finally:
             kill_proc(listener_b)
