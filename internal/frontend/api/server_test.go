@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -146,8 +147,17 @@ func TestServeUIEnabledServesRoot(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Fatalf("GET / content-type = %q, want text/html", ct)
 	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, marker := range []string{"tncd monitor", `id="ports"`, `id="connections"`, `id="events"`, "monitor.js"} {
+		if !strings.Contains(string(body), marker) {
+			t.Fatalf("root page missing marker %q", marker)
+		}
+	}
 	// /api still works with the UI on
-	r2, _ := http.Get("http://" + srv.Addr() + "/api/status")
+	r2, err2 := http.Get("http://" + srv.Addr() + "/api/status")
+	if err2 != nil {
+		t.Fatal(err2)
+	}
 	defer r2.Body.Close()
 	if r2.StatusCode != 200 {
 		t.Fatalf("GET /api/status = %d, want 200", r2.StatusCode)
@@ -176,7 +186,10 @@ func TestServeUIDisabledRootIs404(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Fatalf("GET / with serve_ui=false = %d, want 404", resp.StatusCode)
 	}
-	r2, _ := http.Get("http://" + srv.Addr() + "/api/status") // API still served
+	r2, err2 := http.Get("http://" + srv.Addr() + "/api/status") // API still served
+	if err2 != nil {
+		t.Fatal(err2)
+	}
 	defer r2.Body.Close()
 	if r2.StatusCode != 200 {
 		t.Fatalf("GET /api/status = %d, want 200", r2.StatusCode)

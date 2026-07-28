@@ -1,3 +1,41 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>tncd monitor</title></head>
-<body><div id="app">tncd monitor</div></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tncd monitor</title>
+  <link rel="stylesheet" href="monitor.css">
+</head>
+<body>
+  <header id="header">
+    <div class="brand">tncd monitor <span id="version" class="muted"></span></div>
+    <div class="sse"><span id="sse-status" class="dot dot-off"></span><span id="sse-label">connecting…</span></div>
+  </header>
+  <div id="ports" class="ports"></div>
+
+  <section class="panel conns-panel">
+    <div class="panel-head">Connections <span id="conn-count" class="muted"></span></div>
+    <table id="connections">
+      <thead><tr>
+        <th>port</th><th>local</th><th>remote</th><th>state</th>
+        <th>V(S)/V(R)</th><th>unack</th><th>queue</th><th>T1</th><th>RTT</th><th>SREJ</th>
+      </tr></thead>
+      <tbody id="conn-body"><tr><td colspan="10" class="muted">No active connections.</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel events-panel">
+    <div class="panel-head">
+      Events
+      <span class="filters">
+        <button data-f="rx" class="on">rx</button>
+        <button data-f="tx" class="on">tx</button>
+        <button data-f="conn" class="on">conn</button>
+      </span>
+    </div>
+    <div id="events" class="events"></div>
+  </section>
+
+  <script src="monitor.js"></script>
+</body>
+</html>
