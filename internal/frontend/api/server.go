@@ -31,7 +31,7 @@ type sseClient struct {
 
 // Serve starts the API server and registers its sinks. Registration is
 // marshalled onto the engine loop (safe during setup or while running).
-func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients int) (*Server, error) {
+func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients int, serveUI bool) (*Server, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -42,6 +42,14 @@ func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients i
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/connections", s.handleConnections)
 	mux.HandleFunc("/api/events", s.handleEvents)
+	if serveUI {
+		h, err := uiHandler()
+		if err != nil {
+			ln.Close()
+			return nil, fmt.Errorf("api: ui handler: %w", err)
+		}
+		mux.Handle("/", h)
+	}
 	s.httpSrv = &http.Server{Handler: mux}
 
 	eng.Do(func() {

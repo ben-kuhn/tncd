@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -41,7 +42,7 @@ func TestStatusEndpoint(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +71,7 @@ func TestEventsSSE(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,4 +120,84 @@ func closeOnLoop(eng *engine.Engine, srv *Server) {
 	done := make(chan struct{})
 	eng.Do(func() { srv.Close(); close(done) })
 	<-done
+}
+
+func TestServeUIEnabledServesRoot(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	var b *bridge.Bridge
+	done := make(chan struct{})
+	eng.Do(func() { b = newBridge(t, eng); close(done) })
+	<-done
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOnLoop(eng, srv)
+
+	resp, err := http.Get("http://" + srv.Addr() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET / = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("GET / content-type = %q, want text/html", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, marker := range []string{"tncd monitor", `id="ports"`, `id="connections"`, `id="events"`, "monitor.js"} {
+		if !strings.Contains(string(body), marker) {
+			t.Fatalf("root page missing marker %q", marker)
+		}
+	}
+	// /api still works with the UI on
+	r2, err2 := http.Get("http://" + srv.Addr() + "/api/status")
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	defer r2.Body.Close()
+	if r2.StatusCode != 200 {
+		t.Fatalf("GET /api/status = %d, want 200", r2.StatusCode)
+	}
+}
+
+func TestServeUIDisabledRootIs404(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	var b *bridge.Bridge
+	done := make(chan struct{})
+	eng.Do(func() { b = newBridge(t, eng); close(done) })
+	<-done
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOnLoop(eng, srv)
+
+	resp, err := http.Get("http://" + srv.Addr() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("GET / with serve_ui=false = %d, want 404", resp.StatusCode)
+	}
+	r2, err2 := http.Get("http://" + srv.Addr() + "/api/status") // API still served
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	defer r2.Body.Close()
+	if r2.StatusCode != 200 {
+		t.Fatalf("GET /api/status = %d, want 200", r2.StatusCode)
+	}
+}
+
+func TestUIEmbedHasIndex(t *testing.T) {
+	if _, err := uiFS.ReadFile("ui/index.html"); err != nil {
+		t.Fatalf("embedded ui/index.html missing: %v", err)
+	}
 }

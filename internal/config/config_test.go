@@ -81,6 +81,29 @@ func TestValidationErrors(t *testing.T) {
 	}
 }
 
+func TestAPIServeUIDefaultTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/t.ini"
+	os.WriteFile(path, []byte("[client.0]\ntype=serial\ndevice=/dev/null\n\n[api]\nenabled=true\n"), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.API.ServeUI {
+		t.Fatal("serve_ui should default to true when [api] present")
+	}
+}
+
+func TestAPIServeUIExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/t.ini"
+	os.WriteFile(path, []byte("[client.0]\ntype=serial\ndevice=/dev/null\n\n[api]\nenabled=true\nserve_ui=false\n"), 0o644)
+	cfg, _ := Load(path)
+	if cfg.API.ServeUI {
+		t.Fatal("serve_ui=false must disable the UI")
+	}
+}
+
 func TestExampleLoads(t *testing.T) {
 	p := write(t, Example())
 	if _, err := Load(p); err != nil {
