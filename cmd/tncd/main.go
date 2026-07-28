@@ -253,7 +253,7 @@ func main() {
 
 	var apiSrv *apiserver.Server
 	if cfg.API.Enabled {
-		apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients)
+		apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients, cfg.API.ServeUI)
 		if err != nil {
 			slog.Error("api server failed to start", "err", err)
 			os.Exit(1)
