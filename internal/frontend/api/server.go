@@ -6,9 +6,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/ben-kuhn/tncd/v2/ax25"
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
@@ -130,7 +132,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // ask nginx-style proxies not to buffer
+	// Initial comment so buffering proxies (Cloudflare tunnels, nginx, etc.)
+	// flush the response immediately and the browser's EventSource fires onopen
+	// even on a quiet channel with no events yet.
+	if _, err := io.WriteString(w, ": connected\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
+
+	// Heartbeat keeps the connection alive and forces a periodic flush through
+	// buffering proxies so the stream never appears stalled.
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -139,6 +153,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if _, err := w.Write(msg); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-ticker.C:
+			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
 				return
 			}
 			flusher.Flush()
