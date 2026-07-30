@@ -10,12 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ben-kuhn/tncd/v2/internal/bridge"
+	"github.com/ben-kuhn/tncd/v2/internal/app"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
-	"github.com/ben-kuhn/tncd/v2/internal/engine"
-	agwpeserver "github.com/ben-kuhn/tncd/v2/internal/frontend/agwpe"
-	apiserver "github.com/ben-kuhn/tncd/v2/internal/frontend/api"
-	kisstcpserver "github.com/ben-kuhn/tncd/v2/internal/frontend/kisstcp"
 	"github.com/ben-kuhn/tncd/v2/internal/version"
 )
 
@@ -222,95 +218,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- Build runtime ---
-	eng := engine.New()
-	b := bridge.New(eng, cfg)
-	b.SetVerbosity(vCount.n, tCount.n)
-
-	if err := b.Start(); err != nil {
-		slog.Error("bridge start failed", "err", err)
-		os.Exit(1)
-	}
-
-	b.RegisterMonitorSink(agwpeserver.NewMonitorSink(b))
-
-	ln, err := agwpeserver.Serve(eng, b, cfg.Server.ListenHost, cfg.Server.ListenPort)
+	// --- Build and run ---
+	r, err := app.New(cfg, vCount.n, tCount.n)
 	if err != nil {
-		slog.Error("agwpe server failed to start", "err", err)
+		slog.Error("startup failed", "err", err)
 		os.Exit(1)
 	}
 
-	var kissSrv *kisstcpserver.Server
-	if cfg.KISSTCP.Enabled {
-		kissSrv, err = kisstcpserver.Serve(eng, b, cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort, cfg.KISSTCP.MaxClients)
-		if err != nil {
-			slog.Error("kisstcp server failed to start", "err", err)
-			os.Exit(1)
-		}
-		slog.Info("KISS-over-TCP passthrough started",
-			"listen", fmt.Sprintf("%s:%d", cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort))
-	}
-
-	var apiSrv *apiserver.Server
-	if cfg.API.Enabled {
-		apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients, cfg.API.ServeUI)
-		if err != nil {
-			slog.Error("api server failed to start", "err", err)
-			os.Exit(1)
-		}
-		slog.Info("read-only API started",
-			"listen", fmt.Sprintf("%s:%d", cfg.API.ListenHost, cfg.API.ListenPort))
-	}
-
-	slog.Info("tncd running", "version", version.Version,
-		"listen", fmt.Sprintf("%s:%d", cfg.Server.ListenHost, cfg.Server.ListenPort))
+	slog.Info("tncd running", "version", version.Version, "listen", r.AGWPEAddr().String())
 	slog.Info("Press Ctrl+C to stop")
 
-	// --- Signal handling ---
-	// Wire shutdown: SIGINT / SIGTERM → post shutdown sequence to engine loop.
-	// Ordering mirrors tncd.py:1167-1184:
-	//   1. Close AGWPE client transports (so the listener's Accept returns when closed).
-	//   2. Close the listener.
-	//   3. bridge.Shutdown() (ExitKISS + port close).
-	//   4. engine.Stop().
+	// SIGINT / SIGTERM → graceful shutdown. (Platform split into main_unix.go /
+	// main_windows.go arrives with the service plan; this already cross-compiles
+	// to Windows unchanged.)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	go func() {
 		sig := <-sigCh
 		slog.Info("Received signal, shutting down...", "signal", sig)
-		eng.Do(func() {
-			// Step 1: close AGWPE client transports before closing the listener.
-			// Without this, ln.Close() races with active client goroutines that
-			// call conn.Write; more importantly, the server goroutine would block
-			// on open connections after Accept returns an error.
-			for _, c := range b.Clients() {
-				c.CloseTransport()
-			}
-
-			// Step 2: close the listener (stops accepting new clients).
-			ln.Close()
-
-			// Step 2b: close the KISS-over-TCP server (listener + clients).
-			if kissSrv != nil {
-				kissSrv.Close()
-			}
-
-			// Step 2c: close the read-only API server.
-			if apiSrv != nil {
-				apiSrv.Close()
-			}
-
-			// Step 3: graceful port shutdown (sends KISS exit, closes serial/TCP).
-			b.Shutdown()
-
-			// Step 4: stop the engine loop.
-			eng.Stop()
-		})
+		r.Shutdown()
 	}()
 
-	// Run the engine on the main goroutine (blocks until eng.Stop() is called).
-	eng.Run()
+	r.Wait()
 	slog.Info("tncd stopped")
 }
 
