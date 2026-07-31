@@ -6,9 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/ben-kuhn/tncd/v2/internal/app"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
@@ -87,6 +85,8 @@ func main() {
 		case "check":
 			runCheck(os.Args[2:])
 			return
+		case "service":
+			os.Exit(runServiceCommand(os.Args[2:]))
 		}
 	}
 
@@ -169,8 +169,8 @@ func main() {
 		}
 	}
 
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
-	slog.SetDefault(slog.New(handler))
+	service := isWindowsService()
+	installLogging(level, service)
 	// Also configure the stdlib log package to go through slog (bridge/agwpe use log.Printf).
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr)
@@ -228,18 +228,9 @@ func main() {
 	slog.Info("tncd running", "version", version.Version, "listen", r.AGWPEAddr().String())
 	slog.Info("Press Ctrl+C to stop")
 
-	// SIGINT / SIGTERM → graceful shutdown. (Platform split into main_unix.go /
-	// main_windows.go arrives with the service plan; this already cross-compiles
-	// to Windows unchanged.)
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		slog.Info("Received signal, shutting down...", "signal", sig)
-		r.Shutdown()
-	}()
-
-	r.Wait()
+	// Block until shutdown (platform-specific: Unix signals, Windows SCM or
+	// console). run performs the graceful teardown before returning.
+	run(r, service)
 	slog.Info("tncd stopped")
 }
 
