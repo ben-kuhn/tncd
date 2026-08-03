@@ -196,3 +196,48 @@ func TestOpenOtherErrorUnchanged(t *testing.T) {
 		t.Fatalf("non-EBUSY error = %v, want it wrapped through", err)
 	}
 }
+
+func TestSerialOpenResolvesDevice(t *testing.T) {
+	var opened string
+	tr := &serialTransport{
+		cfg: SerialConfig{
+			Device: "usb:0403:6001",
+			Baud:   9600,
+			Resolve: func(ref string) (string, error) {
+				if ref != "usb:0403:6001" {
+					t.Errorf("Resolve got %q", ref)
+				}
+				return "/dev/ttyUSB9", nil
+			},
+		},
+		probeWait: time.Millisecond,
+		openPort: func(device string, mode *goserial.Mode) (modemPort, error) {
+			opened = device
+			return &fakeModemPort{}, nil
+		},
+	}
+	if err := tr.Open(); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if opened != "/dev/ttyUSB9" {
+		t.Errorf("opened %q, want the resolved /dev/ttyUSB9", opened)
+	}
+}
+
+func TestSerialOpenResolveError(t *testing.T) {
+	tr := &serialTransport{
+		cfg: SerialConfig{
+			Device:  "usb:0403:6001",
+			Baud:    9600,
+			Resolve: func(string) (string, error) { return "", errors.New("not plugged in") },
+		},
+		probeWait: time.Millisecond,
+		openPort: func(device string, mode *goserial.Mode) (modemPort, error) {
+			t.Fatal("openPort should not be called when Resolve fails")
+			return nil, nil
+		},
+	}
+	if err := tr.Open(); err == nil {
+		t.Fatal("want error when Resolve fails, got nil")
+	}
+}

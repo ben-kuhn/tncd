@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ben-kuhn/tncd/v2/internal/config"
+	"github.com/ben-kuhn/tncd/v2/internal/ports"
 	"github.com/ben-kuhn/tncd/v2/kiss"
 )
 
@@ -24,6 +25,7 @@ func buildTransport(pc config.Port) (kiss.Transport, error) {
 			SendKISSExit:   pc.SendKISSExit,
 			HostExitString: pc.HostExitString,
 			ExitDelay:      time.Duration(pc.ExitDelay * float64(time.Second)),
+			Resolve:        ports.Resolve,
 		}), nil
 	case "tcp":
 		return kiss.NewTCPTransport(pc.Host, pc.TCPPort), nil
