@@ -24,6 +24,12 @@ type SerialConfig struct {
 	SendKISSExit   bool
 	HostExitString string
 	ExitDelay      time.Duration
+
+	// Resolve, if set, maps Device (which may be a stable reference like
+	// "usb:VID:PID") to the concrete OS device path to open. It is called on
+	// every Open, so a device that moved to a different USB port is re-resolved
+	// on reconnect. nil means open Device unchanged.
+	Resolve func(ref string) (device string, err error)
 }
 
 // serialTransport implements Transport for a serial (RS-232/USB) KISS TNC.
@@ -81,6 +87,20 @@ func (s *serialTransport) Open() error {
 		StopBits: stopBits,
 	}
 
+	// Resolve a stable device reference (e.g. "usb:VID:PID") to the live OS
+	// device path. Runs on every Open so a USB replug re-resolves on reconnect.
+	device := s.cfg.Device
+	if s.cfg.Resolve != nil {
+		resolved, rerr := s.cfg.Resolve(device)
+		if rerr != nil {
+			return fmt.Errorf("serial: resolve %q: %w", device, rerr)
+		}
+		if resolved != device {
+			log.Printf("serial: resolved %s -> %s", device, resolved)
+		}
+		device = resolved
+	}
+
 	// openPort is injected in tests; defaults to goserial.Open.
 	openFn := s.openPort
 	if openFn == nil {
@@ -89,12 +109,12 @@ func (s *serialTransport) Open() error {
 		}
 	}
 
-	port, err := openFn(s.cfg.Device, mode)
+	port, err := openFn(device, mode)
 	if err != nil {
 		if errors.Is(err, syscall.EBUSY) {
-			return fmt.Errorf("serial: cannot open %s: port is busy (in use or exclusively locked) — free it and retry", s.cfg.Device)
+			return fmt.Errorf("serial: cannot open %s: port is busy (in use or exclusively locked) — free it and retry", device)
 		}
-		return fmt.Errorf("serial: open %s: %w", s.cfg.Device, err)
+		return fmt.Errorf("serial: open %s: %w", device, err)
 	}
 
 	// Assert DTR so the TNC knows the host is present.
