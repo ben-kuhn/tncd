@@ -69,13 +69,18 @@ type Bridge struct {
 	// traffic >= 1: hex dump of raw KISS RX/TX bytes.
 	verbose int
 	traffic int
+
+	// newTransport builds a kiss.Transport from a port config. Defaults to
+	// buildTransport; overridable in tests to inject a fake transport.
+	newTransport func(config.Port) (kiss.Transport, error)
 }
 
 // New creates a Bridge. Call Start to connect ports and wire L2 hooks.
 func New(eng *engine.Engine, cfg *config.Config) *Bridge {
 	return &Bridge{
-		eng: eng,
-		cfg: cfg,
+		eng:          eng,
+		cfg:          cfg,
+		newTransport: buildTransport,
 	}
 }
 
@@ -486,7 +491,7 @@ func (b *Bridge) Start() error {
 // connectPort opens one KISS port in a background goroutine and posts the
 // result back to the engine loop. Mirrors tncd.py:1123-1142.
 func (b *Bridge) connectPort(idx int, pc config.Port) {
-	tr, err := buildTransport(pc)
+	tr, err := b.newTransport(pc)
 	if err != nil {
 		log.Printf("bridge: port %d build transport error: %v", idx, err)
 		return
@@ -504,7 +509,7 @@ func (b *Bridge) connectPort(idx int, pc config.Port) {
 
 	if err := port.Start(); err != nil {
 		log.Printf("bridge: port %d start error: %v", idx, err)
-		if pc.Type == "bluetooth" && pc.Reconnect {
+		if pc.Reconnect {
 			delay := pc.ReconnectDelay
 			b.scheduleReconnect(idx, pc, delay)
 		}
@@ -528,10 +533,10 @@ func (b *Bridge) portWentOffline(portNum int) {
 		b.txFrames[portNum] = 0
 	}
 
-	// Schedule reconnect for bluetooth ports configured for it.
+	// Schedule reconnect for ports configured for it.
 	if portNum < len(b.cfg.Ports) {
 		pc := b.cfg.Ports[portNum]
-		if pc.Type == "bluetooth" && pc.Reconnect {
+		if pc.Reconnect {
 			b.scheduleReconnect(portNum, pc, pc.ReconnectDelay)
 		}
 	}
@@ -547,7 +552,7 @@ func (b *Bridge) scheduleReconnect(idx int, pc config.Port, delay float64) {
 		maxDelay = 60
 	}
 	d := time.Duration(delay * float64(time.Second))
-	log.Printf("bridge: port %d bluetooth reconnect in %.1fs", idx, delay)
+	log.Printf("bridge: port %d reconnect in %.1fs", idx, delay)
 	b.eng.After(d, func() {
 		nextDelay := delay * 2
 		if nextDelay > maxDelay {
@@ -559,7 +564,7 @@ func (b *Bridge) scheduleReconnect(idx int, pc config.Port, delay float64) {
 
 // connectPortWithBackoff is like connectPort but also schedules retry on failure.
 func (b *Bridge) connectPortWithBackoff(idx int, pc config.Port, nextDelay float64) {
-	tr, err := buildTransport(pc)
+	tr, err := b.newTransport(pc)
 	if err != nil {
 		log.Printf("bridge: port %d build transport error (reconnect): %v", idx, err)
 		b.eng.Do(func() { b.scheduleReconnect(idx, pc, nextDelay) })
