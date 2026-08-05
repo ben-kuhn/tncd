@@ -20,15 +20,6 @@ const sppUUID = "00001101-0000-1000-8000-00805f9b34fb"
 // profilePath is the D-Bus object path at which we export our Profile1 object.
 const profilePath = dbus.ObjectPath("/org/tncd/spp")
 
-// BluetoothConfig holds the configuration for a Bluetooth SPP KISS transport.
-type BluetoothConfig struct {
-	BDAddr            string
-	Channel           string // informational; the SPP profile UUID drives connection
-	Reconnect         bool
-	ReconnectDelay    time.Duration
-	ReconnectMaxDelay time.Duration
-}
-
 // bluetoothTransport implements Transport for a Bluetooth SPP KISS TNC via
 // BlueZ D-Bus on Linux.
 type bluetoothTransport struct {

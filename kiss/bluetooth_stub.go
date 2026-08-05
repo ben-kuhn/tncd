@@ -1,21 +1,8 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package kiss
 
-import (
-	"fmt"
-	"time"
-)
-
-// BluetoothConfig holds the configuration for a Bluetooth SPP KISS transport.
-// On non-Linux platforms Open() always returns an error.
-type BluetoothConfig struct {
-	BDAddr            string
-	Channel           string
-	Reconnect         bool
-	ReconnectDelay    time.Duration
-	ReconnectMaxDelay time.Duration
-}
+import "fmt"
 
 type bluetoothStub struct{}
 
