@@ -43,6 +43,11 @@ type modemPort interface {
 	SetDTR(dtr bool) error
 	SetRTS(rts bool) error
 	SetReadTimeout(t time.Duration) error
+	// GetModemStatusBits queries the modem-status lines on the open handle. It
+	// errors when the device has been removed (a USB unplug), which is how the
+	// reader detects a disconnect on Windows — there Read returns a timeout, not
+	// an error, when the device goes away.
+	GetModemStatusBits() (*goserial.ModemStatusBits, error)
 	Close() error
 }
 
@@ -55,13 +60,27 @@ type serialTransport struct {
 	// openPort is called by Open() to open the underlying serial port.
 	// Injected in tests to avoid requiring a real device.
 	openPort func(device string, mode *goserial.Mode) (modemPort, error)
+
+	// resolved is the concrete OS device path Open() opened (e.g. "COM4").
+	resolved string
+	// modem is the opened port, used for modem-status health checks that detect
+	// device removal (see modemPort.GetModemStatusBits).
+	modem modemPort
+	// healthCheck is enabled at Open when the device supports modem status. It
+	// stays off for devices that don't (e.g. a PTY / Direwolf pipe), which would
+	// otherwise be falsely flagged as removed; those rely on read errors instead.
+	healthCheck bool
+	// healthInterval rate-limits the removal probe on the idle-read path.
+	healthInterval time.Duration
+	lastHealth     time.Time
 }
 
 // NewSerialTransport returns a Transport backed by a serial port.
 func NewSerialTransport(cfg SerialConfig) Transport {
 	return &serialTransport{
-		cfg:       cfg,
-		probeWait: time.Second,
+		cfg:            cfg,
+		probeWait:      time.Second,
+		healthInterval: time.Second,
 	}
 }
 
@@ -168,11 +187,34 @@ func (s *serialTransport) Open() error {
 		// Use it as the flush function for the real port.
 		s.flush = gp.Drain
 	}
+	s.resolved = device
+	s.modem = port
+	// Enable removal detection only for devices that answer a modem-status query.
+	// A PTY / pipe (e.g. Direwolf) errors here and would be falsely flagged as
+	// removed; those detect disconnect via read errors instead.
+	if _, mserr := port.GetModemStatusBits(); mserr == nil {
+		s.healthCheck = true
+	}
 	return nil
 }
 
 func (s *serialTransport) Read(b []byte) (int, error) {
-	return s.rw.Read(b)
+	n, err := s.rw.Read(b)
+	if err != nil || n > 0 {
+		return n, err
+	}
+	// n == 0, err == nil: a read timeout on an idle line — but on Windows a
+	// removed device also returns a timeout rather than an error. Rate-limited,
+	// probe the open handle's modem status; if it errors the device is gone, so
+	// surface it as a read error and let the reader take the port offline (the
+	// bridge then reconnects and re-resolves a usb: reference).
+	if s.healthCheck && time.Since(s.lastHealth) >= s.healthInterval {
+		s.lastHealth = time.Now()
+		if _, mserr := s.modem.GetModemStatusBits(); mserr != nil {
+			return 0, fmt.Errorf("serial: %s appears removed: %w", s.resolved, mserr)
+		}
+	}
+	return 0, nil
 }
 
 func (s *serialTransport) Write(b []byte) (int, error) {

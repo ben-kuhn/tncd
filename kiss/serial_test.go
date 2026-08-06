@@ -6,12 +6,92 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	goserial "go.bug.st/serial"
 )
+
+// timeoutSerial is a modemPort whose Read always returns a timeout (0, nil) —
+// like an idle serial line, and like a removed device on Windows — and whose
+// GetModemStatusBits result is controllable, to test removal detection.
+type timeoutSerial struct {
+	modemErr func() error
+}
+
+func (t *timeoutSerial) Read([]byte) (int, error)           { return 0, nil }
+func (t *timeoutSerial) Write(p []byte) (int, error)        { return len(p), nil }
+func (t *timeoutSerial) Close() error                       { return nil }
+func (t *timeoutSerial) SetDTR(bool) error                  { return nil }
+func (t *timeoutSerial) SetRTS(bool) error                  { return nil }
+func (t *timeoutSerial) SetReadTimeout(time.Duration) error { return nil }
+func (t *timeoutSerial) GetModemStatusBits() (*goserial.ModemStatusBits, error) {
+	if e := t.modemErr(); e != nil {
+		return nil, e
+	}
+	return &goserial.ModemStatusBits{}, nil
+}
+
+// TestSerialReadDetectsRemovalViaModemStatus verifies that when the device is
+// removed — the read still returns a timeout (0, nil), as it does on Windows —
+// the idle-read health probe surfaces the modem-status error so the reader goes
+// offline and the bridge reconnects.
+func TestSerialReadDetectsRemovalViaModemStatus(t *testing.T) {
+	var removed atomic.Bool
+	ts := &timeoutSerial{modemErr: func() error {
+		if removed.Load() {
+			return errors.New("device removed")
+		}
+		return nil
+	}}
+	tr := &serialTransport{
+		cfg:            SerialConfig{Device: "COM4", Baud: 9600},
+		probeWait:      time.Millisecond,
+		healthInterval: 0, // probe on every idle read
+		openPort:       func(string, *goserial.Mode) (modemPort, error) { return ts, nil },
+	}
+	if err := tr.Open(); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !tr.healthCheck {
+		t.Fatal("health check should be enabled for a device that answers modem status")
+	}
+	// Present: an idle read returns a timeout with no error.
+	if n, err := tr.Read(make([]byte, 1)); n != 0 || err != nil {
+		t.Fatalf("read while present = %d, %v; want 0, nil", n, err)
+	}
+	// Removed: the health probe errors, surfaced as a read error.
+	removed.Store(true)
+	if _, err := tr.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected a Read error after device removal")
+	}
+}
+
+// TestSerialNoHealthCheckWhenModemStatusUnsupported verifies that a device whose
+// modem-status query errors at open (e.g. a PTY / Direwolf pipe) does not enable
+// the health probe, so idle reads never falsely report removal.
+func TestSerialNoHealthCheckWhenModemStatusUnsupported(t *testing.T) {
+	ts := &timeoutSerial{modemErr: func() error { return errors.New("inappropriate ioctl") }}
+	tr := &serialTransport{
+		cfg:            SerialConfig{Device: "/dev/pts/9", Baud: 9600},
+		probeWait:      time.Millisecond,
+		healthInterval: 0,
+		openPort:       func(string, *goserial.Mode) (modemPort, error) { return ts, nil },
+	}
+	if err := tr.Open(); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if tr.healthCheck {
+		t.Fatal("health check must stay off when GetModemStatusBits errors at open")
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := tr.Read(make([]byte, 1)); err != nil {
+			t.Fatalf("idle read %d errored though health check disabled: %v", i, err)
+		}
+	}
+}
 
 // fakeSerial scripts responses: each probe CR gets the next queued response.
 type fakeSerial struct {
@@ -114,6 +194,9 @@ type fakeModemPort struct {
 func (f *fakeModemPort) SetDTR(bool) error                  { return f.dtrErr }
 func (f *fakeModemPort) SetRTS(bool) error                  { return f.rtsErr }
 func (f *fakeModemPort) SetReadTimeout(time.Duration) error { return nil }
+func (f *fakeModemPort) GetModemStatusBits() (*goserial.ModemStatusBits, error) {
+	return &goserial.ModemStatusBits{}, nil
+}
 
 // TestOpenNonFatalDTRRTSError verifies that SetDTR/SetRTS failures (e.g. on a
 // PTY device that does not support modem control signals) are non-fatal.
