@@ -13,9 +13,9 @@ func TestParseBTAddr(t *testing.T) {
 		{"00:11:22:33:44:55", 0x001122334455, true},
 		{"AA:BB:CC:DD:EE:FF", 0xAABBCCDDEEFF, true},
 		{"aa-bb-cc-dd-ee-ff", 0xAABBCCDDEEFF, true}, // dashes + lowercase
-		{"001122334455", 0x001122334455, true},       // no separators
-		{"00:11:22:33:44", 0, false},                 // too short
-		{"zz:11:22:33:44:55", 0, false},              // non-hex
+		{"001122334455", 0x001122334455, true},      // no separators
+		{"00:11:22:33:44", 0, false},                // too short
+		{"zz:11:22:33:44:55", 0, false},             // non-hex
 	}
 	for _, c := range cases {
 		got, err := parseBTAddr(c.in)

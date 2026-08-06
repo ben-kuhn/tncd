@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	goserial "go.bug.st/serial"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,6 +22,9 @@ func (fakeHandlePort) SetDTR(bool) error                  { return nil }
 func (fakeHandlePort) SetRTS(bool) error                  { return nil }
 func (fakeHandlePort) SetReadTimeout(time.Duration) error { return nil }
 func (fakeHandlePort) Close() error                       { return nil }
+func (fakeHandlePort) GetModemStatusBits() (*goserial.ModemStatusBits, error) {
+	return &goserial.ModemStatusBits{}, nil
+}
 
 // noHandlePort is a modemPort with no "handle" field.
 type noHandlePort struct{}
@@ -29,6 +33,9 @@ func (noHandlePort) SetDTR(bool) error                  { return nil }
 func (noHandlePort) SetRTS(bool) error                  { return nil }
 func (noHandlePort) SetReadTimeout(time.Duration) error { return nil }
 func (noHandlePort) Close() error                       { return nil }
+func (noHandlePort) GetModemStatusBits() (*goserial.ModemStatusBits, error) {
+	return &goserial.ModemStatusBits{}, nil
+}
 
 func TestLibSerialFD(t *testing.T) {
 	if fd, ok := libSerialFD(&fakeHandlePort{handle: 42}); !ok || fd != 42 {
