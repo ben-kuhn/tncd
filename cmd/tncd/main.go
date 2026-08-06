@@ -229,7 +229,11 @@ func main() {
 	}
 
 	slog.Info("tncd running", "version", version.Version, "listen", r.AGWPEAddr().String())
-	slog.Info("Press Ctrl+C to stop")
+	if !service {
+		// Console/foreground only — meaningless (and misleading in the Event Log)
+		// when running under the Windows SCM.
+		slog.Info("Press Ctrl+C to stop")
+	}
 
 	// Block until shutdown (platform-specific: Unix signals, Windows SCM or
 	// console). run performs the graceful teardown before returning.
