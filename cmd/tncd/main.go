@@ -89,6 +89,10 @@ func main() {
 			os.Exit(runPorts(os.Args[2:]))
 		case "service":
 			os.Exit(runServiceCommand(os.Args[2:]))
+		case "install":
+			os.Exit(runInstall(os.Args[2:]))
+		case "uninstall":
+			os.Exit(runUninstall(os.Args[2:]))
 		}
 	}
 
