@@ -79,7 +79,14 @@ func svcInstall(args []string) error {
 	if err != nil {
 		return err
 	}
+	return installServiceAt(exe, cfgPath)
+}
 
+// installServiceAt registers the tncd service to run exePath with "-c cfgPath"
+// (both should be absolute — a service's working directory is System32). Shared
+// by the `service install` subcommand and the self-installer (Plan 5a), which
+// points it at the installed copy rather than the running one.
+func installServiceAt(exePath, cfgPath string) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return err
@@ -91,7 +98,7 @@ func svcInstall(args []string) error {
 		return fmt.Errorf("service %s already exists", serviceName)
 	}
 
-	s, err := m.CreateService(serviceName, exe, mgr.Config{
+	s, err := m.CreateService(serviceName, exePath, mgr.Config{
 		DisplayName:      serviceDisplayName,
 		Description:      "AGWPE-to-KISS bridge for AX.25 packet radio.",
 		StartType:        mgr.StartAutomatic,
@@ -110,6 +117,9 @@ func svcInstall(args []string) error {
 	}
 	return nil
 }
+
+// startService starts the installed tncd service.
+func startService() error { return svcControl("start") }
 
 func svcUninstall() error {
 	m, err := mgr.Connect()
