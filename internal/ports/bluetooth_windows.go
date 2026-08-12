@@ -3,6 +3,7 @@
 package ports
 
 import (
+	"encoding/binary"
 	"fmt"
 	"unsafe"
 
@@ -47,8 +48,7 @@ func bluetoothDevices() []Port {
 			mac := ""
 			if q.NumberOfCsAddrs > 0 && q.SaBuffer != nil && q.SaBuffer.RemoteAddr.Sockaddr != nil {
 				bth := (*windows.RawSockaddrBth)(unsafe.Pointer(q.SaBuffer.RemoteAddr.Sockaddr))
-				addr := *(*uint64)(unsafe.Pointer(&bth.BtAddr[0]))
-				mac = formatBTMAC(addr)
+				mac = formatBTMAC(binary.LittleEndian.Uint64(bth.BtAddr[:]))
 			}
 			if mac == "" {
 				continue
