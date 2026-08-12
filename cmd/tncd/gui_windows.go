@@ -99,7 +99,11 @@ func wizardPorts() ([]string, []portChoice) {
 	choices := make([]portChoice, 0, len(ps))
 	for _, p := range ps {
 		labels = append(labels, p.Label)
-		choices = append(choices, portChoice{typ: "serial", device: p.Ref})
+		if p.Kind == ports.KindBluetooth {
+			choices = append(choices, portChoice{typ: "bluetooth", device: p.Device})
+		} else {
+			choices = append(choices, portChoice{typ: "serial", device: p.Ref})
+		}
 	}
 	return labels, choices
 }
