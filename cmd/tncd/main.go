@@ -96,6 +96,12 @@ func main() {
 		}
 	}
 
+	// Windows double-click (bare, interactive, own console) → graphical
+	// installer / manage UI. No-op on other platforms and for shell/service runs.
+	if maybeGUI() {
+		return
+	}
+
 	// Pre-expand collapsed count flags (-vvv → -v -v -v, -tt → -t -t).
 	countNames := map[string]bool{"v": true, "t": true}
 	expandedArgs := expandCountFlags(os.Args[1:], countNames)

@@ -62,6 +62,8 @@ func List() ([]Port, error) {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Device < out[j].Device })
+	// Append paired/known Bluetooth SPP devices (Windows only; nil elsewhere).
+	out = append(out, bluetoothDevices()...)
 	return out, nil
 }
 
