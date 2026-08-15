@@ -3,20 +3,18 @@ package ports
 import (
 	"strings"
 	"testing"
-
-	"go.bug.st/serial/enumerator"
 )
 
-func withFakePorts(t *testing.T, ds []*enumerator.PortDetails) {
+func withFakePorts(t *testing.T, ds []portDetail) {
 	t.Helper()
 	orig := detailedPorts
-	detailedPorts = func() ([]*enumerator.PortDetails, error) { return ds, nil }
+	detailedPorts = func() ([]portDetail, error) { return ds, nil }
 	t.Cleanup(func() { detailedPorts = orig })
 }
 
 func TestListUSBAndPlainPorts(t *testing.T) {
-	withFakePorts(t, []*enumerator.PortDetails{
-		{Name: "COM3", IsUSB: true, VID: "0403", PID: "6001", SerialNumber: "A50285BI", Product: "FT232R USB UART"},
+	withFakePorts(t, []portDetail{
+		{Name: "COM3", IsUSB: true, VID: "0403", PID: "6001", Serial: "A50285BI", Product: "FT232R USB UART"},
 		{Name: "COM1", IsUSB: false},
 	})
 	ps, err := List()
@@ -38,8 +36,26 @@ func TestListUSBAndPlainPorts(t *testing.T) {
 	}
 }
 
+func TestListUSBLabelNoDoubledCOM(t *testing.T) {
+	// FTDI's product name already ends with "(COM4)"; the label must not
+	// append it again ("USB: USB Serial Port (COM4) (COM4)").
+	withFakePorts(t, []portDetail{
+		{Name: "COM4", IsUSB: true, VID: "0403", PID: "6001", Serial: "FTB6SPL3A", Product: "USB Serial Port (COM4)"},
+	})
+	ps, err := List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if strings.Contains(ps[0].Label, "(COM4) (COM4)") {
+		t.Errorf("label doubles the COM port: %q", ps[0].Label)
+	}
+	if ps[0].Label != "USB: USB Serial Port (COM4)" {
+		t.Errorf("label = %q, want %q", ps[0].Label, "USB: USB Serial Port (COM4)")
+	}
+}
+
 func TestListUSBNoSerialNumber(t *testing.T) {
-	withFakePorts(t, []*enumerator.PortDetails{
+	withFakePorts(t, []portDetail{
 		{Name: "COM5", IsUSB: true, VID: "10C4", PID: "EA60", Product: "CP2102"},
 	})
 	ps, err := List()
@@ -65,8 +81,8 @@ func TestResolvePassthrough(t *testing.T) {
 }
 
 func TestResolveUSBSingleMatch(t *testing.T) {
-	withFakePorts(t, []*enumerator.PortDetails{
-		{Name: "COM7", IsUSB: true, VID: "0403", PID: "6001", SerialNumber: "A50285BI"},
+	withFakePorts(t, []portDetail{
+		{Name: "COM7", IsUSB: true, VID: "0403", PID: "6001", Serial: "A50285BI"},
 		{Name: "COM2", IsUSB: false},
 	})
 	got, err := Resolve("usb:0403:6001")
@@ -79,7 +95,7 @@ func TestResolveUSBSingleMatch(t *testing.T) {
 }
 
 func TestResolveUSBNoMatch(t *testing.T) {
-	withFakePorts(t, []*enumerator.PortDetails{
+	withFakePorts(t, []portDetail{
 		{Name: "COM7", IsUSB: true, VID: "1234", PID: "5678"},
 	})
 	if _, err := Resolve("usb:0403:6001"); err == nil {
@@ -88,9 +104,9 @@ func TestResolveUSBNoMatch(t *testing.T) {
 }
 
 func TestResolveUSBAmbiguousWantsSerial(t *testing.T) {
-	withFakePorts(t, []*enumerator.PortDetails{
-		{Name: "COM7", IsUSB: true, VID: "0403", PID: "6001", SerialNumber: "AAAA"},
-		{Name: "COM8", IsUSB: true, VID: "0403", PID: "6001", SerialNumber: "BBBB"},
+	withFakePorts(t, []portDetail{
+		{Name: "COM7", IsUSB: true, VID: "0403", PID: "6001", Serial: "AAAA"},
+		{Name: "COM8", IsUSB: true, VID: "0403", PID: "6001", Serial: "BBBB"},
 	})
 	_, err := Resolve("usb:0403:6001")
 	if err == nil {
@@ -102,9 +118,9 @@ func TestResolveUSBAmbiguousWantsSerial(t *testing.T) {
 }
 
 func TestResolveUSBWithSerialDisambiguates(t *testing.T) {
-	withFakePorts(t, []*enumerator.PortDetails{
-		{Name: "COM7", IsUSB: true, VID: "0403", PID: "6001", SerialNumber: "AAAA"},
-		{Name: "COM8", IsUSB: true, VID: "0403", PID: "6001", SerialNumber: "BBBB"},
+	withFakePorts(t, []portDetail{
+		{Name: "COM7", IsUSB: true, VID: "0403", PID: "6001", Serial: "AAAA"},
+		{Name: "COM8", IsUSB: true, VID: "0403", PID: "6001", Serial: "BBBB"},
 	})
 	got, err := Resolve("usb:0403:6001:bbbb") // case-insensitive
 	if err != nil {
