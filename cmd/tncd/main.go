@@ -184,9 +184,16 @@ func main() {
 
 	service := isWindowsService()
 	installLogging(level, service)
-	// Also configure the stdlib log package to go through slog (bridge/agwpe use log.Printf).
+	// The bridge/kiss/agwpe packages log via the stdlib log package. On the
+	// console keep that on stderr as-is; under the Windows service there is no
+	// stderr, so route it through slog (→ the Event Log) instead, or those
+	// messages (serial resolve/reconnect, port online/offline) vanish.
 	log.SetFlags(0)
-	log.SetOutput(os.Stderr)
+	if service {
+		log.SetOutput(slogLogWriter{})
+	} else {
+		log.SetOutput(os.Stderr)
+	}
 
 	// --- Load config ---
 	cfg, err := config.Load(*configFile)
@@ -249,6 +256,16 @@ func main() {
 	// console). run performs the graceful teardown before returning.
 	run(r, service)
 	slog.Info("tncd stopped")
+}
+
+// slogLogWriter adapts the stdlib log package to slog: each log line is emitted
+// as a slog Info record, so stdlib-log callers (bridge/kiss/agwpe) share slog's
+// sink — notably the Windows Event Log when running as a service.
+type slogLogWriter struct{}
+
+func (slogLogWriter) Write(p []byte) (int, error) {
+	slog.Info(strings.TrimRight(string(p), "\r\n"))
+	return len(p), nil
 }
 
 // runCheck implements the "check" subcommand: load + validate a config file
