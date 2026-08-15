@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"go.bug.st/serial/enumerator"
 )
 
 // Kind values for Port.
@@ -29,10 +27,21 @@ type Port struct {
 	Serial string `json:"serial,omitempty"` // USB serial number (when available)
 }
 
-// detailedPorts is the serial enumerator, indirected so tests can fake it.
-var detailedPorts = func() ([]*enumerator.PortDetails, error) {
-	return enumerator.GetDetailedPortsList()
+// portDetail is a platform-neutral serial-port record. It decouples List/Resolve
+// from the enumerator's own type so the (cgo-on-darwin) enumerator import can be
+// confined to non-darwin builds; darwin populates only Name (see enum_*.go).
+type portDetail struct {
+	Name    string // OS device path (COMx / /dev/ttyUSB0)
+	IsUSB   bool
+	VID     string
+	PID     string
+	Serial  string
+	Product string
 }
+
+// detailedPorts enumerates serial ports. It is a var so tests can fake it, and
+// its default is set per-platform (defaultDetailedPorts in enum_*.go).
+var detailedPorts = defaultDetailedPorts
 
 // List returns all discoverable serial ports. USB ports get a "usb:VID:PID[:SERIAL]"
 // Ref; other ports use their device path as the Ref. Results are sorted by
@@ -48,13 +57,19 @@ func List() ([]Port, error) {
 		if d.IsUSB && d.VID != "" && d.PID != "" {
 			p.VID = strings.ToLower(d.VID)
 			p.PID = strings.ToLower(d.PID)
-			p.Serial = d.SerialNumber
+			p.Serial = d.Serial
 			p.Ref = usbRef(p.VID, p.PID, p.Serial)
 			name := d.Product
 			if name == "" {
 				name = "USB serial"
 			}
-			p.Label = fmt.Sprintf("USB: %s (%s)", name, d.Name)
+			// Some drivers (e.g. FTDI) already include "(COMx)" in the product
+			// name — avoid "USB: USB Serial Port (COM4) (COM4)".
+			if strings.Contains(name, d.Name) {
+				p.Label = "USB: " + name
+			} else {
+				p.Label = fmt.Sprintf("USB: %s (%s)", name, d.Name)
+			}
 		} else {
 			p.Ref = d.Name
 			p.Label = fmt.Sprintf("Serial: %s", d.Name)
@@ -99,7 +114,7 @@ func Resolve(ref string) (string, error) {
 		if !strings.EqualFold(d.VID, vid) || !strings.EqualFold(d.PID, pid) {
 			continue
 		}
-		if serial != "" && !strings.EqualFold(d.SerialNumber, serial) {
+		if serial != "" && !strings.EqualFold(d.Serial, serial) {
 			continue
 		}
 		matches = append(matches, d.Name)
