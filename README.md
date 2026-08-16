@@ -1,15 +1,19 @@
 # tncd — AGWPE-to-KISS Bridge
 
 > **Two release lines.** The stable **1.3.x** line (Python) documented here is the
-> recommended version for production stations, and is what the public
-> `apt.tncd.dev` / `rpm.tncd.dev` repositories serve. A **2.0 line** (`v1.9x-Beta`
+> recommended version for production Linux stations, and is what the public
+> `apt.tncd.dev` / `rpm.tncd.dev` repositories serve. A **2.0 line** (`v1.9x`/`v1.10x-Beta`
 > tags) is a from-scratch **Go rewrite** — a single static binary with no Python
-> runtime, plus AX.25 v2.2 (SABME/modulo-128, XID, SREJ) and native Bluetooth SPP.
+> runtime, plus AX.25 v2.2 (SABME/modulo-128, XID, SREJ), native Bluetooth SPP,
+> and **cross-platform builds**: Linux, **Windows** (with a self-installer GUI and
+> a native Windows service), macOS, and FreeBSD.
 > The 2.0 line is a **beta** and **not yet as thoroughly tested as the 1.3.x Python
-> line** — try it if you want the standalone binary, but keep 1.3.x if you need
-> proven stability. Grab 2.0 betas from the
+> line** — try it if you want the standalone binary or need Windows/macOS, but keep
+> 1.3.x on Linux if you need proven stability. Grab 2.0 betas (latest:
+> **v1.101-Beta**) from the
 > [GitHub releases](https://github.com/ben-kuhn/tncd/releases) or the
 > [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) overlay.
+> **Windows and macOS are available only on the 2.0 beta line.**
 
 A userspace bridge that lets AGWPE-compatible applications (PAT/Winlink, Paracon,
 Xastir) communicate with KISS TNCs, including full AX.25 connected-mode support.
@@ -123,12 +127,29 @@ Connects to a KISS-over-TCP server (e.g. Dire Wolf, QtSoundModem).
 
 ### Bluetooth TNC
 
-On Linux, tncd connects to Bluetooth TNCs natively using the BlueZ D-Bus
+On **Linux**, tncd connects to Bluetooth TNCs natively using the BlueZ D-Bus
 Profile API. Set `type = bluetooth` in the config — no external tools needed.
 
-On macOS and Windows, the OS exposes paired Bluetooth SPP devices as serial
-ports (`/dev/tty.*` on macOS, `COMx` on Windows). Use `type = serial` with
-the device path.
+On **Windows** (2.0 beta), tncd connects natively over Winsock RFCOMM
+(`AF_BTH`): pair the TNC once in Windows Settings, then set `type = bluetooth`
+and `bdaddr = AA:BB:CC:DD:EE:FF` (the 2.0 installer lists paired devices for
+you). No virtual COM port needed.
+
+On **macOS**, use the paired device's virtual serial port — `type = serial`
+with the `/dev/cu.*` path — since tncd has no native macOS Bluetooth transport.
+
+Why no native macOS transport? tncd's transports are deliberately **pure Go,
+`CGO_ENABLED=0`**, so every platform cross-compiles from one Linux CI. Linux and
+Windows expose Bluetooth SPP through mechanisms Go can drive with no C code — BlueZ
+over D-Bus (`godbus`) and Winsock RFCOMM sockets (`AF_BTH`), respectively. macOS
+has neither: classic SPP is reachable only through the Objective-C **IOBluetooth**
+framework, whose delegate/run-loop RFCOMM API requires **cgo** and a macOS build
+host (breaking the no-cgo cross-compile) and doesn't map cleanly onto tncd's
+blocking transport model. Since macOS already surfaces a paired SPP TNC as a
+`/dev/cu.*` serial port that the existing serial transport handles, a native
+transport would only save the pairing/virtual-port step — not worth that trade-off.
+It could be added later as a cgo-gated `bluetooth_darwin.go` built only on macOS
+runners if the serial path proves painful.
 
 ## Installation
 
@@ -167,6 +188,34 @@ Or using the provided requirements file:
 ```bash
 pip install -r requirements.txt
 ```
+
+### Windows (2.0 beta)
+
+> Windows is supported only on the **2.0 Go beta line** — there is no Windows
+> build of the stable 1.3.x Python line.
+
+Download `tncd-<version>-windows-amd64.zip` (or `-arm64`) from the
+[GitHub releases](https://github.com/ben-kuhn/tncd/releases), unzip, and
+**double-click `tncd.exe`**. With no config present it launches a small
+installer that asks for your callsign and TNC (serial ports and paired
+Bluetooth devices are listed for you), then installs tncd as an auto-starting
+Windows service. Running `tncd.exe` again opens a manage window
+(start/stop, open config, open the web monitor, uninstall).
+
+Command-line equivalents are also available: `tncd.exe ports`,
+`tncd.exe install -c tncd.ini`, `tncd.exe service start|stop`,
+`tncd.exe uninstall`.
+
+### macOS / FreeBSD (2.0 beta)
+
+> Also 2.0-beta-only, and without OS service integration — run it yourself or
+> wrap it in a launchd/rc unit.
+
+Download the matching `tncd-<version>-macos-*.tar.gz` /
+`tncd-<version>-freebsd-amd64.tar.gz` from the
+[GitHub releases](https://github.com/ben-kuhn/tncd/releases), extract, and run
+`./tncd -c tncd.ini`. (USB `usb:VID:PID` device references are Linux/Windows
+only; on macOS use the concrete `/dev/cu.*` path in the config.)
 
 ### Via Nix (NixOS)
 
@@ -280,8 +329,8 @@ port. Use `type = serial` with the device path:
 ```ini
 [client.0]
 type = serial
-device = /dev/tty.BluetoothTNC    # macOS
-# device = COM5                    # Windows
+device = /dev/cu.BluetoothTNC     # macOS (paired SPP device)
+# device = COM5                    # Windows (or type = bluetooth + bdaddr)
 serial_baudrate = 9600
 ota_baudrate = 1200
 ```

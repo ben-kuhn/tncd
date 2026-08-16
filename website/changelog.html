@@ -165,6 +165,52 @@
 
 <main>
 
+  <!-- v1.101-Beta -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.101-Beta</h2>
+      <span class="date">August 2026</span>
+      <a class="tag beta" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.101-Beta">release</a>
+    </div>
+    <div class="release-body">
+      <div class="beta-note">
+        <strong>Beta &mdash; tncd 2.0 line.</strong> The pure-Go rewrite. Newer and
+        <strong>not yet as thoroughly tested as the stable 1.3.x Python line</strong>,
+        which remains the recommended version for production Linux stations.
+        <strong>Windows and macOS are available only on this 2.0 beta line.</strong>
+      </div>
+      <h3>New Features &mdash; Windows, macOS &amp; FreeBSD</h3>
+      <ul>
+        <li><strong>Windows support</strong> &mdash; runs as a native <strong>Windows
+          service</strong> (Service Control Manager, logging to the Event Log) with a
+          <strong>self-installer GUI</strong>: double-click <code>tncd.exe</code> and a wizard
+          collects your callsign and TNC (serial ports <em>and</em> paired Bluetooth devices are
+          listed for you), installs the service, and starts it. Re-run to start/stop, open the
+          config, open the web monitor, or uninstall.</li>
+        <li><strong>Native Windows Bluetooth</strong> &mdash; connects to Bluetooth SPP TNCs
+          directly over Winsock RFCOMM (<code>AF_BTH</code>); pair once in Windows Settings, no
+          virtual COM port needed. Validated over the air with a connected-mode AX.25 BBS session.</li>
+        <li><strong>Stable USB serial device references</strong> &mdash; <code>device =
+          usb:VID:PID</code> survives Windows COM-port renumbering (and Linux
+          <code>/dev/tty*</code> reordering); tncd resolves it to the live port at open time.
+          Serial ports now <strong>auto-reconnect</strong> on unplug/replug, as Bluetooth
+          already did.</li>
+        <li><strong>macOS and FreeBSD builds</strong> &mdash; single static binaries (tarballs),
+          run <code>./tncd -c tncd.ini</code>. No OS service integration yet.</li>
+        <li><strong>Cross-platform release artifacts</strong> &mdash; Windows
+          <code>.zip</code> (amd64/arm64), macOS and FreeBSD <code>.tar.gz</code>, alongside the
+          existing Linux packages, all on the GitHub Release.</li>
+      </ul>
+      <h3>Tested</h3>
+      <ul>
+        <li>Validated on a Windows 11 VM: service install/start/stop/uninstall, Event Log,
+          device enumeration, serial disconnect/reconnect, and a live <strong>over-the-air
+          connected-mode AX.25 session over Bluetooth</strong> (KISS to a UV-Pro, connecting to
+          a BPQ node).</li>
+      </ul>
+    </div>
+  </div>
+
   <!-- v1.100-Beta -->
   <div class="release">
     <div class="release-header">

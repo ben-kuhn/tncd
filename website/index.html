@@ -179,6 +179,14 @@
       It implements full AX.25 connected mode including SABM/UA handshake, I-frame sequencing,
       delayed acknowledgement, and dynamic T1/T2 timers — with no kernel AX.25 stack required.
     </p>
+    <div class="note">
+      <strong>Two lines:</strong> the stable <strong>1.3.x</strong> (Python) line for
+      production Linux stations, and a <strong>2.0 <em>beta</em></strong> — a single-binary
+      Go rewrite adding AX.25 v2.2, native Bluetooth, and <strong>Windows, macOS, and
+      FreeBSD</strong> builds. Windows and macOS are 2.0-beta-only. The 2.0 line is not yet
+      as thoroughly tested as 1.3.x — see the Install tabs and
+      <a href="https://github.com/ben-kuhn/tncd/releases">releases</a>.
+    </div>
     <div class="arch-list">
       <span class="arch-tag">x86_64</span>
       <span class="arch-tag">i686</span>
@@ -291,34 +299,58 @@ in {
     </div>
 
     <div class="tab-content" id="tab-macos">
-      <p>Install from source using pip:</p>
-      <pre><code>git clone https://github.com/ben-kuhn/tncd.git
-cd tncd
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python tncd.py -c tncd.ini</code></pre>
-      <p style="margin-top:1rem;font-size:0.85rem;color:var(--muted)">
-        Homebrew package coming soon.
+      <p style="margin-bottom:0.75rem;">
+        <strong>macOS is available on the 2.0 <em>beta</em> line only</strong>
+        (the Go rewrite), and without OS service integration — run it yourself or
+        wrap it in a launchd unit.
+      </p>
+      <p>
+        Download the matching
+        <code>tncd-<em>&lt;version&gt;</em>-macos-arm64.tar.gz</code> (Apple
+        silicon) or <code>-macos-amd64.tar.gz</code> (Intel) from the
+        <a href="https://github.com/ben-kuhn/tncd/releases">GitHub releases</a>,
+        extract it, and run:
+      </p>
+      <pre><code>tar -xzf tncd-<em>&lt;version&gt;</em>-macos-arm64.tar.gz
+./tncd -c tncd.ini</code></pre>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">
+        Bluetooth TNCs: pair the device, then use <code>type = serial</code> with
+        its <code>/dev/cu.*</code> port. Homebrew tap coming later.
       </p>
     </div>
 
     <div class="tab-content" id="tab-windows">
-      <p>
-        tncd is best run under
-        <a href="https://learn.microsoft.com/en-us/windows/wsl/install">Windows Subsystem for Linux (WSL)</a>.
-        Install WSL with a Debian or Ubuntu distribution, then follow the Debian / Ubuntu instructions above.
+      <p style="margin-bottom:0.75rem;">
+        <strong>Windows is available on the 2.0 <em>beta</em> line only</strong>
+        (the Go rewrite) — there is no Windows build of the stable 1.3.x line.
       </p>
-      <pre><code>wsl --install -d Ubuntu</code></pre>
+      <p>
+        Download <code>tncd-<em>&lt;version&gt;</em>-windows-amd64.zip</code>
+        (or <code>-arm64</code>) from the
+        <a href="https://github.com/ben-kuhn/tncd/releases">GitHub releases</a>,
+        unzip it, and <strong>double-click <code>tncd.exe</code></strong>. With no
+        config present it launches an installer that asks for your callsign and
+        TNC — serial ports and paired Bluetooth devices are listed for you — then
+        installs tncd as an auto-starting Windows service. Run <code>tncd.exe</code>
+        again to start/stop the service, open the config, open the web monitor, or
+        uninstall.
+      </p>
+      <p style="margin-top:0.75rem;">Command-line equivalents:</p>
+      <pre><code>tncd.exe ports
+tncd.exe install -c tncd.ini
+tncd.exe service start
+tncd.exe uninstall</code></pre>
       <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">
-        Once inside WSL, serial devices are accessible via
-        <code>/dev/ttyS<em>N</em></code> and TCP TNCs work normally.
+        Bluetooth TNCs connect natively (Winsock RFCOMM): pair once in Windows
+        Settings, then pick the device in the installer.
       </p>
     </div>
 
     <div class="note">
-      Packages include all Python dependencies. Only <code>python3</code> and
-      <code>bluez</code> need to be installed separately (usually already present).
+      The Linux <strong>1.3.x</strong> packages (Debian/Fedora/openSUSE/Arch/Gentoo) include all
+      Python dependencies — only <code>python3</code> and <code>bluez</code> need to be present.
+      The <strong>2.0 beta</strong> (NixOS, Windows, macOS, FreeBSD) is a single static Go binary
+      with no runtime dependencies.
     </div>
   </section>
 
