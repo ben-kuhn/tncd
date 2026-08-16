@@ -77,6 +77,37 @@ jobs:
           echo "── artifacts ──"
           ls -la out/
 
+      - name: Cross-compile Windows, macOS, and BSD binaries
+        run: |
+          set -euo pipefail
+          LDFLAGS="-s -w -X github.com/ben-kuhn/tncd/v2/internal/version.Version=${VERSION}"
+
+          # Windows: tncd.exe is the app, the service, and its own GUI installer.
+          # The embedded manifest/version resource (cmd/tncd/*.syso) is picked up
+          # automatically. Ship a .zip with the docs so double-click just works.
+          for wa in amd64 arm64; do
+            env CGO_ENABLED=0 GOOS=windows GOARCH="${wa}" \
+              go build -ldflags "${LDFLAGS}" -o dist/tncd.exe ./cmd/tncd
+            # -j junks paths so tncd.exe, README, and COPYING land at the zip root.
+            zip -qj "out/tncd-${VERSION}-windows-${wa}.zip" dist/tncd.exe README.md COPYING
+            rm -f dist/tncd.exe
+          done
+
+          # macOS + FreeBSD: static binaries as tarballs (no service integration;
+          # run tncd -c tncd.ini or via a user-provided launchd/rc unit).
+          tarball() { # <goos> <goarch> <label>
+            env CGO_ENABLED=0 GOOS="$1" GOARCH="$2" \
+              go build -ldflags "${LDFLAGS}" -o dist/tncd ./cmd/tncd
+            tar -czf "out/tncd-${VERSION}-$3.tar.gz" -C dist tncd
+            rm -f dist/tncd
+          }
+          tarball darwin  amd64 macos-amd64
+          tarball darwin  arm64 macos-arm64
+          tarball freebsd amd64 freebsd-amd64
+
+          echo "── all artifacts ──"
+          ls -la out/
+
       - uses: actions/upload-artifact@v4
         with:
           name: packages
@@ -84,6 +115,8 @@ jobs:
             out/*.deb
             out/*.rpm
             out/tncd-linux-*
+            out/*.zip
+            out/*.tar.gz
 
   # ── Publish: GitHub Release only (beta posture) ───────────────────────────
   # For the 2.0 beta line, artifacts are published ONLY to a GitHub Release.
@@ -109,6 +142,8 @@ jobs:
             out/*.deb
             out/*.rpm
             out/tncd-linux-*
+            out/*.zip
+            out/*.tar.gz
           generate_release_notes: true
 
   # ── DEFERRED to phase 4 — repos stay on Python 1.3.2 until the Go port is ──
