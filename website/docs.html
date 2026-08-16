@@ -409,30 +409,36 @@ sudo nano /etc/tncd.ini</code></pre>
     </div>
 
     <div class="tab-content" id="tab-macos">
-      <p>Install from source using pip:</p>
-      <pre><code>git clone https://github.com/ben-kuhn/tncd.git
-cd tncd
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python tncd.py -c tncd.ini</code></pre>
+      <p><strong>2.0 beta only</strong>, no OS service integration. Download the
+        matching <code>tncd-<em>&lt;version&gt;</em>-macos-arm64.tar.gz</code> (Apple silicon) or
+        <code>-macos-amd64.tar.gz</code> (Intel) from the
+        <a href="https://github.com/ben-kuhn/tncd/releases">releases</a>, then:</p>
+      <pre><code>tar -xzf tncd-<em>&lt;version&gt;</em>-macos-arm64.tar.gz
+./tncd -c tncd.ini</code></pre>
       <p style="font-size:0.85rem;color:var(--muted)">
-        Homebrew package coming soon.
+        Bluetooth TNCs: pair the device, then use <code>type = serial</code> with its
+        <code>/dev/cu.*</code> port. Homebrew tap coming later.
       </p>
     </div>
 
     <div class="tab-content" id="tab-windows">
-      <p>
-        tncd is best run under
-        <a href="https://learn.microsoft.com/en-us/windows/wsl/install">Windows Subsystem for Linux (WSL)</a>,
-        which gives you a full Linux environment inside Windows.
-        Open PowerShell as Administrator and run:
+      <p><strong>Windows is 2.0-beta only</strong> (the Go rewrite; no Windows build of the
+        stable 1.3.x line). Download <code>tncd-<em>&lt;version&gt;</em>-windows-amd64.zip</code>
+        (or <code>-arm64</code>) from the
+        <a href="https://github.com/ben-kuhn/tncd/releases">releases</a>, unzip, and
+        <strong>double-click <code>tncd.exe</code></strong>.</p>
+      <p>With no config present, it launches an installer that asks for your callsign and TNC
+        (serial ports and paired Bluetooth devices are listed for you) and installs tncd as an
+        auto-starting Windows service. Run <code>tncd.exe</code> again to start/stop the service,
+        open the config, open the web monitor, or uninstall. Command-line equivalents:</p>
+      <pre><code>tncd.exe ports
+tncd.exe install -c tncd.ini
+tncd.exe service start
+tncd.exe uninstall</code></pre>
+      <p style="font-size:0.85rem;color:var(--muted)">
+        Bluetooth TNCs connect natively over Winsock RFCOMM — pair once in Windows Settings,
+        then select the device in the installer (<code>type = bluetooth</code>, <code>bdaddr</code>).
       </p>
-      <pre><code>wsl --install -d Ubuntu</code></pre>
-      <p>After WSL finishes installing and you've set up a username, open the Ubuntu terminal
-        and follow the Debian / Ubuntu instructions above. Serial devices from Windows are
-        accessible inside WSL as <code>/dev/ttyS<em>N</em></code> (e.g., COM3 becomes
-        <code>/dev/ttyS3</code>). TCP TNCs work normally.</p>
     </div>
   </section>
 
@@ -787,10 +793,22 @@ python tncd.py -c tncd.ini</code></pre>
     </p>
 
     <div class="note">
-      <strong>Linux only:</strong> Native Bluetooth support uses the BlueZ D-Bus API, which is
-      Linux-specific. On macOS, Bluetooth TNCs appear as <code>/dev/tty.*</code> serial devices
-      &mdash; use <code>type = serial</code> instead. On Windows (WSL), use the COM port
-      assigned by Windows.
+      <strong>Native on Linux &amp; Windows:</strong> Linux uses the BlueZ D-Bus API; Windows
+      (2.0 beta) uses Winsock RFCOMM (<code>AF_BTH</code>) &mdash; pair the TNC once, then set
+      <code>type = bluetooth</code> with <code>bdaddr = AA:BB:CC:DD:EE:FF</code> (the 2.0 installer
+      lists paired devices). <strong>macOS has no native transport:</strong> use the paired
+      device's <code>/dev/cu.*</code> serial port with <code>type = serial</code> instead.
+    </div>
+
+    <div class="note">
+      <strong>Why no native Bluetooth on macOS?</strong> tncd's transports are deliberately
+      pure&nbsp;Go (<code>CGO_ENABLED=0</code>) so every OS cross-compiles from one Linux build.
+      Linux (BlueZ/D-Bus) and Windows (Winsock <code>AF_BTH</code>) both expose Bluetooth SPP in
+      ways Go can drive with no C code. macOS exposes classic SPP only through the Objective-C
+      <em>IOBluetooth</em> framework, which needs cgo and a macOS build host and doesn't fit
+      tncd's blocking transport model. Because macOS already presents a paired TNC as a
+      <code>/dev/cu.*</code> serial port that the serial transport handles, a native transport
+      would only save the pairing/virtual-port step &mdash; so it's intentionally deferred.
     </div>
 
     <h3>Step 1: Pair your TNC</h3>
