@@ -312,7 +312,17 @@ in {
         extract it, and run:
       </p>
       <pre><code>tar -xzf tncd-<em>&lt;version&gt;</em>-macos-arm64.tar.gz
+
+# macOS blocks unsigned downloaded binaries (Gatekeeper). tncd is not
+# notarized, so clear the quarantine flag before the first run:
+xattr -dr com.apple.quarantine ./tncd
+
 ./tncd -c tncd.ini</code></pre>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">
+        If you skip that step you'll get &ldquo;cannot be opened because the developer cannot be
+        verified.&rdquo; You can also allow it via <strong>System Settings → Privacy &amp;
+        Security → Allow Anyway</strong>.
+      </p>
       <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">
         Bluetooth TNCs: pair the device, then use <code>type = serial</code> with
         its <code>/dev/cu.*</code> port. Homebrew tap coming later.
