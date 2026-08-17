@@ -118,12 +118,12 @@ jobs:
             out/*.zip
             out/*.tar.gz
 
-  # ── Publish: GitHub Release only (beta posture) ───────────────────────────
-  # For the 2.0 beta line, artifacts are published ONLY to a GitHub Release.
-  # The signed APT/RPM repos, the Cloudflare Pages site (tncd.dev), and the AUR
-  # PKGBUILD push all stay on the Python 1.3.2 line and are DEFERRED to phase 4
-  # (see the disabled `publish-repos` job below) so public installs keep
-  # serving the stable Python build until the Go port is feature-complete.
+  # ── Publish: GitHub Release (all tags) ────────────────────────────────────
+  # Every tag (including betas) gets a GitHub Release with all artifacts. The
+  # signed APT/RPM repos, the Cloudflare site (tncd.dev), and the AUR PKGBUILD
+  # move to the Go line only at the first non-beta tag (v2.0.0) — see the
+  # `publish-repos` job below, which is gated to non-beta tags so beta releases
+  # never overwrite the stable 1.3.x public repos.
   release:
     runs-on: ubuntu-latest
     needs: build
@@ -146,19 +146,24 @@ jobs:
             out/*.tar.gz
           generate_release_notes: true
 
-  # ── DEFERRED to phase 4 — repos stay on Python 1.3.2 until the Go port is ──
-  # feature-complete (phases 2-4) and shaken out. This job is preserved verbatim
-  # (only wired to the new `out/` artifact dir) but gated `if: false` so it never
-  # runs on a tag push. To re-enable in phase 4: change `if: false` to
-  # `if: ${{ true }}` (or remove the guard) and set `needs: build`.
+  # ── Repo publish — Go line, GATED TO NON-BETA TAGS (v2.0.0+) ───────────────
+  # Runs only for a stable tag (no "-Beta" suffix), i.e. from v2.0.0 onward, so
+  # a beta tag never overwrites the public repos. At v2.0.0 this moves the public
+  # distribution from the Python 1.3.x line to the Go build. It builds the repos
+  # from the Go .deb/.rpm produced by the `build` job.
   #
   # It publishes:
   #   - Signed APT repository  (GPG_PRIVATE_KEY)
   #   - Signed RPM repository  (GPG_PRIVATE_KEY)
   #   - Cloudflare Pages / Workers site → tncd.dev  (CF_API_TOKEN, CF_ACCOUNT_ID)
   #   - AUR PKGBUILD version-bump commit to main
+  #
+  # NOTE (website.yml): its apt/rpm packages are still pinned to v1.3.2. Bump
+  # that pin to the v2.0.0 tag at cutover so website/** pushes rebuild the repos
+  # from the Go line too — until v2.0.0 exists, changing it would break the live
+  # repos (the download would 404).
   publish-repos:
-    if: false
+    if: ${{ !contains(github.ref_name, 'Beta') }}
     runs-on: ubuntu-latest
     needs: build
     environment: tncd_cloudflare
