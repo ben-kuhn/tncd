@@ -177,17 +177,23 @@ sudo dnf install tncd          # Fedora / RHEL
 yay -S tncd
 ```
 
-### From source / pip
+### From source (Go)
+
+tncd 2.0 is a single static Go binary (no runtime dependencies). Build it with
+Go 1.24+:
 
 ```bash
-pip install kiss3 pyham-ax25 pyserial
+git clone https://github.com/ben-kuhn/tncd.git
+cd tncd
+CGO_ENABLED=0 go build -o tncd ./cmd/tncd
+./tncd -c tncd.ini
 ```
 
-Or using the provided requirements file:
+Cross-compile for another platform with `GOOS`/`GOARCH`, e.g.
+`GOOS=windows GOARCH=amd64 go build -o tncd.exe ./cmd/tncd`.
 
-```bash
-pip install -r requirements.txt
-```
+> Building the older **1.3.x Python** line instead? It lives on the
+> [`v1` branch](https://github.com/ben-kuhn/tncd/tree/v1).
 
 ### Windows (2.0 beta)
 
@@ -341,8 +347,8 @@ ota_baudrate = 1200
 # Serial TNC (packaged install)
 tncd -c /etc/tncd.ini
 
-# Serial TNC (source install)
-python tncd.py -c tncd.ini
+# Serial TNC (built from source)
+./tncd -c tncd.ini
 
 # With verbose frame logging
 tncd -c /etc/tncd.ini -v    # frame types
@@ -531,10 +537,22 @@ These are TNCs I own and can test against.  Please feel free to add any TNCs you
 
 ## Running Tests
 
+Go unit tests (fast, no hardware):
+
 ```bash
-pip install -r requirements-test.txt
-pytest
+CGO_ENABLED=0 go test ./...
 ```
+
+End-to-end tests drive the compiled binary as a black box against Dire Wolf /
+PAT (needs a local audio + radio-emulation setup):
+
+```bash
+pip install -r e2e/requirements-test.txt
+pytest -c e2e/pytest.ini e2e/
+```
+
+The e2e harness builds the Go binary automatically, or set `TNCD_BIN` to point
+at a prebuilt one.
 
 ## License
 

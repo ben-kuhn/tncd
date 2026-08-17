@@ -9,10 +9,11 @@ Type=simple
 # For Bluetooth, the user must be in the 'bluetooth' group.
 User=nobody
 Group=nobody
-# Set to the directory containing tncd.py and tncd.ini.
-WorkingDirectory=/opt/tncd
 
-ExecStart=/usr/bin/python3 /opt/tncd/tncd.py -c /opt/tncd/tncd.ini
+# tncd 2.0 is a single static Go binary. The .deb/.rpm packages install it at
+# /usr/bin/tncd with config at /etc/tncd.ini (this ExecStart is patched to match
+# at package build time); adjust the paths for a manual install.
+ExecStart=/usr/bin/tncd -c /etc/tncd.ini
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
