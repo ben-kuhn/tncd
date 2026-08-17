@@ -220,8 +220,21 @@ Command-line equivalents are also available: `tncd.exe ports`,
 Download the matching `tncd-<version>-macos-*.tar.gz` /
 `tncd-<version>-freebsd-amd64.tar.gz` from the
 [GitHub releases](https://github.com/ben-kuhn/tncd/releases), extract, and run
-`./tncd -c tncd.ini`. (USB `usb:VID:PID` device references are Linux/Windows
-only; on macOS use the concrete `/dev/cu.*` path in the config.)
+`./tncd -c tncd.ini`.
+
+**macOS Gatekeeper:** macOS quarantines downloaded binaries and blocks unsigned
+ones (*"tncd cannot be opened because the developer cannot be verified"*). tncd
+is not notarized, so clear the quarantine flag once after extracting:
+
+```bash
+xattr -dr com.apple.quarantine ./tncd
+```
+
+(Or allow it via **System Settings → Privacy & Security → Allow Anyway** after
+the first blocked launch.) Signing/notarization may come later.
+
+USB `usb:VID:PID` device references are Linux/Windows only; on macOS use the
+concrete `/dev/cu.*` path in the config.
 
 ### Via Nix (NixOS)
 
@@ -325,18 +338,28 @@ ota_baudrate = 1200
 # reconnect_max_delay = 60  # max delay seconds (default)
 ```
 
-Requires `dbus-python` and `PyGObject` (included in packaged installs).
+Bluetooth support is built into the binary — no extra packages to install.
+On Linux, just have BlueZ (`bluetoothd`) running and your user in the
+`bluetooth` group.
 
-### Bluetooth TNC (macOS / Windows)
+### Bluetooth TNC on Windows
 
-After pairing in system Bluetooth settings, the OS creates a virtual serial
-port. Use `type = serial` with the device path:
+Pair the TNC once in Windows Settings, then connect natively (Winsock RFCOMM):
+
+```ini
+[client.0]
+type = bluetooth
+bdaddr = AA:BB:CC:DD:EE:FF   # the installer lists paired devices for you
+```
+
+### Bluetooth TNC on macOS
+
+macOS has no native transport, so use the paired device's virtual serial port:
 
 ```ini
 [client.0]
 type = serial
-device = /dev/cu.BluetoothTNC     # macOS (paired SPP device)
-# device = COM5                    # Windows (or type = bluetooth + bdaddr)
+device = /dev/cu.BluetoothTNC     # paired SPP device
 serial_baudrate = 9600
 ota_baudrate = 1200
 ```

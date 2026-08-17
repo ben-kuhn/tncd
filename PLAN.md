@@ -1,5 +1,12 @@
 # AGWPE-to-KISS Translation Bridge
 
+> **Historical planning doc (1.x Python line).** This describes the original
+> design and milestones; the dependency/architecture details below (kiss3,
+> pyham, `tncd.py`) refer to the Python implementation, now on the
+> [`v1` branch](https://github.com/ben-kuhn/tncd/tree/v1). `main` is the **2.0
+> Go** rewrite — see [`CLAUDE.md`](CLAUDE.md) for its architecture and
+> `docs/superpowers/` for the 2.0 design/plan docs.
+
 ## Purpose
 A userspace bridge allowing AGWPE-compatible client applications to communicate with KISS TNCs (serial or TCP). Essential since Linux 7.1 removed native AX.25 kernel support.
 

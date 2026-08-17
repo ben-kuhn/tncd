@@ -414,7 +414,18 @@ sudo nano /etc/tncd.ini</code></pre>
         <code>-macos-amd64.tar.gz</code> (Intel) from the
         <a href="https://github.com/ben-kuhn/tncd/releases">releases</a>, then:</p>
       <pre><code>tar -xzf tncd-<em>&lt;version&gt;</em>-macos-arm64.tar.gz
+
+# macOS quarantines downloaded binaries and Gatekeeper blocks unsigned ones
+# ("cannot be opened because the developer cannot be verified"). tncd is not
+# notarized, so clear the quarantine flag before the first run:
+xattr -dr com.apple.quarantine ./tncd
+
 ./tncd -c tncd.ini</code></pre>
+      <p style="font-size:0.85rem;color:var(--muted)">
+        Alternatively: <strong>System Settings → Privacy &amp; Security</strong>, scroll to the
+        blocked-<code>tncd</code> message and click <strong>Allow Anyway</strong>, then run it
+        again. (Signing/notarization may come later.)
+      </p>
       <p style="font-size:0.85rem;color:var(--muted)">
         Bluetooth TNCs: pair the device, then use <code>type = serial</code> with its
         <code>/dev/cu.*</code> port. Homebrew tap coming later.
@@ -741,11 +752,11 @@ listen_port = 8002</code></pre>
     <h2>Running tncd</h2>
 
     <p>Once your config file is set up, you can start tncd from a terminal:</p>
-    <pre><code># If installed from a package
+    <pre><code># If installed from a package (Linux) or the Windows installer
 tncd -c /etc/tncd.ini
 
-# If running from source
-python tncd.py -c tncd.ini</code></pre>
+# If built from source (2.0 Go): CGO_ENABLED=0 go build -o tncd ./cmd/tncd
+./tncd -c tncd.ini</code></pre>
 
     <p>
       tncd will start up and listen for AGWPE client connections. You should see a message
@@ -883,17 +894,15 @@ ota_baudrate = 1200</code></pre>
       you can set <code>channel = 6</code> (e.g. Mobilinkd TNC3 uses channel 6).
     </p>
 
-    <h3>Step 3: Install Bluetooth dependencies</h3>
+    <h3>Step 3: Bluetooth prerequisites</h3>
     <p>
-      The Bluetooth feature requires <code>dbus-python</code> and <code>PyGObject</code>.
-      These are included automatically when installing from packages. If running from source:
-    </p>
-    <pre><code>pip install dbus-python PyGObject</code></pre>
-    <p>
-      Your user also needs to be in the <code>bluetooth</code> group:
+      The <strong>2.0 Go binary</strong> has Bluetooth support built in &mdash; no extra
+      dependencies to install. On <strong>Linux</strong>, just make sure BlueZ
+      (<code>bluetoothd</code>) is running and your user is in the <code>bluetooth</code> group:
     </p>
     <pre><code>sudo gpasswd -a $USER bluetooth</code></pre>
-    <p>Log out and back in for the group change to take effect.</p>
+    <p>Log out and back in for the group change to take effect. On <strong>Windows</strong>,
+      pair the TNC once in Windows Settings (nothing else to install).</p>
 
     <h3>Step 4: Run tncd</h3>
     <p>
