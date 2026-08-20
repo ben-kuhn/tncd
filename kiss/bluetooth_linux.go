@@ -25,12 +25,25 @@ const profilePath = dbus.ObjectPath("/org/tncd/spp")
 type bluetoothTransport struct {
 	cfg  BluetoothConfig
 	file *os.File // raw OS file wrapping the socket fd
+
+	// ioDebug logs every Read/Write with byte counts, duration, and errors.
+	// Enabled by setting TNCD_BT_WRITE_DEBUG in the environment. Used to prove
+	// whether a write actually delivers or parks (no error, no bytes on air).
+	ioDebug bool
 }
 
 // NewBluetoothTransport returns a Transport that connects to a Bluetooth SPP
 // KISS TNC via BlueZ D-Bus.
 func NewBluetoothTransport(cfg BluetoothConfig) Transport {
-	return &bluetoothTransport{cfg: cfg}
+	return &bluetoothTransport{cfg: cfg, ioDebug: os.Getenv("TNCD_BT_WRITE_DEBUG") != ""}
+}
+
+// hexHead returns a short hex preview of up to n bytes for logging.
+func hexHead(b []byte, n int) string {
+	if len(b) < n {
+		n = len(b)
+	}
+	return fmt.Sprintf("% x", b[:n])
 }
 
 // Open connects to the Bluetooth SPP device.
@@ -82,6 +95,13 @@ func (bt *bluetoothTransport) Open() error {
 		if callErr := deviceObj.Call("org.bluez.Device1.Disconnect", 0).Err; callErr != nil {
 			log.Printf("bluetooth: pre-disconnect error (continuing): %v", callErr)
 		}
+		// Settle before reconnecting. An immediate ConnectProfile after Disconnect
+		// can reuse a half-open RFCOMM link whose writes are accepted at the socket
+		// but silently dropped — the "wedged SPP" seen on reconnect/handoff, where
+		// frames never reach the TNC (0 bytes on air) despite a healthy-looking
+		// socket. Letting BlueZ and the peer fully tear the link down first avoids
+		// reconnecting onto the stale channel.
+		time.Sleep(bluetoothReconnectSettle)
 	}
 
 	// Call ConnectProfile asynchronously so the GLib main loop (or D-Bus
@@ -107,6 +127,12 @@ func (bt *bluetoothTransport) Open() error {
 		// NewConnection has already dup'd or taken ownership; wrap as *os.File.
 		bt.file = os.NewFile(uintptr(fd), fmt.Sprintf("bt-spp-%s", bt.cfg.BDAddr))
 		log.Printf("bluetooth: SPP socket ready (fd=%d) for %s", fd, bt.cfg.BDAddr)
+		// Drop any Bluetooth audio profiles now that SPP is up. On some radios
+		// (notably the UV-PRO) an active audio profile — auto-connected by the
+		// desktop/BlueZ, often on a radio power-cycle — corrupts the SPP/KISS
+		// data channel: writes complete at the socket but frames never reach the
+		// TNC. Runs on every connect and reconnect (Open is called for both).
+		disconnectAudioProfiles(deviceObj, bt.cfg.BDAddr)
 		return nil
 	case err := <-errCh:
 		removePending(string(devicePath))
@@ -117,9 +143,45 @@ func (bt *bluetoothTransport) Open() error {
 	}
 }
 
+// bluetoothReconnectSettle is how long Open waits after disconnecting a stale
+// connection before calling ConnectProfile, so BlueZ and the peer fully tear
+// down the old RFCOMM link rather than handing back a wedged half-open channel.
+const bluetoothReconnectSettle = 2 * time.Second
+
+// audioProfileUUIDs are the Bluetooth Classic audio profiles we drop after
+// establishing SPP. When one of these is connected alongside SPP, the RFCOMM
+// data channel becomes unreliable on some radios (writes succeed at the socket
+// but frames never reach the TNC's transmitter).
+var audioProfileUUIDs = []string{
+	"0000111e-0000-1000-8000-00805f9b34fb", // Handsfree (HFP HF)
+	"0000111f-0000-1000-8000-00805f9b34fb", // Handsfree Audio Gateway (HFP AG)
+	"0000110b-0000-1000-8000-00805f9b34fb", // A2DP Sink
+	"0000110a-0000-1000-8000-00805f9b34fb", // A2DP Source
+	"0000110d-0000-1000-8000-00805f9b34fb", // Advanced Audio Distribution
+	"0000110e-0000-1000-8000-00805f9b34fb", // A/V Remote Control
+}
+
+// disconnectAudioProfiles asks BlueZ to disconnect each audio profile on the
+// device, leaving SPP intact. Errors (profile not connected / not supported)
+// are expected and ignored; only successful drops are logged.
+func disconnectAudioProfiles(deviceObj dbus.BusObject, bdaddr string) {
+	for _, uuid := range audioProfileUUIDs {
+		if err := deviceObj.Call("org.bluez.Device1.DisconnectProfile", 0, uuid).Err; err == nil {
+			log.Printf("bluetooth: %s dropped audio profile %s", bdaddr, uuid)
+		}
+	}
+}
+
 func (bt *bluetoothTransport) Read(b []byte) (int, error) {
 	if bt.file == nil {
 		return 0, fmt.Errorf("bluetooth: not open")
+	}
+	if bt.ioDebug {
+		n, err := bt.file.Read(b)
+		if n > 0 || err != nil {
+			log.Printf("bluetooth: READ  %d bytes err=%v [%s]", n, err, hexHead(b[:max(n, 0)], 24))
+		}
+		return n, err
 	}
 	return bt.file.Read(b)
 }
@@ -127,6 +189,16 @@ func (bt *bluetoothTransport) Read(b []byte) (int, error) {
 func (bt *bluetoothTransport) Write(b []byte) (int, error) {
 	if bt.file == nil {
 		return 0, fmt.Errorf("bluetooth: not open")
+	}
+	if bt.ioDebug {
+		// Log START before the write and DONE after, with elapsed time. If a
+		// write parks (no send-buffer credit) the DONE line is delayed or never
+		// appears — the definitive signal that the byte never left the host.
+		start := time.Now()
+		log.Printf("bluetooth: WRITE start %d bytes [%s]", len(b), hexHead(b, 24))
+		n, err := bt.file.Write(b)
+		log.Printf("bluetooth: WRITE done  %d/%d bytes in %s err=%v", n, len(b), time.Since(start), err)
+		return n, err
 	}
 	return bt.file.Write(b)
 }

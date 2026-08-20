@@ -1,6 +1,7 @@
-// Package api implements a read-only HTTP monitoring API (JSON + SSE).
-// It registers as a bridge sink for RX/TX frames and connection events, and
-// snapshots bridge/l2 state on the engine loop for the GET endpoints.
+// Package api implements an HTTP monitoring API (JSON + SSE). It registers as a
+// bridge sink for RX/TX frames and connection events, snapshots bridge/l2 state
+// on the engine loop for the GET endpoints, and exposes one state-changing
+// action: POST /api/ports/{n}/reconnect to manually cycle a port's transport.
 package api
 
 import (
@@ -10,6 +11,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ben-kuhn/tncd/v2/ax25"
@@ -44,6 +47,7 @@ func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients i
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/connections", s.handleConnections)
 	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/ports/", s.handlePortAction)
 	if serveUI {
 		h, err := uiHandler()
 		if err != nil {
@@ -98,6 +102,39 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	s.eng.Do(func() { conns = s.b.ConnectionSnapshot(); close(done) })
 	<-done
 	writeJSON(w, map[string]any{"connections": conns})
+}
+
+// handlePortAction handles POST /api/ports/{n}/reconnect, the one state-changing
+// endpoint: it manually cycles a port's transport (close + fresh connect). This
+// is the recovery path for a wedged link tncd cannot detect on its own — e.g. a
+// half-open Bluetooth RFCOMM channel that is up at the socket level but no longer
+// carrying data.
+func (s *Server) handlePortAction(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/ports/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[1] != "reconnect" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	port, err := strconv.Atoi(parts[0])
+	if err != nil || port < 0 {
+		http.Error(w, "invalid port index", http.StatusBadRequest)
+		return
+	}
+	var ok bool
+	done := make(chan struct{})
+	s.eng.Do(func() { ok = s.b.ReconnectPort(port); close(done) })
+	<-done
+	if !ok {
+		http.Error(w, "port not found or has no active transport to reconnect", http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"port": port, "reconnecting": true})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
