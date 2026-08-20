@@ -330,14 +330,14 @@ func (t *Table) t1Expired(c *Conn) {
 			t.removeConn(c)
 			return
 		}
-		// Retransmit with exponential backoff (Karn, tncd.py:1536-1538).
-		if c.t1Value > 0 {
-			c.t1Value *= 2
-			const t1Ceil = 60 * time.Second
-			if c.t1Value > t1Ceil {
-				c.t1Value = t1Ceil
-			}
-		}
+		// Connection-setup retransmits use a FIXED T1. Karn's exponential
+		// backoff is for the data (information-transfer) phase only — the AX.25
+		// spec and Dire Wolf's select_t1_value keep t1v ~constant while awaiting
+		// a UA. Doubling here makes SABM/SABME retries too sparse (13→26→52s),
+		// so a timing-marginal radio's narrow acceptance window is missed and
+		// the peer never sees a retry in time. Reset to the base so every retry
+		// is evenly spaced.
+		c.t1Value = pp.T1
 		if c.modulo == 128 {
 			t.sendSABME(c)
 		} else {
