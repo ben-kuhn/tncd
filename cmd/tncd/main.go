@@ -190,7 +190,7 @@ func main() {
 	// messages (serial resolve/reconnect, port online/offline) vanish.
 	log.SetFlags(0)
 	if service {
-		log.SetOutput(slogLogWriter{})
+		log.SetOutput(newSlogLogWriter())
 	} else {
 		log.SetOutput(os.Stderr)
 	}
@@ -261,10 +261,30 @@ func main() {
 // slogLogWriter adapts the stdlib log package to slog: each log line is emitted
 // as a slog Info record, so stdlib-log callers (bridge/kiss/agwpe) share slog's
 // sink — notably the Windows Event Log when running as a service.
-type slogLogWriter struct{}
+//
+// The forwarding is ASYNCHRONOUS: Write never blocks the caller. The bridge and
+// KISS packages call log.Printf on the engine loop (per frame during a busy
+// session), and slog's Windows Event Log handler does a synchronous OS write —
+// doing that inline would stall the engine loop and break AX.25 T1/T2 timing
+// (dropping ACKs mid-Winlink-session). A background goroutine drains the buffer;
+// if it fills under a flood, lines are dropped rather than blocking the radio.
+type slogLogWriter struct{ ch chan string }
 
-func (slogLogWriter) Write(p []byte) (int, error) {
-	slog.Info(strings.TrimRight(string(p), "\r\n"))
+func newSlogLogWriter() slogLogWriter {
+	w := slogLogWriter{ch: make(chan string, 1024)}
+	go func() {
+		for msg := range w.ch {
+			slog.Info(msg)
+		}
+	}()
+	return w
+}
+
+func (w slogLogWriter) Write(p []byte) (int, error) {
+	select {
+	case w.ch <- strings.TrimRight(string(p), "\r\n"):
+	default: // buffer full — drop rather than stall the caller (e.g. the engine loop)
+	}
 	return len(p), nil
 }
 
