@@ -21,9 +21,27 @@ import (
 // channel is discovered via SDP (see bluetooth_sdp.go) unless the [client]
 // "channel" key pins it.
 //
-// Host prerequisites (FreeBSD-side): the Bluetooth stack must be up —
-// `kldload ng_ubt` for a USB dongle, `service bluetooth start ubt0`,
-// `service sdpd onestart` for SDP, and the device paired via hcsecd.
+// Status: OTA-tested 2026-08-23 — full Winlink CMS round-trip over a CSR8510
+// dongle to a Mobilinkd TNC4 (SDP discovery, RFCOMM connect, KISS RX/TX).
+//
+// Host prerequisites (FreeBSD-side):
+//   - REQUIRED: net.bluetooth.usb_isoc_enable="0" in /boot/loader.conf (reboot
+//     to apply). Without it, ng_ubt's isochronous (SCO) endpoint setup wedges
+//     the adapter and every HCI command times out. KISS uses no SCO, so this is
+//     free. (See FreeBSD bug 274707.)
+//   - `kldload ng_ubt` (+ ng_hci, ng_l2cap, ng_btsocket), `service bluetooth
+//     start ubt0`, `service sdpd onestart`, and the device paired via hcsecd.
+//
+// Caveats:
+//   - Works with open-SPP TNCs (Mobilinkd TNC4/TNC3). SSP-only radios (e.g.
+//     Benshi UV-PRO) can't be paired by base FreeBSD (hcsecd handles only
+//     legacy PIN + Link_Key_Request, not Secure Simple Pairing); such devices
+//     need a link key established elsewhere and loaded into FreeBSD. Untested.
+//   - A stale ACL to the TNC surfaces as EBUSY ("device busy") on reconnect;
+//     clear it (`hccontrol read_connection_list` / `disconnect`). A
+//     disconnect-first in Open (as on Linux) is a TODO.
+//   - SDP channel discovery targets the first RFCOMM descriptor; on a device
+//     advertising multiple SPP records it's ambiguous — pin the "channel" key.
 const (
 	afBluetooth   = 36  // AF_BLUETOOTH (sys/socket.h)
 	btProtoL2CAP  = 135 // BLUETOOTH_PROTO_L2CAP (ng_btsocket.h)
