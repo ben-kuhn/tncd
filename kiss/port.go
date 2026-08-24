@@ -83,11 +83,17 @@ func (p *Port) sendParams() {
 func (p *Port) readerLoop() {
 	defer p.wg.Done()
 	var dec Decoder
+	var lastDropped uint64
 	buf := make([]byte, 4096)
 	for {
 		n, err := p.tr.Read(buf)
 		if n > 0 {
 			frames := dec.Feed(buf[:n])
+			if dec.DroppedOversize != lastDropped {
+				lastDropped = dec.DroppedOversize
+				log.Printf("kiss: port %d dropped oversize (> %d bytes) frame from transport (total %d)",
+					p.num, MaxFrameSize, lastDropped)
+			}
 			for _, frame := range frames {
 				if len(frame) < 1 {
 					continue

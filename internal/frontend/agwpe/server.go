@@ -14,17 +14,20 @@ import (
 	agwpepkg "github.com/ben-kuhn/tncd/v2/agwpe"
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
+	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 )
 
 // Serve starts the AGWPE TCP server on host:port, posting each complete frame
-// to the engine for serial dispatch. Returns a net.Listener the caller can
+// to the engine for serial dispatch. Connections from outside allow are
+// rejected at accept time. Returns a net.Listener the caller can
 // Close to stop accepting new connections.
-func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port int) (net.Listener, error) {
+func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port int, allow netutil.Allowlist) (net.Listener, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("agwpe: listen %s: %w", addr, err)
 	}
+	ln = netutil.WrapListener(ln, allow, "agwpe")
 	log.Printf("agwpe: listening on %s", addr)
 
 	go func() {
@@ -56,7 +59,14 @@ type client struct {
 	registeredCalls map[string]bool
 	lastActivity    time.Time
 	closed          bool
+	inflight        int // frames posted to the engine but not yet run
 }
+
+// maxInflight bounds frames a client may have queued on the engine loop
+// before it is disconnected. The loop drains far faster than any real client
+// sends; the cap stops a flooding client from growing the engine queue (and
+// its captured payloads) without bound.
+const maxInflight = 256
 
 func newClient(eng *engine.Engine, b *bridge.Bridge, conn net.Conn) *client {
 	return &client{
@@ -144,10 +154,12 @@ func (c *client) run() {
 			copy(payload, buf[agwpepkg.HeaderSize:total])
 			buf = buf[total:]
 
-			// Post to engine for serial dispatch.
+			// Post to engine for serial dispatch (bounded by the inflight cap).
 			h := hdr
 			p := payload
-			c.eng.Do(func() { c.handleFrame(h, p) })
+			if !c.post(func() { c.handleFrame(h, p) }) {
+				goto done
+			}
 		}
 	}
 
@@ -167,6 +179,28 @@ done:
 	})
 	<-done2
 	log.Printf("agwpe: client disconnected from %s", c.conn.RemoteAddr())
+}
+
+// post increments the inflight counter and marshals fn onto the engine loop.
+// Over the cap it logs, closes the transport, and returns false — the same
+// policy as a full write channel.
+func (c *client) post(fn func()) bool {
+	c.mu.Lock()
+	if c.inflight >= maxInflight {
+		c.mu.Unlock()
+		log.Printf("agwpe: client %s over inflight cap (%d), closing", c.conn.RemoteAddr(), maxInflight)
+		c.CloseTransport()
+		return false
+	}
+	c.inflight++
+	c.mu.Unlock()
+	c.eng.Do(func() {
+		fn()
+		c.mu.Lock()
+		c.inflight--
+		c.mu.Unlock()
+	})
+	return true
 }
 
 // --- bridge.Client interface ---

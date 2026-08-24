@@ -113,7 +113,11 @@ $("ports").addEventListener("click", async (e) => {
   btn.disabled = true;
   btn.textContent = "relinking…";
   try {
-    const resp = await fetch(`api/ports/${port}/reconnect`, { method: "POST" });
+    const resp = await fetch(`api/ports/${port}/reconnect`, {
+      method: "POST",
+      // Required by the server's CSRF guard (not a CORS-safelisted header).
+      headers: { "X-Requested-With": "tncd" },
+    });
     btn.textContent = resp.ok ? "relinked" : "failed";
   } catch (_) {
     btn.textContent = "failed";

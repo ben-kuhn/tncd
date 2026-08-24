@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
+	"strings"
 
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
@@ -15,6 +17,7 @@ import (
 	agwpeserver "github.com/ben-kuhn/tncd/v2/internal/frontend/agwpe"
 	apiserver "github.com/ben-kuhn/tncd/v2/internal/frontend/api"
 	kisstcpserver "github.com/ben-kuhn/tncd/v2/internal/frontend/kisstcp"
+	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 )
 
 // Runtime is a wired-up tncd instance: engine, bridge, and all enabled
@@ -42,7 +45,8 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 	}
 	b.RegisterMonitorSink(agwpeserver.NewMonitorSink(b))
 
-	ln, err := agwpeserver.Serve(eng, b, cfg.Server.ListenHost, cfg.Server.ListenPort)
+	warnIfExposed("agwpe", cfg.Server.ListenHost, cfg.Server.ListenPort, cfg.Server.AllowedSubnets)
+	ln, err := agwpeserver.Serve(eng, b, cfg.Server.ListenHost, cfg.Server.ListenPort, cfg.Server.AllowedSubnets)
 	if err != nil {
 		return nil, fmt.Errorf("agwpe server: %w", err)
 	}
@@ -50,7 +54,8 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 	r := &Runtime{eng: eng, bridge: b, agwpeLn: ln}
 
 	if cfg.KISSTCP.Enabled {
-		r.kissSrv, err = kisstcpserver.Serve(eng, b, cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort, cfg.KISSTCP.MaxClients)
+		warnIfExposed("kisstcp", cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort, cfg.KISSTCP.AllowedSubnets)
+		r.kissSrv, err = kisstcpserver.Serve(eng, b, cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort, cfg.KISSTCP.MaxClients, cfg.KISSTCP.IdleTimeout, cfg.KISSTCP.AllowedSubnets)
 		if err != nil {
 			ln.Close()
 			return nil, fmt.Errorf("kisstcp server: %w", err)
@@ -60,7 +65,8 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 	}
 
 	if cfg.API.Enabled {
-		r.apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients, cfg.API.ServeUI)
+		warnIfExposed("api", cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.AllowedSubnets)
+		r.apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients, cfg.API.ServeUI, cfg.API.AllowedSubnets)
 		if err != nil {
 			if r.kissSrv != nil {
 				r.kissSrv.Close()
@@ -73,6 +79,33 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 	}
 
 	return r, nil
+}
+
+// warnIfExposed logs a prominent warning when an unauthenticated listener
+// binds a non-loopback address. tncd's protocols (AGWPE, KISS-over-TCP) have
+// no authentication by design: anyone who can reach the port can transmit
+// under an arbitrary callsign on the operator's station.
+func warnIfExposed(name, host string, port int, allow netutil.Allowlist) {
+	exposed := true
+	switch {
+	case strings.EqualFold(host, "localhost"):
+		exposed = false
+	default:
+		if ip, err := netip.ParseAddr(host); err == nil && ip.IsLoopback() {
+			exposed = false
+		}
+	}
+	if !exposed {
+		return
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	if allow.Enabled() {
+		slog.Info("listener reachable beyond this host but restricted by allowed_subnets",
+			"listener", name, "addr", addr)
+		return
+	}
+	slog.Warn("UNAUTHENTICATED listener reachable beyond this host — anyone who can reach it can transmit under your callsign; restrict with allowed_subnets or a firewall",
+		"listener", name, "addr", addr)
 }
 
 // AGWPEAddr returns the address the AGWPE server is listening on. Useful when

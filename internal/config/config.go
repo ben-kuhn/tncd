@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 	"github.com/ben-kuhn/tncd/v2/kiss"
 	"gopkg.in/ini.v1"
 )
@@ -19,6 +20,8 @@ type Server struct {
 	Callsign    string // default "AGWPE"
 	MaxClients  int    // default 8
 	IdleTimeout int    // seconds, default 300, <=0 disables
+	// AllowedSubnets restricts AGWPE client source IPs. Empty = allow all.
+	AllowedSubnets netutil.Allowlist
 }
 
 // AX25 holds the [ax25] section settings.
@@ -30,10 +33,13 @@ type AX25 struct {
 
 // KISSTCP holds the [kisstcp] section: a KISS-over-TCP passthrough listener.
 type KISSTCP struct {
-	Enabled    bool   // default false
-	ListenHost string // default "127.0.0.1"
-	ListenPort int    // default 8001
-	MaxClients int    // default 16
+	Enabled     bool   // default false
+	ListenHost  string // default "127.0.0.1"
+	ListenPort  int    // default 8001
+	MaxClients  int    // default 16
+	IdleTimeout int    // seconds, default 300, <=0 disables
+	// AllowedSubnets restricts client source IPs. Empty = allow all.
+	AllowedSubnets netutil.Allowlist
 }
 
 // APIConfig holds the [api] section: a read-only HTTP monitoring API.
@@ -43,6 +49,8 @@ type APIConfig struct {
 	ListenPort int    // default 8002
 	MaxClients int    // default 16
 	ServeUI    bool   // default true — serve the embedded web monitor at /
+	// AllowedSubnets restricts client source IPs. Empty = allow all.
+	AllowedSubnets netutil.Allowlist
 }
 
 // Port holds one [client.N] section's settings plus the associated [kiss.N] params.
@@ -94,6 +102,7 @@ type Config struct {
 // knownServerKeys are the recognized keys in [server].
 var knownServerKeys = []string{
 	"listen_host", "listen_port", "callsign", "max_clients", "idle_timeout",
+	"allowed_subnets",
 }
 
 // knownAX25Keys are the recognized keys in [ax25].
@@ -103,12 +112,14 @@ var knownAX25Keys = []string{
 
 // knownKISSTCPKeys are the recognized keys in [kisstcp].
 var knownKISSTCPKeys = []string{
-	"enabled", "listen_host", "listen_port", "max_clients",
+	"enabled", "listen_host", "listen_port", "max_clients", "idle_timeout",
+	"allowed_subnets",
 }
 
 // knownAPIKeys are the recognized keys in [api].
 var knownAPIKeys = []string{
 	"enabled", "listen_host", "listen_port", "max_clients", "serve_ui",
+	"allowed_subnets",
 }
 
 // knownClientKeys are the recognized keys in [client.N].
@@ -250,6 +261,16 @@ func getString(s *ini.Section, key string, def string) string {
 	return def
 }
 
+// parseAllowlistKey parses a comma-separated CIDR allowlist key. Absent or
+// empty yields an empty (allow-all) Allowlist; an invalid entry is a
+// config-load error.
+func parseAllowlistKey(s *ini.Section, key string) (netutil.Allowlist, error) {
+	if !s.HasKey(key) {
+		return netutil.Allowlist{}, nil
+	}
+	return netutil.ParseAllowlist(s.Key(key).String())
+}
+
 // getIntPtr returns a *int from a section key, or nil if absent.
 func getIntPtr(s *ini.Section, key string) *int {
 	if s.HasKey(key) {
@@ -347,12 +368,17 @@ func Load(path string) (*Config, error) {
 	serverSec := f.Section("server")
 	warnUnknownKeys(serverSec, knownServerKeys)
 	cfg := &Config{}
+	serverAllow, err := parseAllowlistKey(serverSec, "allowed_subnets")
+	if err != nil {
+		return nil, fmt.Errorf("[server] %w", err)
+	}
 	cfg.Server = Server{
-		ListenHost:  getString(serverSec, "listen_host", "127.0.0.1"),
-		ListenPort:  getInt(serverSec, "listen_port", 8000),
-		Callsign:    getString(serverSec, "callsign", "AGWPE"),
-		MaxClients:  getInt(serverSec, "max_clients", 8),
-		IdleTimeout: getInt(serverSec, "idle_timeout", 300),
+		ListenHost:     getString(serverSec, "listen_host", "127.0.0.1"),
+		ListenPort:     getInt(serverSec, "listen_port", 8000),
+		Callsign:       getString(serverSec, "callsign", "AGWPE"),
+		MaxClients:     getInt(serverSec, "max_clients", 8),
+		IdleTimeout:    getInt(serverSec, "idle_timeout", 300),
+		AllowedSubnets: serverAllow,
 	}
 
 	// --- Parse [ax25] ---
@@ -374,22 +400,33 @@ func Load(path string) (*Config, error) {
 	// --- Parse [kisstcp] ---
 	kisstcpSec := f.Section("kisstcp")
 	warnUnknownKeys(kisstcpSec, knownKISSTCPKeys)
+	kisstcpAllow, err := parseAllowlistKey(kisstcpSec, "allowed_subnets")
+	if err != nil {
+		return nil, fmt.Errorf("[kisstcp] %w", err)
+	}
 	cfg.KISSTCP = KISSTCP{
-		Enabled:    getBool(kisstcpSec, "enabled", false),
-		ListenHost: getString(kisstcpSec, "listen_host", "127.0.0.1"),
-		ListenPort: getInt(kisstcpSec, "listen_port", 8001),
-		MaxClients: getInt(kisstcpSec, "max_clients", 16),
+		Enabled:        getBool(kisstcpSec, "enabled", false),
+		ListenHost:     getString(kisstcpSec, "listen_host", "127.0.0.1"),
+		ListenPort:     getInt(kisstcpSec, "listen_port", 8001),
+		MaxClients:     getInt(kisstcpSec, "max_clients", 16),
+		IdleTimeout:    getInt(kisstcpSec, "idle_timeout", 300),
+		AllowedSubnets: kisstcpAllow,
 	}
 
 	// --- Parse [api] ---
 	apiSec := f.Section("api")
 	warnUnknownKeys(apiSec, knownAPIKeys)
+	apiAllow, err := parseAllowlistKey(apiSec, "allowed_subnets")
+	if err != nil {
+		return nil, fmt.Errorf("[api] %w", err)
+	}
 	cfg.API = APIConfig{
-		Enabled:    getBool(apiSec, "enabled", false),
-		ListenHost: getString(apiSec, "listen_host", "127.0.0.1"),
-		ListenPort: getInt(apiSec, "listen_port", 8002),
-		MaxClients: getInt(apiSec, "max_clients", 16),
-		ServeUI:    getBool(apiSec, "serve_ui", true),
+		Enabled:        getBool(apiSec, "enabled", false),
+		ListenHost:     getString(apiSec, "listen_host", "127.0.0.1"),
+		ListenPort:     getInt(apiSec, "listen_port", 8002),
+		MaxClients:     getInt(apiSec, "max_clients", 16),
+		ServeUI:        getBool(apiSec, "serve_ui", true),
+		AllowedSubnets: apiAllow,
 	}
 
 	// --- Collect client.N and kiss.N sections ---

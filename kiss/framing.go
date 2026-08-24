@@ -76,6 +76,14 @@ func ExitFrame() []byte {
 	return []byte{0xC0, 0xFF, 0xC0}
 }
 
+// MaxFrameSize is the maximum KISS frame payload the Decoder will buffer
+// (cmd byte included). The largest legitimate AX.25 frame — 8 digipeaters,
+// mod-128 control, 256-byte info — is ~350 bytes; 8 KiB leaves generous
+// headroom for KISS extensions. A peer that never terminates a frame
+// (or streams garbage) cannot grow the buffer past this cap: the partial
+// frame is dropped and the decoder resyncs on the next FEND.
+const MaxFrameSize = 8192
+
 // Decoder incrementally decodes a KISS byte stream into frames.
 // Feed returns zero or more complete frames (cmd byte + payload,
 // FENDs stripped, escapes resolved). Empty frames are dropped.
@@ -83,6 +91,10 @@ type Decoder struct {
 	buf     []byte
 	inFrame bool
 	esc     bool
+
+	// DroppedOversize counts frames discarded for exceeding MaxFrameSize.
+	// Callers should diff it against a last-seen value and log the delta.
+	DroppedOversize uint64
 }
 
 // Feed processes a slice of bytes and returns any complete frames found.
@@ -104,19 +116,19 @@ func (d *Decoder) Feed(p []byte) [][]byte {
 
 		// We're in a frame
 		if d.esc {
-			// Previous byte was FESC, this is the escaped byte
-			if b == TFEND {
-				d.buf = append(d.buf, FEND)
-			} else if b == TFESC {
-				d.buf = append(d.buf, FESC)
-			} else {
-				// Invalid escape sequence, just append the byte
-				d.buf = append(d.buf, b)
-			}
+			// Previous byte was FESC; resolve the escaped byte and fall
+			// through to the append below.
 			d.esc = false
+			if b == TFEND {
+				b = FEND
+			} else if b == TFESC {
+				b = FESC
+			}
+			// else: invalid escape sequence, append the byte as-is.
 		} else if b == FESC {
 			// Start of escape sequence
 			d.esc = true
+			continue
 		} else if b == FEND {
 			// End of (and simultaneously start of next) frame.
 			// A FEND while in-frame closes the current frame and immediately
@@ -127,10 +139,20 @@ func (d *Decoder) Feed(p []byte) [][]byte {
 			d.buf = nil
 			// Stay inFrame: this FEND is both the closer and the opener.
 			// (Double-FEND just produces an empty buf which we drop.)
-		} else {
-			// Regular data byte
-			d.buf = append(d.buf, b)
+			continue
 		}
+
+		// Append one data byte, enforcing the size cap. On overflow, drop the
+		// partial frame and leave in-frame state: subsequent bytes are
+		// discarded as out-of-frame noise until the next FEND resyncs.
+		if len(d.buf) >= MaxFrameSize {
+			d.buf = nil
+			d.inFrame = false
+			d.esc = false
+			d.DroppedOversize++
+			continue
+		}
+		d.buf = append(d.buf, b)
 	}
 
 	return frames

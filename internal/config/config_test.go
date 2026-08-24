@@ -237,3 +237,49 @@ func TestAPIAbsentDisabled(t *testing.T) {
 		t.Fatal("API should default disabled")
 	}
 }
+
+func TestAllowedSubnets(t *testing.T) {
+	ini := "[server]\n" +
+		"allowed_subnets = 192.168.1.0/24, 10.0.0.1\n\n" +
+		"[kisstcp]\n" +
+		"enabled = true\n" +
+		"idle_timeout = 60\n" +
+		"allowed_subnets = ::1\n\n" +
+		"[api]\n" +
+		"enabled = true\n\n" +
+		"[client.0]\ntype = serial\ndevice = /dev/x\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.AllowedSubnets.Enabled() {
+		t.Error("server AllowedSubnets should be enabled")
+	}
+	if !cfg.KISSTCP.AllowedSubnets.Enabled() {
+		t.Error("kisstcp AllowedSubnets should be enabled")
+	}
+	if cfg.API.AllowedSubnets.Enabled() {
+		t.Error("api AllowedSubnets should default to disabled (allow all)")
+	}
+	if cfg.KISSTCP.IdleTimeout != 60 {
+		t.Errorf("kisstcp idle_timeout = %d, want 60", cfg.KISSTCP.IdleTimeout)
+	}
+}
+
+func TestAllowedSubnetsInvalid(t *testing.T) {
+	ini := "[server]\nallowed_subnets = not-a-cidr\n\n[client.0]\ntype = serial\ndevice = /dev/x\n"
+	if _, err := Load(write(t, ini)); err == nil {
+		t.Fatal("invalid allowed_subnets should fail config load")
+	}
+}
+
+func TestKISSTCPIdleTimeoutDefault(t *testing.T) {
+	p := write(t, "[client.0]\ntype = serial\ndevice = /dev/x\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KISSTCP.IdleTimeout != 300 {
+		t.Errorf("kisstcp idle_timeout default = %d, want 300", cfg.KISSTCP.IdleTimeout)
+	}
+}

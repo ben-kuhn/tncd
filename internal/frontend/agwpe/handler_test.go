@@ -2,6 +2,7 @@ package agwpe_test
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
 	frontend "github.com/ben-kuhn/tncd/v2/internal/frontend/agwpe"
+	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 	"github.com/ben-kuhn/tncd/v2/kiss"
 )
 
@@ -82,7 +84,7 @@ func makeBridgeWithFakePort(t *testing.T, eng *engine.Engine, fps []*fakePort, c
 // dialServe starts a Serve on a free port and returns the listener and a dialed connection.
 func dialServe(t *testing.T, eng *engine.Engine, b *bridge.Bridge) (net.Listener, net.Conn) {
 	t.Helper()
-	ln, err := frontend.Serve(eng, b, "127.0.0.1", 0)
+	ln, err := frontend.Serve(eng, b, "127.0.0.1", 0, netutil.Allowlist{})
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -749,5 +751,172 @@ func TestPartialHeaderReassembly(t *testing.T) {
 	}
 	if len(resp.Data) != 8 {
 		t.Fatalf("version payload len = %d, want 8", len(resp.Data))
+	}
+}
+
+// TestRegisterCallsignCap: a client may register at most 8 distinct
+// callsigns; the 9th is rejected (0x00), re-registering a held call still
+// succeeds, and a slot freed by 'x' can be reused.
+func TestRegisterCallsignCap(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+		{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+	})
+
+	ln, conn := dialServe(t, eng, b)
+	defer ln.Close()
+	defer conn.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	// Register 8 distinct callsigns — all succeed (0x01).
+	calls := []string{"AA0A", "BB1B", "CC2C", "DD3D", "EE4E", "FF5F", "GG6G", "HH7H"}
+	for _, call := range calls {
+		writeFrame(t, conn, 0, 'X', 0, call, "", nil)
+		resp := readOneFrame(t, conn)
+		if resp.Kind != 'X' || len(resp.Data) != 1 || resp.Data[0] != 0x01 {
+			t.Fatalf("register %s: kind=%c data=% x, want X 01", call, resp.Kind, resp.Data)
+		}
+	}
+
+	// 9th distinct registration → rejected with 0x00.
+	writeFrame(t, conn, 0, 'X', 0, "II8I", "", nil)
+	resp := readOneFrame(t, conn)
+	if resp.Kind != 'X' || len(resp.Data) != 1 || resp.Data[0] != 0x00 {
+		t.Fatalf("9th registration: kind=%c data=% x, want X 00", resp.Kind, resp.Data)
+	}
+
+	// Re-registering an already-held call is idempotent → still succeeds.
+	writeFrame(t, conn, 0, 'X', 0, "AA0A", "", nil)
+	resp = readOneFrame(t, conn)
+	if resp.Kind != 'X' || len(resp.Data) != 1 || resp.Data[0] != 0x01 {
+		t.Fatalf("re-register held call: kind=%c data=% x, want X 01", resp.Kind, resp.Data)
+	}
+
+	// Unregister one ('x' — no response), then the freed slot fits a new call.
+	writeFrame(t, conn, 0, 'x', 0, "BB1B", "", nil)
+	writeFrame(t, conn, 0, 'X', 0, "II8I", "", nil)
+	resp = readOneFrame(t, conn)
+	if resp.Kind != 'X' || len(resp.Data) != 1 || resp.Data[0] != 0x01 {
+		t.Fatalf("register after unregister: kind=%c data=% x, want X 01", resp.Kind, resp.Data)
+	}
+}
+
+// TestUnprotoViaDigipeaterCap: 'V' with >8 digipeaters is dropped (no UI on
+// the air); exactly 8 digis still produces a UI frame with all 8.
+func TestUnprotoViaDigipeaterCap(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+		{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+	})
+
+	ln, conn := dialServe(t, eng, b)
+	defer ln.Close()
+	defer conn.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	buildV := func(nVia int) []byte {
+		data := []byte{byte(nVia)}
+		for i := 0; i < nVia; i++ {
+			entry := make([]byte, 10)
+			copy(entry, fmt.Sprintf("WIDE%d", i%9+1))
+			data = append(data, entry...)
+		}
+		return append(data, []byte("payload")...)
+	}
+
+	// 9 digis → dropped: nothing reaches the port.
+	before := len(fp.getSent())
+	writeFrame(t, conn, 0, 'V', 0, "N0CALL", "CQ", buildV(9))
+	time.Sleep(150 * time.Millisecond)
+	if got := len(fp.getSent()); got != before {
+		t.Fatalf("9-digi 'V' produced %d port sends, want 0", got-before)
+	}
+
+	// 8 digis → one UI frame carrying all 8 via addresses.
+	writeFrame(t, conn, 0, 'V', 0, "N0CALL", "CQ", buildV(8))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		frames := decodeAX25Frames(fp.getSent())
+		if len(frames) > 0 {
+			f := frames[0]
+			if f.Type != ax25.UI {
+				t.Fatalf("frame type = %s, want UI", f.Type)
+			}
+			if len(f.Via) != 8 {
+				t.Fatalf("via count = %d, want 8", len(f.Via))
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("8-digi 'V' produced no UI frame")
+}
+
+// TestInflightCapClosesFloodingClient: with the engine loop stalled, a client
+// that floods more frames than the inflight cap is disconnected by the server
+// instead of growing the engine queue without bound.
+func TestInflightCapClosesFloodingClient(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+		{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+	})
+
+	ln, conn := dialServe(t, eng, b)
+	defer ln.Close()
+	defer conn.Close()
+
+	// Wait for the client to register (its read loop only starts after the
+	// engine processes AddClient).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		n := 0
+		onLoop(t, eng, func() { n = len(b.Clients()) })
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("client never registered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Stall the engine loop so posted frames accumulate in flight.
+	release := make(chan struct{})
+	stalled := make(chan struct{})
+	eng.Do(func() { close(stalled); <-release })
+	select {
+	case <-stalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("engine did not pick up blocker")
+	}
+
+	// Flood well past the cap of 256 in-flight frames.
+	pkt := agwpepkg.Build(0, 'R', 0, "", "", nil)
+	go func() {
+		for i := 0; i < 4*256; i++ {
+			if _, err := conn.Write(pkt); err != nil {
+				return
+			}
+		}
+	}()
+
+	// The server must close the connection: our read eventually errors.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err := conn.Read(make([]byte, 1))
+	close(release)
+	if err == nil {
+		t.Fatal("flooding client was not disconnected")
 	}
 }
