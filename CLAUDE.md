@@ -20,6 +20,40 @@ Always run `go test ./...` and ensure all tests pass before committing or deploy
 
 Never commit secrets (API keys, tokens, passwords, private keys) to git.
 
+## Debugging: prove it's external before blaming (or clearing) the app
+
+tncd sits between an AGWPE client and a long external chain: the KISS transport
+(serial/TCP/**Bluetooth adapter**), the TNC/radio, its PTT/deviation/half-duplex
+timing, the RF path, and the remote station. Most failures that *look* like tncd
+bugs — stalls, "goes deaf", frames that never make it on the air, sessions that
+die mid-transfer — originate somewhere in that chain, not in the Go code. The
+reverse trap is just as costly: assuming "it's the radio" without proof.
+
+**Before asserting a cause — app or external — isolate it with a controlled swap
+that changes exactly one link in the chain.** Concrete, high-signal moves:
+
+- **Swap the modem, keep tncd's L2.** Point tncd at Dire Wolf's KISS TCP port
+  (`type = tcp`, port 8001) so a *known-good* radio drives the same L2 code. If a
+  failure that happened over one radio (e.g. a Bluetooth TNC) vanishes here, the
+  bug is in the radio/transport path, not tncd's AX.25 engine — and vice versa.
+- **Bypass tncd entirely.** A tiny probe that opens the transport and writes one
+  KISS frame (does the radio key? does the frame reach the air?) proves whether
+  the transport/radio works without any tncd logic in the picture.
+- **Compare against a reference stack.** Dire Wolf is a correct AX.25
+  implementation and its source is available; run the same connection through it
+  (`~/direwolf-vhf.conf`, AGW port 8000) and diff its on-air behavior against
+  tncd's. Same inputs, different implementation → the divergence is the bug.
+- **Watch the actual RF, not just counters.** An independent Dire Wolf monitor on
+  the frequency shows what truly went on the air. tncd's `tx` counter means "we
+  handed it to the transport," *not* "it was transmitted" — a wedged Bluetooth
+  socket accepts writes and drops them.
+- **Change one variable at a time.** Same binary + different radio, or same radio
+  + different binary (e.g. an older tagged build via `git worktree`). Don't
+  reason from a run where two things changed at once.
+
+Only after a swap has pinned the failure to a single link should you conclude
+where it lives. Guessing — in either direction — wastes hours.
+
 ## Environment
 
 This is a NixOS system building a **pure-Go, no-cgo** binary. Use the Go toolchain from `go.mod` (Go 1.24+); `nix-shell -p go` provides it if it isn't on `PATH`. Always build/test with `CGO_ENABLED=0` (there is no C compiler in the default shell, and every release target is pure-Go).

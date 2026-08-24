@@ -41,6 +41,7 @@ type PortSender interface {
 // suppression. Mirrors Python's deque(maxlen=20).
 const echoRingSize = 20
 
+
 // Bridge wires L2, KISS ports, and AGWPE clients together.
 type Bridge struct {
 	eng     *engine.Engine
@@ -58,7 +59,7 @@ type Bridge struct {
 	// KISS, used to suppress echoes on RX. Mirrors Python _sent_frames deque(maxlen=20).
 	sentFrames [][]byte
 
-	rxFrames []uint64 // per-port, live-scoped (reset on offline)
+	rxFrames []uint64 // per-port, live-scoped (reset on offline/cycle)
 	txFrames []uint64
 
 	// idleSweepTimer is held so we can cancel it on Shutdown.
@@ -420,6 +421,16 @@ func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, sende
 	b.txFrames = make([]uint64, len(b.ports))
 }
 
+// resetPortCounters zeroes a port's live-scoped frame counters (on offline or a
+// manual transport cycle).
+func (b *Bridge) resetPortCounters(port int) {
+	if port < 0 || port >= len(b.rxFrames) {
+		return
+	}
+	b.rxFrames[port] = 0
+	b.txFrames[port] = 0
+}
+
 // Start opens all KISS ports asynchronously (one goroutine per port so a dead
 // TNC doesn't stall startup). Online/offline transitions post back to the
 // engine loop via eng.Do. Mirrors tncd.py:1123-1142 async port connection.
@@ -527,11 +538,7 @@ func (b *Bridge) connectPort(idx int, pc config.Port) {
 func (b *Bridge) portWentOffline(portNum int) {
 	log.Printf("bridge: port %d went offline", portNum)
 	b.l2.PortOffline(portNum)
-
-	if portNum >= 0 && portNum < len(b.rxFrames) {
-		b.rxFrames[portNum] = 0
-		b.txFrames[portNum] = 0
-	}
+	b.resetPortCounters(portNum)
 
 	// Schedule reconnect for ports configured for it.
 	if portNum < len(b.cfg.Ports) {
@@ -654,6 +661,52 @@ func (b *Bridge) notifyConnectFailed(c *l2pkg.Conn, reason l2pkg.FailReason) {
 		msg = []byte("*** CONNECTED With " + c.Remote + " failed\r")
 	}
 	c.Owner.(Client).SendAGWPE(uint8(c.Port), 'd', 0, c.Remote, c.Local, msg)
+}
+
+// ReconnectPort cycles port n's transport: marks it offline, tears down L2
+// state, closes the current transport, and starts a fresh connect (reusing
+// connectPort, which honours the port's reconnect/backoff config). Intended for
+// the monitor API's manual reconnect — recovery for a wedged link that tncd
+// cannot detect on its own (e.g. a half-open Bluetooth RFCOMM channel). Returns
+// false if the index is out of range or the slot has no live transport to cycle.
+// Must be called on the engine loop.
+// bluetoothRelinkSettle is how long a manual relink waits after closing a
+// Bluetooth port before reconnecting, so the RFCOMM link fully tears down
+// rather than being reused half-open. Mirrors the transport-level settle used
+// on Linux; it is the only wedge guard on Windows (raw Winsock has no
+// disconnect-first).
+const bluetoothRelinkSettle = 2 * time.Second
+
+func (b *Bridge) ReconnectPort(port int) bool {
+	if port < 0 || port >= len(b.ports) || port >= len(b.cfg.Ports) {
+		return false
+	}
+	kp, ok := b.ports[port].(*kiss.Port)
+	if !ok {
+		return false // sentinel or fake sender — nothing to cycle
+	}
+	pc := b.cfg.Ports[port]
+	log.Printf("bridge: port %d manual reconnect requested", port)
+	b.ports[port] = &offlineSentinel{}
+	b.l2.PortOffline(port)
+	b.resetPortCounters(port)
+	// Close the old port and reconnect off-loop (Close joins the reader
+	// goroutine and can block on socket teardown).
+	go func() {
+		kp.Close()
+		// Bluetooth: settle before reconnecting so the RFCOMM link fully tears
+		// down first. An immediate close→reconnect can reuse a half-open channel
+		// whose writes are accepted but silently dropped (the "wedged SPP" — 0
+		// bytes reach the TNC despite a healthy socket). On Linux the transport's
+		// own disconnect-first handles this; Windows (raw Winsock, no
+		// disconnect-first) relies on this settle. Only manual relinks hit this
+		// path — auto-reconnect already backs off — so the added latency is fine.
+		if pc.Type == "bluetooth" {
+			time.Sleep(bluetoothRelinkSettle)
+		}
+		b.connectPort(port, pc)
+	}()
+	return true
 }
 
 // notifyData delivers received I-frame data to the connection owner.

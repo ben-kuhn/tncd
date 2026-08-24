@@ -659,3 +659,27 @@ func TestSendKISSCommandOfflinePortSkipped(t *testing.T) {
 		t.Fatalf("offline port: got %d command(s), want 0", len(cmds))
 	}
 }
+
+// TestReconnectPortGuards: ReconnectPort returns false for an out-of-range port
+// and for a slot backed by something other than a live kiss.Port (there is no
+// real transport to cycle).
+func TestReconnectPortGuards(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fp := newFakePort(true)
+	var b *Bridge
+	var neg, oob, fake bool
+	onLoop(t, eng, func() {
+		b = makeBridge(t, eng, fp) // ports[0] is a *fakePort, not a *kiss.Port
+		neg = b.ReconnectPort(-1)
+		oob = b.ReconnectPort(5)
+		fake = b.ReconnectPort(0)
+	})
+	if neg || oob {
+		t.Fatalf("out-of-range ports must return false (neg=%v oob=%v)", neg, oob)
+	}
+	if fake {
+		t.Fatalf("non-kiss.Port slot must return false")
+	}
+}

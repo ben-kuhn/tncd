@@ -11,7 +11,9 @@ async function refresh() {
     $("ports").innerHTML = (st.ports || []).map(p =>
       `<div class="port"><span class="dot ${p.online ? "dot-on" : "dot-off"}"></span>`
       + `<span class="name">#${p.port} ${esc(p.name || p.type)}</span>`
-      + `<span class="cnt">rx ${p.rx_frames} · tx ${p.tx_frames}</span></div>`).join("");
+      + `<span class="cnt">rx ${p.rx_frames} · tx ${p.tx_frames}</span>`
+      + `<button class="relink" data-port="${p.port}" title="Cycle this port's transport (close + reconnect)">relink</button>`
+      + `</div>`).join("");
   } catch (e) {}
   try {
     const cn = await (await fetch("api/connections")).json();
@@ -99,6 +101,26 @@ document.querySelectorAll(".filters button").forEach((btn) => {
       el.style.display = filters[f] ? "" : "none";
     });
   });
+});
+
+// --- manual relink (POST /api/ports/{n}/reconnect) ---
+// Delegated so it survives the ports panel re-rendering every refresh.
+$("ports").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button.relink");
+  if (!btn || btn.dataset.busy) return;
+  const port = btn.dataset.port;
+  btn.dataset.busy = "1";
+  btn.disabled = true;
+  btn.textContent = "relinking…";
+  try {
+    const resp = await fetch(`api/ports/${port}/reconnect`, { method: "POST" });
+    btn.textContent = resp.ok ? "relinked" : "failed";
+  } catch (_) {
+    btn.textContent = "failed";
+  }
+  // Refresh repaints the panel shortly; clear the busy latch so the fresh
+  // button is clickable again.
+  setTimeout(() => { delete btn.dataset.busy; }, 2500);
 });
 
 // --- boot ---

@@ -201,3 +201,60 @@ func TestUIEmbedHasIndex(t *testing.T) {
 		t.Fatalf("embedded ui/index.html missing: %v", err)
 	}
 }
+
+func TestPortReconnectEndpoint(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	var b *bridge.Bridge
+	done := make(chan struct{})
+	eng.Do(func() { b = newBridge(t, eng); close(done) })
+	<-done
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOnLoop(eng, srv)
+	base := "http://" + srv.Addr()
+
+	// GET on the action path → 405 Method Not Allowed.
+	if resp, err := http.Get(base + "/api/ports/0/reconnect"); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("GET reconnect: got %d, want 405", resp.StatusCode)
+		}
+	}
+
+	// POST with a non-numeric port → 400.
+	if resp, err := http.Post(base+"/api/ports/abc/reconnect", "", nil); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("POST bad port: got %d, want 400", resp.StatusCode)
+		}
+	}
+
+	// POST to an unknown sub-action → 404.
+	if resp, err := http.Post(base+"/api/ports/0/bogus", "", nil); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("POST unknown action: got %d, want 404", resp.StatusCode)
+		}
+	}
+
+	// POST reconnect on a port with no live kiss.Port transport (test harness
+	// uses a fake sender) → 409 Conflict.
+	if resp, err := http.Post(base+"/api/ports/0/reconnect", "", nil); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("POST reconnect (fake port): got %d, want 409", resp.StatusCode)
+		}
+	}
+}
