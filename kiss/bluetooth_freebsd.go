@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -37,16 +38,23 @@ import (
 //     Benshi UV-PRO) can't be paired by base FreeBSD (hcsecd handles only
 //     legacy PIN + Link_Key_Request, not Secure Simple Pairing); such devices
 //     need a link key established elsewhere and loaded into FreeBSD. Untested.
-//   - A stale ACL to the TNC surfaces as EBUSY ("device busy") on reconnect;
-//     clear it (`hccontrol read_connection_list` / `disconnect`). A
-//     disconnect-first in Open (as on Linux) is a TODO.
-//   - SDP channel discovery targets the first RFCOMM descriptor; on a device
-//     advertising multiple SPP records it's ambiguous — pin the "channel" key.
+//   - A stale RFCOMM session can surface as EBUSY ("device busy") on a quick
+//     reconnect; Open retries a few times while it tears down. If it persists
+//     (e.g. a truly stuck ACL), clear it manually (`hccontrol
+//     read_connection_list` / `disconnect`).
+//   - SDP discovery returns the channel of the first SPP record. A device
+//     advertising several SPP services still needs the "channel" key to pick a
+//     non-default one.
 const (
 	afBluetooth   = 36  // AF_BLUETOOTH (sys/socket.h)
 	btProtoL2CAP  = 135 // BLUETOOTH_PROTO_L2CAP (ng_btsocket.h)
 	btProtoRFCOMM = 136 // BLUETOOTH_PROTO_RFCOMM (ng_btsocket.h)
 	sdpPSM        = 0x0001
+
+	// A stale RFCOMM session from a previous (unclean) exit lingers briefly and
+	// rejects a fresh connect with EBUSY until it tears down; retry a few times.
+	rfcommBusyRetries = 5
+	rfcommBusyDelay   = 2 * time.Second
 )
 
 // bluetoothTransport is a FreeBSD RFCOMM SPP transport.
@@ -86,11 +94,6 @@ func (bt *bluetoothTransport) Open() error {
 		channel = ch
 	}
 
-	fd, err := unix.Socket(afBluetooth, unix.SOCK_STREAM, btProtoRFCOMM)
-	if err != nil {
-		return fmt.Errorf("bluetooth: RFCOMM socket: %w", err)
-	}
-
 	// struct sockaddr_rfcomm { u_char len; u_char family; bdaddr_t bdaddr[6];
 	//                          u_int8_t channel; }  — 9 bytes, bdaddr LE.
 	sa := make([]byte, 9)
@@ -98,8 +101,25 @@ func (bt *bluetoothTransport) Open() error {
 	sa[1] = afBluetooth
 	copy(sa[2:8], addr[:])
 	sa[8] = byte(channel)
-	if err := connectRaw(fd, sa); err != nil {
+
+	// Connect, retrying on EBUSY with a fresh socket so a still-tearing-down
+	// prior session (common after an unclean exit or a quick reconnect) doesn't
+	// fail the open.
+	var fd int
+	for attempt := 0; ; attempt++ {
+		fd, err = unix.Socket(afBluetooth, unix.SOCK_STREAM, btProtoRFCOMM)
+		if err != nil {
+			return fmt.Errorf("bluetooth: RFCOMM socket: %w", err)
+		}
+		err = connectRaw(fd, sa)
+		if err == nil {
+			break
+		}
 		unix.Close(fd)
+		if err == unix.EBUSY && attempt < rfcommBusyRetries {
+			time.Sleep(rfcommBusyDelay)
+			continue
+		}
 		return fmt.Errorf("bluetooth: connect %s (channel %d): %w", bt.cfg.BDAddr, channel, err)
 	}
 

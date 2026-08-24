@@ -62,21 +62,117 @@ func buildSSAReq() []byte {
 }
 
 // parseRFCOMMChannel extracts the RFCOMM server channel from an SDP
-// ServiceSearchAttributeResponse. Rather than fully walk the data-element tree,
-// it locates the RFCOMM protocol descriptor — the UUID16 0x0003 encoded as
-// 0x19 0x00 0x03 — and reads the uint8 channel element (0x08 <ch>) that follows.
+// ServiceSearchAttributeResponse by walking the data-element tree (rather than
+// scanning raw bytes, which was non-deterministic on devices advertising
+// multiple SPP records). It descends into every sequence and returns the uint
+// that immediately follows the RFCOMM protocol UUID (0x0003) — i.e. the channel
+// of the first SPP record. For devices with several SPP services where a
+// different one is wanted, pin the [client] "channel" key.
 func parseRFCOMMChannel(resp []byte) (int, error) {
-	if len(resp) < 5 || resp[0] != sdpSSAResp {
+	// PDU header: id(1) txid(2) paramLen(2) attrListsByteCount(2), then the
+	// AttributeLists data element (+ trailing continuation state).
+	if len(resp) < 7 || resp[0] != sdpSSAResp {
 		return 0, fmt.Errorf("sdp: unexpected response (pdu 0x%02x, %d bytes)", firstByte(resp), len(resp))
 	}
-	for i := 0; i+4 < len(resp); i++ {
-		if resp[i] == 0x19 && resp[i+1] == byte(uuidRFCOMM16>>8) && resp[i+2] == byte(uuidRFCOMM16&0xFF) {
-			if resp[i+3] == 0x08 { // uint8 element carrying the channel
-				return int(resp[i+4]), nil
-			}
-		}
+	if ch, ok := findRFCOMMChannel(resp[7:]); ok {
+		return ch, nil
 	}
 	return 0, fmt.Errorf("sdp: no RFCOMM channel in SPP record (device may not advertise SPP)")
+}
+
+// sdpElement parses the data-element header at b[off:], returning the element's
+// type (high 5 bits of the descriptor), where its value starts, its value
+// length, and whether parsing succeeded and fits within b.
+func sdpElement(b []byte, off int) (etype byte, valOff, valLen int, ok bool) {
+	if off >= len(b) {
+		return 0, 0, 0, false
+	}
+	desc := b[off]
+	etype = desc >> 3
+	sizeIdx := desc & 0x07
+	p := off + 1
+	switch sizeIdx {
+	case 0:
+		valLen = 1
+	case 1:
+		valLen = 2
+	case 2:
+		valLen = 4
+	case 3:
+		valLen = 8
+	case 4:
+		valLen = 16
+	case 5:
+		if p >= len(b) {
+			return 0, 0, 0, false
+		}
+		valLen = int(b[p])
+		p++
+	case 6:
+		if p+2 > len(b) {
+			return 0, 0, 0, false
+		}
+		valLen = int(binary.BigEndian.Uint16(b[p : p+2]))
+		p += 2
+	case 7:
+		if p+4 > len(b) {
+			return 0, 0, 0, false
+		}
+		valLen = int(binary.BigEndian.Uint32(b[p : p+4]))
+		p += 4
+	}
+	if etype == 0 { // nil: no value
+		valLen = 0
+	}
+	if p+valLen > len(b) {
+		return 0, 0, 0, false
+	}
+	return etype, p, valLen, true
+}
+
+// findRFCOMMChannel walks the elements of one sequence level (recursing into
+// nested sequences) and returns the uint element immediately following the
+// RFCOMM protocol UUID (0x0003) — the RFCOMM server channel.
+func findRFCOMMChannel(b []byte) (int, bool) {
+	off := 0
+	prevWasRFCOMM := false
+	for off < len(b) {
+		etype, vo, vl, ok := sdpElement(b, off)
+		if !ok {
+			return 0, false
+		}
+		val := b[vo : vo+vl]
+		switch etype {
+		case 3: // UUID
+			prevWasRFCOMM = isRFCOMMUUID(val)
+		case 1: // unsigned int
+			if prevWasRFCOMM && vl >= 1 {
+				return int(val[vl-1]), true // channel is the low byte
+			}
+			prevWasRFCOMM = false
+		case 6, 7: // data element sequence / alternative — recurse
+			if ch, ok := findRFCOMMChannel(val); ok {
+				return ch, true
+			}
+			prevWasRFCOMM = false
+		default:
+			prevWasRFCOMM = false
+		}
+		off = vo + vl
+	}
+	return 0, false
+}
+
+// isRFCOMMUUID reports whether a UUID value is the RFCOMM protocol UUID (0x0003)
+// in its 16-, 32-, or 128-bit form.
+func isRFCOMMUUID(v []byte) bool {
+	switch len(v) {
+	case 2:
+		return v[0] == byte(uuidRFCOMM16>>8) && v[1] == byte(uuidRFCOMM16&0xFF)
+	case 4, 16:
+		return v[0] == 0 && v[1] == 0 && v[2] == byte(uuidRFCOMM16>>8) && v[3] == byte(uuidRFCOMM16&0xFF)
+	}
+	return false
 }
 
 func firstByte(b []byte) byte {

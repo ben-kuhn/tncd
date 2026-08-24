@@ -61,6 +61,22 @@ func TestParseRFCOMMChannel(t *testing.T) {
 	wrongPDU := []byte{0x06, 0x00, 0x01, 0x00, 0x00}
 	tooShort := []byte{0x07}
 
+	// Two SPP records nested in a proper data-element tree: record 1 advertises
+	// channel 1, record 2 channel 3. A tree walk must deterministically return
+	// the first record's channel (the old byte-scan picked non-deterministically).
+	protoList := func(ch byte) []byte {
+		return []byte{
+			0x35, 0x0C, // DES(12): ProtocolDescriptorList
+			0x35, 0x03, 0x19, 0x01, 0x00, // DES{ L2CAP UUID 0x0100 }
+			0x35, 0x05, 0x19, 0x00, 0x03, 0x08, ch, // DES{ RFCOMM UUID 0x0003, uint8 ch }
+		}
+	}
+	var attrLists []byte
+	attrLists = append(attrLists, protoList(0x01)...)
+	attrLists = append(attrLists, protoList(0x03)...)
+	respMulti := append([]byte{0x35, byte(len(attrLists))}, attrLists...) // DES wrapping both
+	respMulti = append([]byte{0x07, 0x00, 0x01, 0x00, byte(len(respMulti) + 3), 0x00, byte(len(respMulti))}, respMulti...)
+
 	tests := []struct {
 		name    string
 		in      []byte
@@ -69,6 +85,7 @@ func TestParseRFCOMMChannel(t *testing.T) {
 	}{
 		{"channel 6", respCh6, 6, false},
 		{"channel 1 after L2CAP", respCh1, 1, false},
+		{"multi-record returns first", respMulti, 1, false},
 		{"no RFCOMM descriptor", noRFCOMM, 0, true},
 		{"wrong PDU id", wrongPDU, 0, true},
 		{"too short", tooShort, 0, true},
