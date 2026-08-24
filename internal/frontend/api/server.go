@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/ben-kuhn/tncd/v2/ax25"
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
+	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 	"github.com/ben-kuhn/tncd/v2/internal/version"
 )
 
@@ -34,14 +36,16 @@ type sseClient struct {
 	ch chan []byte // buffered SSE frames
 }
 
-// Serve starts the API server and registers its sinks. Registration is
-// marshalled onto the engine loop (safe during setup or while running).
-func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients int, serveUI bool) (*Server, error) {
+// Serve starts the API server and registers its sinks. Connections from
+// outside allow are rejected at accept time. Registration is marshalled onto
+// the engine loop (safe during setup or while running).
+func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients int, serveUI bool, allow netutil.Allowlist) (*Server, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("api: listen %s: %w", addr, err)
 	}
+	ln = netutil.WrapListener(ln, allow, "api")
 	s := &Server{eng: eng, b: b, ln: ln, maxClients: maxClients, clients: make(map[*sseClient]struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.handleStatus)
@@ -56,7 +60,14 @@ func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients i
 		}
 		mux.Handle("/", h)
 	}
-	s.httpSrv = &http.Server{Handler: mux}
+	s.httpSrv = &http.Server{
+		Handler: mux,
+		// Slowloris guard. WriteTimeout and ReadTimeout stay zero: SSE
+		// streams are long-lived (and the 15s heartbeat keeps them off the
+		// idle timer).
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	eng.Do(func() {
 		b.RegisterMonitorSink(s)
@@ -120,6 +131,22 @@ func (s *Server) handlePortAction(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+	// CSRF guard. X-Requested-With is not a CORS-safelisted header, so a
+	// cross-origin page can only send it after a preflight — and tncd answers
+	// no CORS headers, so the browser blocks the request outright. This stops
+	// drive-by POSTs (e.g. a web page relinking ports on 127.0.0.1).
+	if r.Header.Get("X-Requested-With") != "tncd" {
+		http.Error(w, "forbidden: missing X-Requested-With header", http.StatusForbidden)
+		return
+	}
+	// Defense in depth: when an Origin header is present it must be same-host.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(u.Host, r.Host) {
+			http.Error(w, "forbidden: cross-origin request", http.StatusForbidden)
+			return
+		}
 	}
 	port, err := strconv.Atoi(parts[0])
 	if err != nil || port < 0 {

@@ -93,6 +93,7 @@ Go module `github.com/ben-kuhn/tncd/v2`. Exported reusable packages at the top l
 - **`internal/engine/`** — a single serialized event loop (one goroutine owns all L2/bridge state; everything else messages it via `Do`/`After`). This mirrors the asyncio serialization the half-duplex fixes depend on.
 - **`internal/bridge/`** — coordinator: connections table, dispatch by AX.25 frame type, TX-echo suppression, transport construction (`buildTransport`), and per-port auto-reconnect with backoff.
 - **`internal/frontend/{agwpe,kisstcp,api}/`** — the AGWPE TCP server, the KISS-over-TCP passthrough, and the read-only JSON/SSE monitoring API.
+- **`internal/netutil/`** — client-IP allowlist (`allowed_subnets`) shared by all three listeners, enforced by a filtering `net.Listener` at accept time.
 - **`internal/app/`** — `Runtime` (wires engine + bridge + frontends; `New`/`Wait`/`Shutdown`), shared by the console and Windows-service launch paths.
 - **`internal/config/`** — INI load, validation, and `genconfig` example.
 - **`internal/ports/`** — serial device enumeration + `usb:VID:PID` resolution; paired Bluetooth enumeration on Windows.
@@ -113,9 +114,9 @@ Data flow: `AGWPE client → TCP → frontend/agwpe → engine/bridge → kiss.T
 
 ## Testing
 
-- **Go unit tests** (`go test ./...`): golden-byte codec tests for `ax25/` and `agwpe/` (byte-for-byte against captured frames), and behavioral tests for `ax25/l2` with each hard-won regression fix as a named test.
+- **Go unit tests** (`go test ./...`): golden-byte codec tests for `ax25/` and `agwpe/` (byte-for-byte against captured frames), and behavioral tests for `ax25/l2` with each hard-won regression fix as a named test. Fuzz targets (`Fuzz*`) cover every untrusted-byte parser (AX.25 frame/XID/address, AGWPE header, KISS decoder, SDP) — plain `go test` runs their seed/regression corpora; real fuzzing is `go test -fuzz=FuzzName -fuzztime=Ns ./pkg/`.
 - **e2e** (`e2e/`, pytest): a black-box harness that drives the compiled binary against Dire Wolf/PAT (packet-browser pattern). Binary discovery: `$TNCD_BIN` → `tncd` on `PATH`/repo-root → auto-built from `./cmd/tncd`. Needs local PipeWire/Dire Wolf/PAT; not run in CI.
-- **CI** runs `go test`, `go vet`, and the full cross-compile matrix on every PR.
+- **CI** (`.github/workflows/test.yml`) runs `go test`, `go vet`, the full cross-compile matrix, 10s fuzz bursts per parser target, and `govulncheck` on every PR.
 
 ## Packaging
 

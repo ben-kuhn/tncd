@@ -13,6 +13,7 @@ import (
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
+	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 	"github.com/ben-kuhn/tncd/v2/ax25"
 )
 
@@ -42,7 +43,7 @@ func TestStatusEndpoint(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true, netutil.Allowlist{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func TestEventsSSE(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true, netutil.Allowlist{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +131,7 @@ func TestServeUIEnabledServesRoot(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true, netutil.Allowlist{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +173,7 @@ func TestServeUIDisabledRootIs404(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, false)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, false, netutil.Allowlist{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +211,7 @@ func TestPortReconnectEndpoint(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true, netutil.Allowlist{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestPortReconnectEndpoint(t *testing.T) {
 	}
 
 	// POST with a non-numeric port → 400.
-	if resp, err := http.Post(base+"/api/ports/abc/reconnect", "", nil); err != nil {
+	if resp, err := postAction(base + "/api/ports/abc/reconnect"); err != nil {
 		t.Fatal(err)
 	} else {
 		resp.Body.Close()
@@ -238,7 +239,7 @@ func TestPortReconnectEndpoint(t *testing.T) {
 	}
 
 	// POST to an unknown sub-action → 404.
-	if resp, err := http.Post(base+"/api/ports/0/bogus", "", nil); err != nil {
+	if resp, err := postAction(base + "/api/ports/0/bogus"); err != nil {
 		t.Fatal(err)
 	} else {
 		resp.Body.Close()
@@ -249,12 +250,85 @@ func TestPortReconnectEndpoint(t *testing.T) {
 
 	// POST reconnect on a port with no live kiss.Port transport (test harness
 	// uses a fake sender) → 409 Conflict.
-	if resp, err := http.Post(base+"/api/ports/0/reconnect", "", nil); err != nil {
+	if resp, err := postAction(base + "/api/ports/0/reconnect"); err != nil {
 		t.Fatal(err)
 	} else {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusConflict {
 			t.Fatalf("POST reconnect (fake port): got %d, want 409", resp.StatusCode)
+		}
+	}
+}
+
+// postAction POSTs with the X-Requested-With header the CSRF guard requires.
+func postAction(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Requested-With", "tncd")
+	return http.DefaultClient.Do(req)
+}
+
+func TestPortReconnectCSRFGuard(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	var b *bridge.Bridge
+	done := make(chan struct{})
+	eng.Do(func() { b = newBridge(t, eng); close(done) })
+	<-done
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true, netutil.Allowlist{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOnLoop(eng, srv)
+	url := "http://" + srv.Addr() + "/api/ports/0/reconnect"
+
+	// Plain POST without the custom header (what a cross-origin simple
+	// request looks like) → 403.
+	if resp, err := http.Post(url, "", nil); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("POST without X-Requested-With: got %d, want 403", resp.StatusCode)
+		}
+	}
+
+	// Correct header → passes the guard (409: fake port has no transport).
+	if resp, err := postAction(url); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("POST with X-Requested-With: got %d, want 409", resp.StatusCode)
+		}
+	}
+
+	// Cross-origin Origin header → 403 even with the custom header.
+	req, _ := http.NewRequest(http.MethodPost, url, nil)
+	req.Header.Set("X-Requested-With", "tncd")
+	req.Header.Set("Origin", "http://evil.example")
+	if resp, err := http.DefaultClient.Do(req); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("POST cross-origin: got %d, want 403", resp.StatusCode)
+		}
+	}
+
+	// Same-host Origin → allowed through the guard.
+	req2, _ := http.NewRequest(http.MethodPost, url, nil)
+	req2.Header.Set("X-Requested-With", "tncd")
+	req2.Header.Set("Origin", "http://"+srv.Addr())
+	if resp, err := http.DefaultClient.Do(req2); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("POST same-origin: got %d, want 409", resp.StatusCode)
 		}
 	}
 }

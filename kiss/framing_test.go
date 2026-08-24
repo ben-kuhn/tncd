@@ -137,3 +137,74 @@ func TestDecoderSingleFENDDelimiter(t *testing.T) {
 		t.Fatalf("byte-by-byte: got %d frames, want 2", len(all))
 	}
 }
+
+// TestDecoderFrameAtMaxSize verifies a frame of exactly MaxFrameSize decodes.
+func TestDecoderFrameAtMaxSize(t *testing.T) {
+	var d Decoder
+	payload := make([]byte, MaxFrameSize-1) // +1 cmd byte = MaxFrameSize total
+	stream := append([]byte{FEND, 0x00}, payload...)
+	stream = append(stream, FEND)
+	frames := d.Feed(stream)
+	if len(frames) != 1 || len(frames[0]) != MaxFrameSize {
+		t.Fatalf("got %d frames (len %v), want 1 frame of %d bytes",
+			len(frames), len(frames[0]), MaxFrameSize)
+	}
+	if d.DroppedOversize != 0 {
+		t.Errorf("DroppedOversize = %d, want 0", d.DroppedOversize)
+	}
+}
+
+// TestDecoderDropsOversizeAndResyncs streams an unterminated frame well past
+// MaxFrameSize, then verifies: the oversized frame is dropped, the counter
+// increments exactly once per oversize frame, buffer memory is released, and
+// a following valid frame decodes normally.
+func TestDecoderDropsOversizeAndResyncs(t *testing.T) {
+	var d Decoder
+	noise := bytes.Repeat([]byte{0x55}, 3*MaxFrameSize)
+
+	d.Feed([]byte{FEND}) // open frame
+	if frames := d.Feed(noise); len(frames) != 0 {
+		t.Fatalf("oversize stream produced %d frames, want 0", len(frames))
+	}
+	if d.DroppedOversize != 1 {
+		t.Errorf("DroppedOversize = %d, want 1", d.DroppedOversize)
+	}
+	if len(d.buf) != 0 {
+		t.Errorf("decoder retained %d bytes after oversize drop", len(d.buf))
+	}
+
+	// A second unterminated oversize frame increments the counter once more.
+	d.Feed([]byte{FEND})
+	d.Feed(noise)
+	if d.DroppedOversize != 2 {
+		t.Errorf("DroppedOversize = %d, want 2", d.DroppedOversize)
+	}
+
+	// Resync: a normal frame after the noise decodes.
+	good := WrapData(0, []byte("ok"))
+	frames := d.Feed(good)
+	if len(frames) != 1 || !bytes.Equal(frames[0][1:], []byte("ok")) {
+		t.Fatalf("resync failed: got % x", frames)
+	}
+	if d.DroppedOversize != 2 {
+		t.Errorf("DroppedOversize = %d after valid frame, want 2", d.DroppedOversize)
+	}
+}
+
+// TestDecoderOversizeEscapeAtBoundary: an escape sequence straddling the cap
+// boundary must not bypass it — the resolved byte is dropped with the frame.
+func TestDecoderOversizeEscapeAtBoundary(t *testing.T) {
+	var d Decoder
+	stream := []byte{FEND, 0x00}
+	stream = append(stream, bytes.Repeat([]byte{0x41}, MaxFrameSize-1)...)
+	// buf now holds exactly MaxFrameSize bytes; next byte is FESC (escape
+	// start), then TFEND which resolves to a data FEND past the cap.
+	stream = append(stream, FESC, TFEND, FEND)
+	frames := d.Feed(stream)
+	if len(frames) != 0 {
+		t.Fatalf("frame ending with escaped byte at cap produced %d frames, want 0", len(frames))
+	}
+	if d.DroppedOversize != 1 {
+		t.Errorf("DroppedOversize = %d, want 1", d.DroppedOversize)
+	}
+}

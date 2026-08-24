@@ -19,6 +19,15 @@ var routedKinds = map[byte]bool{
 	'y': true, 'Y': true,
 }
 
+// maxRegisteredCalls bounds the callsigns one client may register with 'X'
+// frames. Real AGWPE clients register one or two; without a cap a client
+// could grow its registration map (and the set of callsigns tncd answers
+// SABMs for) without bound.
+const maxRegisteredCalls = 8
+
+// maxDigipeaters is the AX.25 digipeater limit for 'V'/'v' via lists.
+const maxDigipeaters = 8
+
 // handleFrame dispatches a complete AGWPE frame. Must be called on the engine loop.
 // Mirrors tncd.py:184-457 (handle_frame).
 func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
@@ -75,6 +84,12 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 			}
 		}
 		c.mu.Lock()
+		if len(c.registeredCalls) >= maxRegisteredCalls && !c.registeredCalls[call] {
+			c.mu.Unlock()
+			log.Printf("agwpe: rejecting registration of %q: client at cap (%d)", call, maxRegisteredCalls)
+			c.sendFrame(uint8(port), 'X', from, "", []byte{0x00})
+			return
+		}
 		c.registeredCalls[call] = true
 		c.mu.Unlock()
 		c.sendFrame(uint8(port), 'X', from, "", []byte{0x01})
@@ -105,6 +120,10 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		log.Printf("agwpe: UNPROTO VIA from %q to %q", from, to)
 		if len(data) > 0 {
 			nVia := int(data[0])
+			if nVia > maxDigipeaters {
+				log.Printf("agwpe: dropping 'V' with %d digipeaters (max %d)", nVia, maxDigipeaters)
+				return
+			}
 			end := 1 + nVia*10
 			if end > len(data) {
 				end = len(data)
@@ -169,6 +188,10 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		var vias []string
 		if len(data) > 0 {
 			nVia := int(data[0])
+			if nVia > maxDigipeaters {
+				log.Printf("agwpe: dropping 'v' with %d digipeaters (max %d)", nVia, maxDigipeaters)
+				return
+			}
 			end := 1 + nVia*10
 			if end > len(data) {
 				end = len(data)

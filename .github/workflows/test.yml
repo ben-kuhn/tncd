@@ -1,0 +1,57 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: CGO_ENABLED=0 go test ./...
+
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+
+      - name: Cross-compile matrix
+        run: |
+          set -e
+          for target in linux/amd64 linux/386 linux/arm64 linux/riscv64 \
+                        windows/amd64 darwin/amd64 darwin/arm64 freebsd/amd64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              go build -o /tmp/tncd ./cmd/tncd
+            echo "ok: $target"
+          done
+          GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=0 go build -o /tmp/tncd ./cmd/tncd
+          echo "ok: linux/arm (GOARM=6)"
+
+      - name: Fuzz smoke (10s per parser target)
+        run: |
+          set -e
+          for spec in "ax25 FuzzParseModulo" "ax25 FuzzParseXID" "ax25 FuzzParseAddress" \
+                      "agwpe FuzzParseHeader" "kiss FuzzDecoderFeed" "kiss FuzzParseRFCOMMChannel"; do
+            pkg="${spec% *}"; target="${spec#* }"
+            CGO_ENABLED=0 go test -fuzz="$target" -fuzztime=10s "./$pkg/"
+          done
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...

@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
+	l2pkg "github.com/ben-kuhn/tncd/v2/ax25/l2"
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
-	l2pkg "github.com/ben-kuhn/tncd/v2/ax25/l2"
+	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 	"github.com/ben-kuhn/tncd/v2/kiss"
 )
 
@@ -47,7 +48,7 @@ func TestKISSTCPRoundTrip(t *testing.T) {
 	eng.Do(func() { b = newBridge(t, eng, fs); close(done) })
 	<-done
 
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16) // port 0 = OS-assigned
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, 0, netutil.Allowlist{}) // port 0 = OS-assigned
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +103,7 @@ func TestKISSTCPNoLoopback(t *testing.T) {
 	eng.Do(func() { b = newBridge(t, eng, fs); close(done) })
 	<-done
 
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, 0, netutil.Allowlist{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestKISSTCPExitKISSDropped(t *testing.T) {
 	done := make(chan struct{})
 	eng.Do(func() { b = newBridge(t, eng, fs); close(done) })
 	<-done
-	srv, err := Serve(eng, b, "127.0.0.1", 0, 16)
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, 0, netutil.Allowlist{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,5 +206,90 @@ func TestKISSTCPExitKISSDropped(t *testing.T) {
 		t.Fatal("exit-KISS must not be forwarded as data")
 	case <-time.After(200 * time.Millisecond):
 		// good — nothing extra forwarded
+	}
+}
+
+// TestIdleSweep: a silent client is reaped after idle_timeout while a client
+// that keeps sending survives.
+func TestIdleSweep(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fs := newFakeSender()
+	var b *bridge.Bridge
+	done := make(chan struct{})
+	eng.Do(func() { b = newBridge(t, eng, fs); close(done) })
+	<-done
+
+	// idle_timeout = 1s → sweep interval min(30s, 1s) = 1s.
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, 1, netutil.Allowlist{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		done := make(chan struct{})
+		eng.Do(func() { srv.Close(); close(done) })
+		<-done
+	}()
+
+	idle, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	active, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	// Drain the fake port: Send blocks on a full channel and runs on the
+	// engine loop, so unread keepalives would wedge the sweep itself.
+	go func() {
+		for {
+			select {
+			case <-fs.ch:
+			case <-stop:
+				return
+			}
+		}
+	}()
+	// Keep the active client busy until the idle one is reaped.
+	go func() {
+		tick := time.NewTicker(300 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-tick.C:
+				if _, err := active.Write(kiss.WrapData(0, []byte{0x01})); err != nil {
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	// The idle client's conn is closed server-side within a few seconds.
+	idle.SetReadDeadline(time.Now().Add(6 * time.Second))
+	if _, err := idle.Read(make([]byte, 1)); err == nil {
+		t.Fatal("idle client was not reaped")
+	}
+
+	// The active client survives: exactly one client remains on the server.
+	clients := -1
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && clients != 1 {
+		done2 := make(chan struct{})
+		eng.Do(func() { clients = len(srv.clients); close(done2) })
+		<-done2
+		if clients != 1 {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if clients != 1 {
+		t.Fatalf("server has %d clients after sweep, want 1 (active survives)", clients)
 	}
 }

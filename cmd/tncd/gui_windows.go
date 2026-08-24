@@ -125,6 +125,24 @@ func buildConfig(callsign string, ch portChoice) string {
 	return b.String()
 }
 
+// writeTempConfig writes the wizard's generated config to a user-private temp
+// file with an unpredictable name. The previous fixed path
+// (%TEMP%\tncd-setup.ini) let a local process pre-create or swap the file
+// between the write and the elevated installer's read, installing an
+// attacker-chosen config for the SYSTEM service.
+func writeTempConfig(content []byte) (string, error) {
+	f, err := os.CreateTemp("", "tncd-setup-*.ini")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.Write(content); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
 func installerWizard() error {
 	labels, choices := wizardPorts()
 	var callsignLE *walk.LineEdit
@@ -142,11 +160,12 @@ func installerWizard() error {
 			walk.MsgBox(mw, "tncd", "Please select a TNC.", walk.MsgBoxIconWarning)
 			return
 		}
-		tmp := filepath.Join(os.TempDir(), "tncd-setup.ini")
-		if err := os.WriteFile(tmp, []byte(buildConfig(callsign, choices[idx])), 0o644); err != nil {
+		tmp, err := writeTempConfig([]byte(buildConfig(callsign, choices[idx])))
+		if err != nil {
 			walk.MsgBox(mw, "tncd", "Could not write config: "+err.Error(), walk.MsgBoxIconError)
 			return
 		}
+		defer os.Remove(tmp) // user-private temp file; safe to delete once install exits
 		code, err := elevate(`install -c "` + tmp + `"`)
 		if err != nil {
 			walk.MsgBox(mw, "tncd", "Install did not run: "+err.Error(), walk.MsgBoxIconError)
