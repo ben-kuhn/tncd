@@ -56,15 +56,17 @@ func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
 }
 
 // FailReason distinguishes why a connection attempt failed.
-// Used by the bridge to choose between "BUSY" and "failed" AGWPE messages.
+// The bridge (notifyConnectFailed) logs the cause and picks the client message.
 type FailReason int
 
 const (
 	// FailTimeout means SABM was sent N2 times with no UA response.
-	// Bridge sends: *** BUSY From {remote}\r  (tncd.py:1519)
+	// Bridge logs a timeout and tells the client "connect ... timed out".
+	// (tncd.py:1519 sent the misleading "*** BUSY From {remote}"; the Go port
+	// deliberately diverges for clarity.)
 	FailTimeout FailReason = iota
 	// FailDM means a DM frame was received while in Connecting state.
-	// Bridge sends: *** CONNECTED With {remote} failed\r  (tncd.py:1953)
+	// Bridge tells the client "connect ... refused (DM)" (was tncd.py:1953).
 	FailDM
 )
 
