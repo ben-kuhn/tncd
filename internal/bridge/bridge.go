@@ -646,7 +646,14 @@ func (b *Bridge) notifyConnected(c *l2pkg.Conn, incoming bool) {
 }
 
 // notifyConnectFailed is called by L2 when an outgoing connection attempt fails.
-// FailTimeout → BUSY; FailDM → "failed". Mirrors tncd.py:1519 and 1953.
+// It logs the real cause and sends the client a 'd' (disconnect) frame with a
+// human-readable reason. Clients key on the frame TYPE, not this text, so the
+// wording is display-only and chosen for clarity.
+//
+// Historically (tncd.py:1519) a timeout was reported as "*** BUSY From {remote}",
+// which misleads operators into thinking the remote is busy when in fact no UA
+// was ever heard (remote off/out of range, or a deaf/half-duplex TNC). We say
+// "timed out" instead — a deliberate divergence from the Python message.
 func (b *Bridge) notifyConnectFailed(c *l2pkg.Conn, reason l2pkg.FailReason) {
 	if c.Owner == nil {
 		return
@@ -654,11 +661,14 @@ func (b *Bridge) notifyConnectFailed(c *l2pkg.Conn, reason l2pkg.FailReason) {
 	var msg []byte
 	switch reason {
 	case l2pkg.FailTimeout:
-		msg = []byte("*** BUSY From " + c.Remote + "\r")
+		log.Printf("bridge: connect to %s timed out — no UA after SABM retries (remote not responding, out of range, or a deaf/half-duplex TNC)", c.Remote)
+		msg = []byte("*** connect to " + c.Remote + " timed out (no response)\r")
 	case l2pkg.FailDM:
-		msg = []byte("*** CONNECTED With " + c.Remote + " failed\r")
+		log.Printf("bridge: connect to %s refused — DM received", c.Remote)
+		msg = []byte("*** connect to " + c.Remote + " refused (DM)\r")
 	default:
-		msg = []byte("*** CONNECTED With " + c.Remote + " failed\r")
+		log.Printf("bridge: connect to %s failed", c.Remote)
+		msg = []byte("*** connect to " + c.Remote + " failed\r")
 	}
 	c.Owner.(Client).SendAGWPE(uint8(c.Port), 'd', 0, c.Remote, c.Local, msg)
 }
