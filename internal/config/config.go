@@ -87,6 +87,12 @@ type Port struct {
 	AX25Version int  // 20 or 22; default 22
 	SREJ        bool // v2.2 selective reject; default true, effective only on mod-128 links
 
+	// RXWedgeTimeout is the read-side watchdog: if a connection has unacked TX
+	// outstanding and NO frame of any kind arrives on this port for this many
+	// seconds, the link is treated as a wedged Bluetooth SPP RX and auto-relinked.
+	// Seconds; 0 disables. Default 20 for bluetooth, 0 for serial/tcp.
+	RXWedgeTimeout int
+
 	KISS kiss.Params // from [kiss.N]; nil fields = don't send
 }
 
@@ -130,7 +136,7 @@ var knownClientKeys = []string{
 	"bdaddr", "channel", "reconnect", "reconnect_delay", "reconnect_max_delay",
 	"ota_baudrate", "init_string", "init_delay", "send_kiss_exit",
 	"host_exit_string", "exit_delay",
-	"ax25_version", "srej",
+	"ax25_version", "srej", "rx_wedge_timeout",
 }
 
 // knownKISSKeys are the recognized keys in [kiss.N].
@@ -536,6 +542,13 @@ func Load(path string) (*Config, error) {
 			}
 		}
 
+		// Read-side wedge watchdog defaults on for Bluetooth (the SPP RX path
+		// can half-wedge under sustained load), off for serial/tcp.
+		rxWedgeDefault := 0
+		if portType == "bluetooth" {
+			rxWedgeDefault = 20
+		}
+
 		port := Port{
 			Name:              getString(s, "name", fmt.Sprintf("Port %d", i)),
 			Type:              portType,
@@ -559,6 +572,7 @@ func Load(path string) (*Config, error) {
 			ExitDelay:         getFloat(s, "exit_delay", 1.0),
 			AX25Version:       ax25Version,
 			SREJ:              getBool(s, "srej", true),
+			RXWedgeTimeout:    getInt(s, "rx_wedge_timeout", rxWedgeDefault),
 		}
 
 		// Parse corresponding [kiss.N] section if present
