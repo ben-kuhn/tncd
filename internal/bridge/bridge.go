@@ -62,8 +62,14 @@ type Bridge struct {
 	rxFrames []uint64 // per-port, live-scoped (reset on offline/cycle)
 	txFrames []uint64
 
-	// idleSweepTimer is held so we can cancel it on Shutdown.
+	// lastRX[port] is when the port last delivered ANY frame. Fuels the
+	// read-side wedge watchdog: no RX for RXWedgeTimeout while TX is unacked
+	// means a wedged Bluetooth SPP RX (see checkRXWedge).
+	lastRX []time.Time
+
+	// idleSweepTimer and rxWedgeTimer are held so we can cancel them on Shutdown.
 	idleSweepTimer *engine.Timer
+	rxWedgeTimer   *engine.Timer
 
 	// verbose and traffic mirror the -v and -t CLI flag counts.
 	// verbose >= 1: per-frame AX.25 log line; verbose >= 2: data preview.
@@ -333,6 +339,9 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 	if f.Port >= 0 && f.Port < len(b.rxFrames) {
 		b.rxFrames[f.Port]++
 	}
+	if f.Port >= 0 && f.Port < len(b.lastRX) {
+		b.lastRX[f.Port] = time.Now() // any frame proves the RX path is alive
+	}
 
 	// Forward to L2 state machine (handles SABM/UA/DM/DISC/FRMR/I/RR/RNR/REJ).
 	b.l2.OnFrame(f.Port, frame)
@@ -419,6 +428,17 @@ func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, sende
 	b.ports = senders
 	b.rxFrames = make([]uint64, len(b.ports))
 	b.txFrames = make([]uint64, len(b.ports))
+	b.initLastRX()
+}
+
+// initLastRX (re)sizes lastRX and seeds every entry to now so a freshly-wired
+// port is never treated as wedged before its first frame arrives.
+func (b *Bridge) initLastRX() {
+	b.lastRX = make([]time.Time, len(b.ports))
+	now := time.Now()
+	for i := range b.lastRX {
+		b.lastRX[i] = now
+	}
 }
 
 // resetPortCounters zeroes a port's live-scoped frame counters (on offline or a
@@ -429,6 +449,9 @@ func (b *Bridge) resetPortCounters(port int) {
 	}
 	b.rxFrames[port] = 0
 	b.txFrames[port] = 0
+	if port < len(b.lastRX) {
+		b.lastRX[port] = time.Now() // fresh link: don't inherit a stale RX age
+	}
 }
 
 // Start opens all KISS ports asynchronously (one goroutine per port so a dead
@@ -484,6 +507,7 @@ func (b *Bridge) Start() error {
 	}
 	b.rxFrames = make([]uint64, len(b.ports))
 	b.txFrames = make([]uint64, len(b.ports))
+	b.initLastRX()
 
 	for i, portCfg := range b.cfg.Ports {
 		idx := i
@@ -494,6 +518,15 @@ func (b *Bridge) Start() error {
 	// Start idle sweep if configured.
 	if b.cfg.Server.IdleTimeout > 0 {
 		b.scheduleIdleSweep()
+	}
+
+	// Start the read-side wedge watchdog if any port enables it (Bluetooth by
+	// default).
+	for _, pc := range b.cfg.Ports {
+		if pc.RXWedgeTimeout > 0 {
+			b.scheduleRXWedgeWatch()
+			break
+		}
 	}
 
 	return nil
@@ -606,6 +639,10 @@ func (b *Bridge) Shutdown() {
 		b.idleSweepTimer.Cancel()
 		b.idleSweepTimer = nil
 	}
+	if b.rxWedgeTimer != nil {
+		b.rxWedgeTimer.Cancel()
+		b.rxWedgeTimer = nil
+	}
 	for _, c := range b.clients {
 		c.CloseTransport()
 	}
@@ -673,21 +710,28 @@ func (b *Bridge) notifyConnectFailed(c *l2pkg.Conn, reason l2pkg.FailReason) {
 	c.Owner.(Client).SendAGWPE(uint8(c.Port), 'd', 0, c.Remote, c.Local, msg)
 }
 
-// ReconnectPort cycles port n's transport: marks it offline, tears down L2
-// state, closes the current transport, and starts a fresh connect (reusing
-// connectPort, which honours the port's reconnect/backoff config). Intended for
-// the monitor API's manual reconnect — recovery for a wedged link that tncd
-// cannot detect on its own (e.g. a half-open Bluetooth RFCOMM channel). Returns
-// false if the index is out of range or the slot has no live transport to cycle.
-// Must be called on the engine loop.
-// bluetoothRelinkSettle is how long a manual relink waits after closing a
-// Bluetooth port before reconnecting, so the RFCOMM link fully tears down
-// rather than being reused half-open. Mirrors the transport-level settle used
-// on Linux; it is the only wedge guard on Windows (raw Winsock has no
-// disconnect-first).
+// bluetoothRelinkSettle is how long a relink waits after closing a Bluetooth
+// port before reconnecting, so the RFCOMM link fully tears down rather than
+// being reused half-open. Mirrors the transport-level settle used on Linux; it
+// is the only wedge guard on Windows (raw Winsock has no disconnect-first).
 const bluetoothRelinkSettle = 2 * time.Second
 
+// ReconnectPort cycles port n's transport with a FULL reset: it tears down L2
+// state (disconnecting any sessions) and starts a fresh connect. Intended for
+// the monitor API's manual reconnect. Returns false if the index is out of
+// range or the slot has no live transport to cycle. Must be on the engine loop.
 func (b *Bridge) ReconnectPort(port int) bool {
+	log.Printf("bridge: port %d manual reconnect requested", port)
+	return b.reconnectPort(port, false)
+}
+
+// reconnectPort closes port n's transport and starts a fresh connect. When
+// keepL2 is false it also tears down L2 (disconnecting sessions). When keepL2 is
+// true it preserves L2 state so an in-flight AX.25 session survives the
+// transport cycle — the session lives in tncd, not the KISS modem, so relinking
+// the SPP link (which resets a wedged Bluetooth RX) lets the transfer RESUME
+// rather than drop. Used by the read-side wedge watchdog.
+func (b *Bridge) reconnectPort(port int, keepL2 bool) bool {
 	if port < 0 || port >= len(b.ports) || port >= len(b.cfg.Ports) {
 		return false
 	}
@@ -696,9 +740,10 @@ func (b *Bridge) ReconnectPort(port int) bool {
 		return false // sentinel or fake sender — nothing to cycle
 	}
 	pc := b.cfg.Ports[port]
-	log.Printf("bridge: port %d manual reconnect requested", port)
 	b.ports[port] = &offlineSentinel{}
-	b.l2.PortOffline(port)
+	if !keepL2 {
+		b.l2.PortOffline(port)
+	}
 	b.resetPortCounters(port)
 	// Close the old port and reconnect off-loop (Close joins the reader
 	// goroutine and can block on socket teardown).
@@ -766,6 +811,64 @@ func (b *Bridge) sweepIdleClients() {
 		}
 	}
 	b.scheduleIdleSweep()
+}
+
+// rxWedgeCheckInterval is how often the read-side wedge watchdog evaluates ports.
+const rxWedgeCheckInterval = 5 * time.Second
+
+// rxWedged is the pure watchdog decision: a port is wedged when it is online,
+// the watchdog is enabled (timeout > 0), a connection has unacked TX awaiting
+// acks, and NO frame of any kind has arrived for at least timeout. Any RX — even
+// another station's beacon — proves the receive path is alive, so in that case
+// missing acks are channel loss (a relink would not help), not a wedge.
+func rxWedged(online bool, timeout time.Duration, hasActiveTX bool, sinceLastRX time.Duration) bool {
+	return online && timeout > 0 && hasActiveTX && sinceLastRX >= timeout
+}
+
+// portAwaitingReply reports whether any session on the port is transmitting and
+// waiting for a reply that arrives as RX: a SABM awaiting UA (Connecting), or
+// unacked I-frames awaiting an ack (Connected). In either state, total RX
+// silence past the timeout means a wedged receive path, not an idle link — so
+// both the handshake wedge (SABM→UA) and the mid-transfer wedge are covered.
+func (b *Bridge) portAwaitingReply(port int) bool {
+	for _, ci := range b.l2.Snapshot() {
+		if ci.Port != port {
+			continue
+		}
+		if ci.State == "connecting" || (ci.State == "connected" && ci.Unacked > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkRXWedge relinks any port whose receive path has wedged: unacked TX
+// outstanding but total RX silence past rx_wedge_timeout. This is the automatic
+// form of the manual "restart the service" recovery for a half-wedged Bluetooth
+// SPP link (writes flow, reads never arrive). Must be called on the engine loop.
+func (b *Bridge) checkRXWedge(now time.Time) {
+	for port := 0; port < len(b.ports) && port < len(b.cfg.Ports); port++ {
+		timeout := time.Duration(b.cfg.Ports[port].RXWedgeTimeout) * time.Second
+		if timeout <= 0 || port >= len(b.lastRX) {
+			continue
+		}
+		since := now.Sub(b.lastRX[port])
+		if !rxWedged(b.ports[port].Online(), timeout, b.portAwaitingReply(port), since) {
+			continue
+		}
+		log.Printf("bridge: port %d RX wedged -- %.0fs silence with unacked TX; relinking (keeping session)",
+			port, since.Seconds())
+		b.lastRX[port] = now // avoid a relink storm while the new link settles
+		b.reconnectPort(port, true) // keep L2 so the transfer resumes, not drops
+	}
+}
+
+// scheduleRXWedgeWatch runs the read-side wedge watchdog on a periodic timer.
+func (b *Bridge) scheduleRXWedgeWatch() {
+	b.rxWedgeTimer = b.eng.After(rxWedgeCheckInterval, func() {
+		b.checkRXWedge(time.Now())
+		b.scheduleRXWedgeWatch()
+	})
 }
 
 // --- Per-port status snapshot ---

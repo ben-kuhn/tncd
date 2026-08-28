@@ -683,3 +683,29 @@ func TestReconnectPortGuards(t *testing.T) {
 		t.Fatalf("non-kiss.Port slot must return false")
 	}
 }
+
+// TestRXWedged exercises the read-side wedge watchdog decision logic.
+func TestRXWedged(t *testing.T) {
+	const to = 20 * time.Second
+	cases := []struct {
+		name     string
+		online   bool
+		timeout  time.Duration
+		activeTX bool
+		since    time.Duration
+		want     bool
+	}{
+		{"wedged: online, TX pending, long silence", true, to, true, 25 * time.Second, true},
+		{"wedged at exactly the timeout", true, to, true, to, true},
+		{"not wedged: offline", false, to, true, 25 * time.Second, false},
+		{"not wedged: watchdog disabled (timeout 0)", true, 0, true, 25 * time.Second, false},
+		{"not wedged: no unacked TX (idle link)", true, to, false, 25 * time.Second, false},
+		{"not wedged: RX arrived recently", true, to, true, 5 * time.Second, false},
+	}
+	for _, tc := range cases {
+		if got := rxWedged(tc.online, tc.timeout, tc.activeTX, tc.since); got != tc.want {
+			t.Errorf("%s: rxWedged(online=%v, to=%v, tx=%v, since=%v) = %v, want %v",
+				tc.name, tc.online, tc.timeout, tc.activeTX, tc.since, got, tc.want)
+		}
+	}
+}

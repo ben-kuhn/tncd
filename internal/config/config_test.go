@@ -283,3 +283,31 @@ func TestKISSTCPIdleTimeoutDefault(t *testing.T) {
 		t.Errorf("kisstcp idle_timeout default = %d, want 300", cfg.KISSTCP.IdleTimeout)
 	}
 }
+
+func TestRXWedgeTimeoutDefault(t *testing.T) {
+	// Bluetooth defaults the read-side watchdog on (20s); serial/tcp off (0);
+	// an explicit value (including 0 to disable) always wins.
+	bt, err := Load(write(t, "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bt.Ports[0].RXWedgeTimeout != 20 {
+		t.Errorf("bluetooth default RXWedgeTimeout = %d, want 20", bt.Ports[0].RXWedgeTimeout)
+	}
+
+	ser, err := Load(write(t, "[client.0]\ntype=serial\ndevice=/dev/ttyUSB0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ser.Ports[0].RXWedgeTimeout != 0 {
+		t.Errorf("serial default RXWedgeTimeout = %d, want 0", ser.Ports[0].RXWedgeTimeout)
+	}
+
+	ov, err := Load(write(t, "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\nrx_wedge_timeout=0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ov.Ports[0].RXWedgeTimeout != 0 {
+		t.Errorf("explicit rx_wedge_timeout=0 = %d, want 0 (disabled)", ov.Ports[0].RXWedgeTimeout)
+	}
+}
