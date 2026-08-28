@@ -414,7 +414,7 @@ def direwolf_pair(tmp_path, request):
 
 def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
                       kiss_port=None, kiss_device=None, callsign="N0CALL-1",
-                      ax25_version=None, api_port=None):
+                      ax25_version=None, api_port=None, full_duplex=1):
     """Write a tncd INI configuration file.
 
     ax25_version: if "2.0" or "2.2", adds ``ax25_version = <value>`` to the
@@ -447,7 +447,7 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
         "persistence = 63",
         "slot_time = 10",
         "tx_tail = 5",
-        "full_duplex = 1",
+        f"full_duplex = {full_duplex}",
     ])
     if api_port is not None:
         lines.extend([
@@ -473,23 +473,29 @@ def tncd_instance(direwolf_pair, tmp_path):
     api_port = free_port()
     config_path = tmp_path / "tncd.ini"
 
+    # Env overrides let the sustained-upload repro match OTA conditions
+    # (v2.0 mod-8 + half-duplex) without affecting other tests.
+    _ver = "2.0" if os.environ.get("TNCD_E2E_V20") else None
+    _fdx = 0 if os.environ.get("TNCD_E2E_HALFDUPLEX") else 1
     if direwolf_pair["kiss_pty_a"]:
         write_tncd_config(
             config_path, agwpe_port, "serial",
             kiss_device=direwolf_pair["kiss_pty_a"],
-            api_port=api_port,
+            api_port=api_port, ax25_version=_ver, full_duplex=_fdx,
         )
     else:
         write_tncd_config(
             config_path, agwpe_port, "tcp",
             kiss_host="127.0.0.1",
             kiss_port=direwolf_pair["kiss_port_a"],
-            api_port=api_port,
+            api_port=api_port, ax25_version=_ver, full_duplex=_fdx,
         )
 
+    tncd_log_path = tmp_path / "tncd.log"
+    tncd_log = open(tncd_log_path, "w+b")
     proc = subprocess.Popen(
-        tncd_command() + ["-c", str(config_path)],
-        stdout=subprocess.PIPE,
+        tncd_command() + ["-v", "-c", str(config_path)],
+        stdout=tncd_log,
         stderr=subprocess.STDOUT,
     )
 
@@ -500,9 +506,11 @@ def tncd_instance(direwolf_pair, tmp_path):
             "agwpe_port": agwpe_port,
             "api_port": api_port,
             "proc": proc,
+            "log_path": tncd_log_path,
         }
     finally:
         kill_proc(proc)
+        tncd_log.close()
 
 
 @pytest.fixture()
@@ -936,6 +944,56 @@ class TestConnectedModeKISSTCP:
     def test_p2p_message_both_directions(self, pat_pair, tmp_path):
         """Send a P2P message with attachment in both directions."""
         _run_p2p_test(pat_pair, tmp_path)
+
+
+class TestSustainedUpload:
+    """Repro for the OTA sustained-upload pacing stall (radio-free loopback).
+
+    tncd (A side) uploads a 10KB incompressible attachment to Direwolf-B over
+    the 1200-baud audio loopback. If tncd's outbound pacing stalls the way it
+    did OTA (window not streaming after acks; 'Y' outstanding frozen), the
+    transfer will not complete.
+    """
+
+    @needs_pat
+    def test_10kb_p2p_upload_a_to_b(self, pat_pair, tncd_instance, tmp_path):
+        attachment_file = tmp_path / "stress10k.bin"
+        attachment_file.write_bytes(os.urandom(10240))
+
+        listener_b = pat_listen(
+            pat_pair["config_b"], pat_pair["mbox_b"], pat_pair["call_b"],
+        )
+        t0 = time.time()
+        err = None
+        try:
+            pat_compose_and_send(
+                config_path=pat_pair["config_a"],
+                mbox_path=pat_pair["mbox_a"],
+                from_call=pat_pair["call_a"],
+                to_call=pat_pair["call_b"],
+                subject="10KB upload stall repro",
+                body="sustained upload pacing test",
+                attachment_path=attachment_file,
+                timeout=300,
+            )
+        except Exception as e:  # noqa: BLE001 - want the diagnostics either way
+            err = e
+        finally:
+            elapsed = time.time() - t0
+            time.sleep(3.0)
+            kill_proc(listener_b)
+
+        log_path = tncd_instance.get("log_path")
+        if log_path and Path(log_path).exists():
+            lines = Path(log_path).read_text(errors="replace").splitlines()
+            print(f"\n=== elapsed {elapsed:.0f}s; tncd log {len(lines)} lines, last 80 ===")
+            for ln in lines[-80:]:
+                print(ln)
+        if err:
+            print(f"\n=== pat send raised: {err}")
+
+        msgs_b = find_received_messages(pat_pair["mbox_b"], pat_pair["call_b"])
+        assert len(msgs_b) > 0, "PAT-B did not receive the 10KB message (upload stalled)"
 
     @needs_pat
     def test_p2p_api_reflects_live_session(self, pat_pair, tncd_instance,
