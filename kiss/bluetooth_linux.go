@@ -3,6 +3,7 @@
 package kiss
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +17,37 @@ import (
 
 // SPP profile UUID for Serial Port Profile.
 const sppUUID = "00001101-0000-1000-8000-00805f9b34fb"
+
+// btCallTimeout bounds a single blocking BlueZ D-Bus method call.
+//
+// godbus's Call blocks until the peer replies, with no deadline of its own. A
+// BlueZ that accepts the call but never answers therefore hangs Open()
+// forever, and because Open() runs on the port's reconnect path the port stops
+// retrying and goes permanently silent with nothing logged — observed live:
+// after "already connected, disconnecting first" the port emitted nothing for
+// over ten minutes while its siblings kept reconnecting normally, and only a
+// restart cleared it.
+//
+// Every BlueZ call on the connect path is bounded by this instead. It is long
+// enough that a busy-but-healthy BlueZ still completes, and short enough that
+// a wedged one costs one backoff interval rather than the port.
+const btCallTimeout = 15 * time.Second
+
+// dbusCaller is the subset of dbus.BusObject that callBlueZ needs. It exists
+// so the timeout behaviour can be tested without a real system bus.
+type dbusCaller interface {
+	CallWithContext(ctx context.Context, method string, flags dbus.Flags,
+		args ...interface{}) *dbus.Call
+}
+
+// callBlueZ invokes a BlueZ method, failing with the context error if it does
+// not reply within timeout. A prompt reply (success or failure) is returned
+// unchanged so callers keep their existing error handling.
+func callBlueZ(obj dbusCaller, timeout time.Duration, method string, args ...interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return obj.CallWithContext(ctx, method, 0, args...).Err
+}
 
 // profilePath is the D-Bus object path at which we export our Profile1 object.
 const profilePath = dbus.ObjectPath("/org/tncd/spp")
@@ -92,7 +124,7 @@ func (bt *bluetoothTransport) Open() error {
 	if err == nil && connected {
 		log.Printf("bluetooth: %s already connected, disconnecting first", bt.cfg.BDAddr)
 		deviceObj := conn.Object("org.bluez", devicePath)
-		if callErr := deviceObj.Call("org.bluez.Device1.Disconnect", 0).Err; callErr != nil {
+		if callErr := callBlueZ(deviceObj, btCallTimeout, "org.bluez.Device1.Disconnect"); callErr != nil {
 			log.Printf("bluetooth: pre-disconnect error (continuing): %v", callErr)
 		}
 		// Settle before reconnecting. An immediate ConnectProfile after Disconnect
@@ -166,7 +198,8 @@ var audioProfileUUIDs = []string{
 // are expected and ignored; only successful drops are logged.
 func disconnectAudioProfiles(deviceObj dbus.BusObject, bdaddr string) {
 	for _, uuid := range audioProfileUUIDs {
-		if err := deviceObj.Call("org.bluez.Device1.DisconnectProfile", 0, uuid).Err; err == nil {
+		if err := callBlueZ(deviceObj, btCallTimeout,
+			"org.bluez.Device1.DisconnectProfile", uuid); err == nil {
 			log.Printf("bluetooth: %s dropped audio profile %s", bdaddr, uuid)
 		}
 	}
@@ -311,10 +344,10 @@ func registerProfileOnce() error {
 		opts := map[string]dbus.Variant{
 			"Role": dbus.MakeVariant("client"),
 		}
-		if err := manager.Call(
-			"org.bluez.ProfileManager1.RegisterProfile", 0,
+		if err := callBlueZ(manager, btCallTimeout,
+			"org.bluez.ProfileManager1.RegisterProfile",
 			profilePath, sppUUID, opts,
-		).Err; err != nil {
+		); err != nil {
 			conn.Close()
 			return fmt.Errorf("bluetooth: RegisterProfile: %w", err)
 		}
@@ -384,9 +417,13 @@ func bdaddrToPath(bdaddr string) (dbus.ObjectPath, error) {
 }
 
 // isDeviceConnected reads the Connected property from a BlueZ Device1 object.
+// Bounded by btCallTimeout: this runs on the connect path, where an unanswered
+// call would wedge the port's reconnect loop.
 func isDeviceConnected(obj dbus.BusObject) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), btCallTimeout)
+	defer cancel()
 	var v dbus.Variant
-	err := obj.Call("org.freedesktop.DBus.Properties.Get", 0,
+	err := obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0,
 		"org.bluez.Device1", "Connected").Store(&v)
 	if err != nil {
 		return false, err
