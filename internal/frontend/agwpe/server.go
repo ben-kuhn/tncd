@@ -56,6 +56,7 @@ type client struct {
 
 	mu              sync.Mutex
 	monitoring      bool
+	rawKISS         bool
 	registeredCalls map[string]bool
 	lastActivity    time.Time
 	closed          bool
@@ -229,6 +230,13 @@ func (c *client) Monitoring() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.monitoring
+}
+
+// RawKISS reports whether this client has enabled raw-KISS reception.
+func (c *client) RawKISS() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rawKISS
 }
 
 // RegisteredCalls returns the set of callsigns registered via 'X' frames.

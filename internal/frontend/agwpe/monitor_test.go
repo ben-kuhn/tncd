@@ -20,6 +20,7 @@ func (c *capClient) SendAGWPE(_ uint8, kind byte, _ uint8, from, to string, data
 	c.n++; c.last.kind = kind; c.last.from = from; c.last.to = to; c.last.data = data
 }
 func (c *capClient) Monitoring() bool                { return c.mon }
+func (c *capClient) RawKISS() bool                   { return false }
 func (c *capClient) RegisteredCalls() map[string]bool { return map[string]bool{} }
 func (c *capClient) LastActivity() time.Time         { return time.Now() }
 func (c *capClient) CloseTransport()                 {}

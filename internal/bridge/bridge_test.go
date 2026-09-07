@@ -66,6 +66,7 @@ func (c *fakeClient) SendAGWPE(port uint8, kind byte, pid uint8, from, to string
 }
 
 func (c *fakeClient) Monitoring() bool { return c.monitoring }
+func (c *fakeClient) RawKISS() bool    { return false }
 func (c *fakeClient) RegisteredCalls() map[string]bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
