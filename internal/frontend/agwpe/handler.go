@@ -286,8 +286,12 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		}
 
 	case 'k':
-		// Toggle raw frame reception mode — not supported, log and ignore (tncd.py:422-425).
-		log.Printf("agwpe: raw KISS mode toggle received (not supported)")
+		// Toggle raw frame reception mode (tncd.py:422-425).
+		c.mu.Lock()
+		c.rawKISS = !c.rawKISS
+		rawKISS := c.rawKISS
+		c.mu.Unlock()
+		log.Printf("agwpe: raw KISS reception %v", rawKISS)
 
 	case 'y':
 		// Outstanding frames on port: reply 0 (tncd.py:427-430).
