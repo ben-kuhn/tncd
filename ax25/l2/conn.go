@@ -70,10 +70,6 @@ type Conn struct {
 	t2Src string
 	t2Dst string
 
-	// Duplicate RR suppression (Task 9/10)
-	lastRRTime time.Time
-	lastRRNR   uint8
-
 	incoming bool // true if this connection was remote-initiated
 
 	// v2.2 fallback state

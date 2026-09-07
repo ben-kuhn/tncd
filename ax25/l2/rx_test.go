@@ -57,31 +57,49 @@ func TestIFramePollGetsImmediateGuardedRR(t *testing.T) {
 	}
 }
 
-func TestDuplicateIFrameDiscardedRRGuarded(t *testing.T) {
+// A duplicate I-frame must not re-deliver its data, but if it carries a poll
+// (P=1) the poll MUST still be answered with RR F=1. AX.25 makes the F=1
+// response to a P=1 poll mandatory (the peer's T1 recovery checkpoint);
+// suppressing it deadlocks a slow half-duplex link into a retransmit storm.
+// Matches Dire Wolf's enquiry_response (ax25_link.c, X.25 2.4.6.11): a
+// duplicate/out-of-range I-frame is discarded but the poll is always answered.
+func TestDuplicateIFramePollAlwaysAnswered(t *testing.T) {
 	tbl, rec, _ := newHarness(1200)
 	connect(t, tbl, rec)
 	f := mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), pf, info([]byte("x")))
 	tbl.OnFrame(0, f)
-	nData, nSent := len(rec.data), len(rec.sent)
-	tbl.OnFrame(0, f) // exact duplicate, same NS, within 3s
+	nData := len(rec.data)
+	rec.sent = nil
+	tbl.OnFrame(0, f) // exact duplicate WITH poll, immediately (within 3s)
 	if len(rec.data) != nData {
-		t.Fatal("duplicate delivered twice")
+		t.Fatal("duplicate data delivered twice")
 	}
-	if len(rec.sent) != nSent {
-		t.Fatal("RR guard failed: duplicate RR F=1 with same N(R) within 3s")
+	if len(rec.sent) != 1 || rec.sent[0].Type != ax25.RR || !rec.sent[0].PF || rec.sent[0].NR != 1 {
+		t.Fatalf("poll on duplicate I-frame not answered with RR F=1 N(R)=1: %+v", rec.sent)
 	}
 }
 
-func TestRRGuardExpiresAfter3s(t *testing.T) {
+// The deadlock scenario: the peer polls repeatedly (P=1) with our N(R) stuck
+// (no forward progress, e.g. a retransmit storm). Every poll must be answered,
+// even back-to-back with the same N(R) — never suppressed by a time window.
+func TestRepeatedPollsEachAnswered(t *testing.T) {
 	tbl, rec, clk := newHarness(1200)
 	connect(t, tbl, rec)
-	f := mkFrame(ax25.I, "N0CALL-2", "KU0HN-10", ns(0), nr(0), pf, info([]byte("x")))
-	tbl.OnFrame(0, f)
-	nSent := len(rec.sent)
-	clk.advance(3100 * time.Millisecond)
-	tbl.OnFrame(0, f)
-	if len(rec.sent) != nSent+1 {
-		t.Fatal("RR should be sent again after guard window")
+	// A pure RR command poll (no new data) with our recvSeq at 0.
+	poll := func() { tbl.OnFrame(0, mkFrame(ax25.RR, "N0CALL-2", "KU0HN-10", nr(0), pf)) }
+	for i := 0; i < 3; i++ {
+		rec.sent = nil
+		poll()
+		clk.advance(1500 * time.Millisecond) // faster than a 3s window
+		got := 0
+		for _, s := range rec.sent {
+			if s.Type == ax25.RR && s.PF {
+				got++
+			}
+		}
+		if got != 1 {
+			t.Fatalf("poll %d: got %d RR F=1 responses, want 1", i, got)
+		}
 	}
 }
 
