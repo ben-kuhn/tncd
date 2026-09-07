@@ -5,9 +5,11 @@ package kiss
 import (
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -22,6 +24,15 @@ var sppServiceClassID = windows.GUID{
 	Data3: 0x1000,
 	Data4: [8]byte{0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB},
 }
+
+// soSndTimeo is Winsock's SO_SNDTIMEO. x/sys/windows defines SO_RCVTIMEO and
+// SO_SNDBUF but not this one.
+const soSndTimeo = 0x1005
+
+// btSendTimeout bounds a single unbuffered send on the SPP socket. It must be
+// comfortably longer than a normal KISS write (microseconds) yet short enough
+// that a wedged TX path is reported while the link is still worth reconnecting.
+const btSendTimeout = 10 * time.Second
 
 // bluetoothTransport is a Windows Bluetooth SPP transport over Winsock RFCOMM.
 type bluetoothTransport struct {
@@ -72,6 +83,30 @@ func (bt *bluetoothTransport) Open() error {
 		windows.WSACleanup()
 		bt.started = false
 		return fmt.Errorf("bluetooth: connect %s: %w", bt.cfg.BDAddr, err)
+	}
+
+	// Make sends report reality instead of succeeding into a buffer that may
+	// never drain.
+	//
+	// By default Winsock copies each send into a stack-level send buffer and
+	// completes immediately, so WSASend returns success even when RFCOMM
+	// flow control (credit starvation) means the bytes never reach the radio.
+	// Observed on-air: frames "sent" over ~20 minutes stayed queued and then
+	// all flushed at once the instant the radio transmitted something inbound
+	// — while tncd had logged every one of them as transmitted.
+	//
+	// SO_SNDBUF=0 disables that intermediate buffering (each send goes
+	// straight to the transport), and SO_SNDTIMEO bounds how long a send may
+	// block. A stalled TX path then surfaces as a real write error, which
+	// takes the port offline for a reconnect instead of silently swallowing
+	// traffic. KISS frames are small and infrequent, so unbuffered sends cost
+	// nothing here.
+	if err := windows.SetsockoptInt(fd, windows.SOL_SOCKET, windows.SO_SNDBUF, 0); err != nil {
+		log.Printf("bluetooth: SO_SNDBUF=0 failed (%v); sends may buffer silently", err)
+	}
+	tv := windows.Timeval{Sec: int32(btSendTimeout / time.Second)}
+	if err := windows.SetsockoptTimeval(fd, windows.SOL_SOCKET, soSndTimeo, &tv); err != nil {
+		log.Printf("bluetooth: SO_SNDTIMEO failed (%v); a stalled send may block indefinitely", err)
 	}
 
 	bt.fd = fd

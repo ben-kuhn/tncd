@@ -128,19 +128,41 @@ func (p *Port) readerLoop() {
 }
 
 // writerLoop drains the TX channel and writes to the transport.
+//
+// A write failure takes the port offline rather than just ending this
+// goroutine. Returning silently would leave the reader running and the port
+// still reporting Online while nothing can ever be transmitted again — frames
+// would be accepted and dropped into a dead TX path with no indication to the
+// operator (the "tncd says it's transmitting, but it isn't" silent failure).
+// Taking the port offline lets the bridge tear down and reconnect it.
 func (p *Port) writerLoop() {
 	defer p.wg.Done()
 	for {
 		select {
 		case frame := <-p.txCh:
 			if _, err := p.tr.Write(frame); err != nil {
-				// Transport gone; drain any remaining sends and return.
+				log.Printf("kiss: port %d TX write failed (%v) -- taking port offline", p.num, err)
+				p.failTX()
 				return
 			}
 		case <-p.stopCh:
 			return
 		}
 	}
+}
+
+// failTX tears the port down after an unrecoverable transport write error.
+// Mirrors the readerLoop's disconnect path: whoever wins the closed CAS owns
+// teardown (stop the peer loop, close the dead transport, fire onOffline).
+func (p *Port) failTX() {
+	if !p.closed.CompareAndSwap(false, true) {
+		return // Close() or the reader already owns teardown
+	}
+	p.online.Store(false)
+	close(p.stopCh)
+	// Closing the transport unblocks the reader goroutine's pending Read.
+	p.tr.Close()
+	p.onOffline(p.num)
 }
 
 // Send wraps ax25Frame in a KISS data frame (port nibble 0) and queues it
