@@ -152,3 +152,36 @@ func TestCallBlueZPassesThrough(t *testing.T) {
 		t.Fatalf("error = %v, want %v", err, want)
 	}
 }
+
+// TestTXStallDetector covers the send-queue drain logic that distinguishes a
+// briefly-busy socket from a TX path that has stopped delivering. On the air
+// this showed as tncd writing T1 polls and retransmits that never reached the
+// radio for two minutes, then flushing all at once when an inbound frame
+// arrived — every write having reported success.
+func TestTXStallDetector(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	var d txStallDetector
+
+	// An empty queue is the healthy steady state: nothing is pending.
+	if got := d.observe(0, t0); got != 0 {
+		t.Fatalf("empty queue: backed up for %v, want 0", got)
+	}
+	// First backed-up sample only starts the clock.
+	if got := d.observe(512, t0); got != 0 {
+		t.Fatalf("first backlog sample: %v, want 0", got)
+	}
+	// Still backed up 40s later: that is the elapsed stall.
+	if got := d.observe(512, t0.Add(40*time.Second)); got != 40*time.Second {
+		t.Fatalf("sustained backlog: %v, want 40s", got)
+	}
+	// Draining clears the tracking, so a later backlog starts a fresh clock.
+	if got := d.observe(0, t0.Add(41*time.Second)); got != 0 {
+		t.Fatalf("drained queue: %v, want 0", got)
+	}
+	if got := d.observe(256, t0.Add(42*time.Second)); got != 0 {
+		t.Fatalf("backlog after drain should restart the clock, got %v", got)
+	}
+	if got := d.observe(256, t0.Add(52*time.Second)); got != 10*time.Second {
+		t.Fatalf("restarted backlog: %v, want 10s", got)
+	}
+}
