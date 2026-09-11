@@ -135,6 +135,29 @@ On **Windows** (2.0 beta), tncd connects natively over Winsock RFCOMM
 and `bdaddr = AA:BB:CC:DD:EE:FF` (the 2.0 installer lists paired devices for
 you). No virtual COM port needed.
 
+> [!WARNING]
+> **Bluetooth on Windows is unreliable for sustained transfers.** Prefer a
+> serial or TCP TNC on Windows; if you need Bluetooth, prefer Linux.
+>
+> The Windows Bluetooth stack can stop delivering data to the radio while
+> still accepting everything tncd writes. Frames are queued instead of
+> transmitted — often for minutes — and then flushed all at once the moment
+> the radio sends something inbound. Receive keeps working throughout, so the
+> link looks healthy: the port stays online, counters advance, and the log
+> shows frames going out. Nothing reaches the air.
+>
+> The cause is RFCOMM credit-based flow control, which is not visible through
+> the socket API on any OS, so tncd cannot see it coming. It is most
+> disruptive during a Winlink session: the peer stops hearing you mid-transfer
+> and eventually disconnects.
+>
+> tncd now detects the condition instead of failing silently — it logs
+> `TX stalled` or `TX write failed`, takes the port offline, and reconnects.
+> **Reconnecting usually does not clear it.** In testing, only resetting the
+> Bluetooth adapter restored transmission (unplug/replug a USB dongle, or
+> disable and re-enable the radio in Device Manager). Power-cycling the TNC
+> may also help. If it recurs, switch that port to serial or TCP.
+
 On **macOS**, use the paired device's virtual serial port — `type = serial`
 with the `/dev/cu.*` path — since tncd has no native macOS Bluetooth transport.
 
