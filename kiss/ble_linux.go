@@ -83,14 +83,11 @@ func (bt *bleTransport) Open() error {
 		}
 	}
 
-	// GATT objects only appear once BlueZ has resolved services, which lags
-	// the connection.
-	if err := waitServicesResolved(dev, bleConnectTimeout); err != nil {
-		conn.Close()
-		return fmt.Errorf("ble: %s: %w", bt.cfg.BDAddr, err)
-	}
-
-	txPath, rxPath, err := findKISSChars(conn, devPath)
+	// Poll for the characteristics themselves rather than trusting
+	// Device1.ServicesResolved. On a dual-mode radio connected over BR/EDR,
+	// BlueZ reports ServicesResolved=true for the SDP record while exposing no
+	// GATT objects at all, so that flag says nothing about GATT being usable.
+	txPath, rxPath, err := waitKISSChars(conn, devPath, bleConnectTimeout)
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("ble: %s: %w", bt.cfg.BDAddr, err)
@@ -222,34 +219,50 @@ func (bt *bleTransport) EnterKISS() error { return nil }
 // ExitKISS is a no-op for the same reason (KISS exit bytes are serial-only).
 func (bt *bleTransport) ExitKISS() {}
 
-// waitServicesResolved polls Device1.ServicesResolved until GATT is available.
-func waitServicesResolved(dev dbus.BusObject, timeout time.Duration) error {
+// waitKISSChars polls until the BLE KISS characteristics appear, then reports
+// precisely why they did not if they never do.
+//
+// The two failure modes need different fixes, so they get different messages:
+// no GATT objects at all means there is no LE link to work with (a dual-mode
+// radio bonded and connected over Bluetooth Classic looks exactly like this),
+// while GATT objects without the KISS service means the radio is connected but
+// not presenting a TNC.
+func waitKISSChars(conn *dbus.Conn, devPath dbus.ObjectPath,
+	timeout time.Duration) (tx, rx dbus.ObjectPath, err error) {
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var v dbus.Variant
-		ctx, cancel := context.WithTimeout(context.Background(), btCallTimeout)
-		err := dev.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0,
-			"org.bluez.Device1", "ServicesResolved").Store(&v)
-		cancel()
-		if err == nil {
-			if resolved, ok := v.Value().(bool); ok && resolved {
-				return nil
-			}
+	gattSeen := 0
+	for {
+		tx, rx, gattSeen = findKISSChars(conn, devPath)
+		if tx != "" && rx != "" {
+			return tx, rx, nil
+		}
+		if !time.Now().Before(deadline) {
+			break
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return fmt.Errorf("GATT services not resolved within %s", timeout)
+	if gattSeen == 0 {
+		return "", "", fmt.Errorf(
+			"no GATT services after %s -- the radio is reachable but not over LE "+
+				"(a device paired for Bluetooth Classic connects as BR/EDR, which has no GATT); "+
+				"pair it over LE for type = ble, or use type = bluetooth for classic SPP", timeout)
+	}
+	return "", "", fmt.Errorf(
+		"BLE KISS service %s not offered (%d other GATT characteristics present) -- "+
+			"is the radio in TNC/KISS mode?", bleKISSService, gattSeen)
 }
 
-// findKISSChars locates the BLE KISS TX and RX characteristics on a device.
-func findKISSChars(conn *dbus.Conn, devPath dbus.ObjectPath) (tx, rx dbus.ObjectPath, err error) {
+// findKISSChars locates the BLE KISS TX and RX characteristics on a device and
+// reports how many GATT characteristics the device exposes overall, which
+// distinguishes "no LE link" from "LE link without a KISS service".
+func findKISSChars(conn *dbus.Conn, devPath dbus.ObjectPath) (tx, rx dbus.ObjectPath, gattCount int) {
 	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 	obj := conn.Object("org.bluez", "/")
 	ctx, cancel := context.WithTimeout(context.Background(), btCallTimeout)
 	defer cancel()
 	if err := obj.CallWithContext(ctx,
 		"org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&objects); err != nil {
-		return "", "", fmt.Errorf("enumerate GATT objects: %w", err)
+		return "", "", 0
 	}
 
 	prefix := string(devPath) + "/"
@@ -261,6 +274,7 @@ func findKISSChars(conn *dbus.Conn, devPath dbus.ObjectPath) (tx, rx dbus.Object
 		if !ok {
 			continue
 		}
+		gattCount++
 		uuid, _ := props["UUID"].Value().(string)
 		switch strings.ToLower(uuid) {
 		case bleKISSTXChar:
@@ -269,11 +283,7 @@ func findKISSChars(conn *dbus.Conn, devPath dbus.ObjectPath) (tx, rx dbus.Object
 			rx = path
 		}
 	}
-	if tx == "" || rx == "" {
-		return "", "", fmt.Errorf(
-			"BLE KISS service %s not found (is the radio in TNC/KISS mode?)", bleKISSService)
-	}
-	return tx, rx, nil
+	return tx, rx, gattCount
 }
 
 // readCharMTU reports the characteristic's negotiated ATT MTU, falling back to
