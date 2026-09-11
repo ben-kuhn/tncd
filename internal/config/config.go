@@ -56,7 +56,7 @@ type APIConfig struct {
 // Port holds one [client.N] section's settings plus the associated [kiss.N] params.
 type Port struct {
 	Name string // default "Port N"
-	Type string // "serial" | "tcp" | "bluetooth"
+	Type string // "serial" | "tcp" | "bluetooth" (classic SPP) | "ble" (BLE KISS)
 
 	// serial
 	Device         string
@@ -489,9 +489,9 @@ func Load(path string) (*Config, error) {
 		if portType == "" {
 			return nil, fmt.Errorf("[%s] missing required 'type' field", pe.name)
 		}
-		validTypes := map[string]bool{"serial": true, "tcp": true, "bluetooth": true}
+		validTypes := map[string]bool{"serial": true, "tcp": true, "bluetooth": true, "ble": true}
 		if !validTypes[portType] {
-			return nil, fmt.Errorf("[%s] invalid type %q; must be one of: bluetooth, serial, tcp", pe.name, portType)
+			return nil, fmt.Errorf("[%s] invalid type %q; must be one of: ble, bluetooth, serial, tcp", pe.name, portType)
 		}
 
 		// Validate required fields per type
@@ -511,9 +511,9 @@ func Load(path string) (*Config, error) {
 			if len(missingFields) > 0 {
 				return nil, fmt.Errorf("[%s] type=tcp is missing required field(s): %v", pe.name, missingFields)
 			}
-		case "bluetooth":
+		case "bluetooth", "ble":
 			if !s.HasKey("bdaddr") || s.Key("bdaddr").String() == "" {
-				return nil, fmt.Errorf("[%s] type=bluetooth is missing required field: bdaddr", pe.name)
+				return nil, fmt.Errorf("[%s] type=%s is missing required field: bdaddr", pe.name, portType)
 			}
 		}
 
@@ -598,14 +598,14 @@ func Load(path string) (*Config, error) {
 // Load already performs all validation; this method is provided for
 // post-load re-validation after programmatic modification.
 func (c *Config) Validate() error {
-	validTypes := map[string]bool{"serial": true, "tcp": true, "bluetooth": true}
+	validTypes := map[string]bool{"serial": true, "tcp": true, "bluetooth": true, "ble": true}
 	for i, p := range c.Ports {
 		secName := fmt.Sprintf("client.%d", i)
 		if p.Type == "" {
 			return fmt.Errorf("[%s] missing required 'type' field", secName)
 		}
 		if !validTypes[p.Type] {
-			return fmt.Errorf("[%s] invalid type %q; must be one of: bluetooth, serial, tcp", secName, p.Type)
+			return fmt.Errorf("[%s] invalid type %q; must be one of: ble, bluetooth, serial, tcp", secName, p.Type)
 		}
 		switch p.Type {
 		case "serial":
@@ -619,9 +619,9 @@ func (c *Config) Validate() error {
 			if p.TCPPort == 0 {
 				return fmt.Errorf("[%s] type=tcp is missing required field: port", secName)
 			}
-		case "bluetooth":
+		case "bluetooth", "ble":
 			if p.BDAddr == "" {
-				return fmt.Errorf("[%s] type=bluetooth is missing required field: bdaddr", secName)
+				return fmt.Errorf("[%s] type=%s is missing required field: bdaddr", secName, p.Type)
 			}
 		}
 	}

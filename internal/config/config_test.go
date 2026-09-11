@@ -311,3 +311,47 @@ func TestRXWedgeTimeoutDefault(t *testing.T) {
 		t.Errorf("explicit rx_wedge_timeout=0 = %d, want 0 (disabled)", ov.Ports[0].RXWedgeTimeout)
 	}
 }
+
+// TestBLEPortType: type=ble is accepted and, like classic bluetooth, requires
+// a bdaddr. Both address the same radio; they differ only in transport.
+func TestBLEPortType(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "ble.ini")
+	if err := os.WriteFile(good, []byte(`
+[server]
+callsign = N0CALL
+
+[client.0]
+type = ble
+bdaddr = AA:BB:CC:DD:EE:FF
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(good)
+	if err != nil {
+		t.Fatalf("type=ble rejected: %v", err)
+	}
+	if cfg.Ports[0].Type != "ble" {
+		t.Fatalf("Type = %q, want ble", cfg.Ports[0].Type)
+	}
+	if cfg.Ports[0].BDAddr != "AA:BB:CC:DD:EE:FF" {
+		t.Fatalf("BDAddr = %q", cfg.Ports[0].BDAddr)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected a valid ble port: %v", err)
+	}
+
+	bad := filepath.Join(dir, "ble-nobdaddr.ini")
+	if err := os.WriteFile(bad, []byte(`
+[server]
+callsign = N0CALL
+
+[client.0]
+type = ble
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(bad); err == nil {
+		t.Fatal("type=ble without bdaddr was accepted")
+	}
+}
