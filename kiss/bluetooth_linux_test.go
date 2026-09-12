@@ -154,10 +154,13 @@ func TestCallBlueZPassesThrough(t *testing.T) {
 }
 
 // TestTXStallDetector covers the send-queue drain logic that distinguishes a
-// briefly-busy socket from a TX path that has stopped delivering. On the air
-// this showed as tncd writing T1 polls and retransmits that never reached the
-// radio for two minutes, then flushing all at once when an inbound frame
-// arrived — every write having reported success.
+// briefly-busy socket from one the kernel can no longer hand off to the radio.
+//
+// Scope note, because the naming invites the wrong assumption: this tracks the
+// HOST send queue only. The on-air UV-PRO stall that prompted this code shows
+// depth 0 throughout — the radio takes the bytes and buffers them — so these
+// cases model RFCOMM credit starvation, not that failure. See the txStallTimeout
+// comment for which layer covers what.
 func TestTXStallDetector(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	var d txStallDetector

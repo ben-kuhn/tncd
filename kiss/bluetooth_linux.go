@@ -163,6 +163,9 @@ func (bt *bluetoothTransport) Open() error {
 	case fd := <-fdCh:
 		// NewConnection has already dup'd or taken ownership; wrap as *os.File.
 		bt.file = os.NewFile(uintptr(fd), fmt.Sprintf("bt-spp-%s", bt.cfg.BDAddr))
+		// Fresh socket, fresh queue: clear any stall clock left from a previous
+		// link so a reopened transport cannot trip on the old one's backlog.
+		bt.txStall = txStallDetector{}
 		log.Printf("bluetooth: SPP socket ready (fd=%d) for %s", fd, bt.cfg.BDAddr)
 		// Drop any Bluetooth audio profiles now that SPP is up. On some radios
 		// (notably the UV-PRO) an active audio profile — auto-connected by the
@@ -224,16 +227,40 @@ func (bt *bluetoothTransport) Read(b []byte) (int, error) {
 	return bt.file.Read(b)
 }
 
-// txStallTimeout is how long the socket send queue may stay continuously
-// backed up before the TX path is declared stalled.
+// What this detector can and cannot see
 //
-// KISS frames are small and the Bluetooth link is far faster than 1200-baud
-// RF, so in normal operation the kernel hands each frame to the radio in
-// milliseconds and the queue reads empty between writes. A queue that stays
-// backed up for this long is not congestion, it is a link that has stopped
-// delivering. The value sits above the L2 T1 poll interval so an ordinary
-// retransmit cycle cannot trip it, and below the peer's own give-up time so
-// the port is cycled while the session is still worth saving.
+// It watches ONE layer: the host's own socket send queue. That covers the case
+// where the peer stops granting RFCOMM credits — the kernel then cannot hand
+// the bytes over, they pile up in our send buffer, and the depth below grows
+// until this trips.
+//
+// It does NOT cover a radio that accepts the bytes and then sits on them, and
+// the field evidence says to expect exactly that. Over two minutes of a real
+// UV-PRO stall (2026-09-11, frames written at 21:58:42 that an independent air
+// monitor did not hear until 22:00:49 — 126s later) every write returned the
+// full byte count in 4-21 microseconds and the depth below read ZERO. Sampled
+// across 61 writes in that session the queue was empty for 42 of them and
+// otherwise held only the transient single-frame values. The bytes left the
+// host promptly; the radio buffered them. Nothing observable from this side of
+// the socket changes during such a stall, so do not read a quiet detector as
+// evidence that TX is healthy.
+//
+// The layer that CAN see the radio-side case is the bridge's read-side wedge
+// watchdog (rx_wedge_timeout): it notices that nothing is coming back while TX
+// is outstanding, which is the only host-visible symptom a buffering radio
+// produces. Classic SPP has no delivery acknowledgement, so per-frame proof is
+// impossible here by construction; a BLE GATT write-with-response is the
+// transport-level fix, since that ack originates at the radio.
+
+// txStallTimeout is how long the send queue may stay continuously backed up
+// before the TX path is declared stalled. KISS frames are small and the
+// Bluetooth link is far faster than 1200-baud RF, so in normal operation the
+// kernel hands each frame to the radio in milliseconds and the queue reads
+// empty between writes. A queue that stays backed up for this long is not
+// congestion, it is a link that has stopped draining. The value sits above the
+// L2 T1 poll interval so an ordinary retransmit cycle cannot trip it, and below
+// the peer's own give-up time so the port is cycled while the session is still
+// worth saving.
 const txStallTimeout = 30 * time.Second
 
 // txStallDetector tracks how long the socket send queue has been continuously
@@ -293,18 +320,21 @@ func (bt *bluetoothTransport) txQueueDepth() (int, error) {
 	return depth, inner
 }
 
-// checkTXDrain fails the write when the send queue has been stuck for
-// txStallTimeout. A successful write into a queue that never drains is the
-// silent failure this guards against: the socket accepts every frame and
-// reports success while nothing reaches the air, so without this the transport
-// has no way to tell the bridge that TX is dead. Returning an error routes it
-// through the port's normal teardown, taking the port offline for a reconnect.
+// checkTXDrain fails the write when our send queue has been backed up for
+// txStallTimeout, i.e. the kernel has bytes for the radio that it cannot hand
+// over. Returning an error routes it through the port's normal teardown, taking
+// the port offline for a reconnect. See the txStallTimeout comment for why this
+// covers only credit starvation and not a radio that buffers internally.
 //
 // Sampled *before* handing over the next frame, so it measures whether earlier
 // frames drained. Sampling afterwards would always count the bytes just
 // written — measured at ~960 on a healthy link for a 27-byte KISS frame, since
 // the depth includes socket-buffer overhead for the frame still in flight —
 // and the queue would never appear empty, tripping this on a working link.
+//
+// Only Write samples this, which is sufficient for the failure it targets: a
+// starved link still has L2 pushing T1 polls and retransmits into it, so
+// samples keep arriving for as long as anything is worth transmitting.
 //
 // If the query itself fails the write is left alone: no detection is better
 // than refusing to transmit on a link that may be perfectly healthy.
@@ -314,8 +344,8 @@ func (bt *bluetoothTransport) checkTXDrain() error {
 		return nil
 	}
 	if stalled := bt.txStall.observe(depth, time.Now()); stalled >= txStallTimeout {
-		return fmt.Errorf("bluetooth: TX stalled -- %d bytes queued to %s for %s with no delivery",
-			depth, bt.cfg.BDAddr, stalled.Round(time.Second))
+		return fmt.Errorf("bluetooth: TX stalled -- %d bytes stuck in the host send queue for %s, "+
+			"%s is not accepting data", depth, stalled.Round(time.Second), bt.cfg.BDAddr)
 	}
 	return nil
 }
@@ -326,8 +356,13 @@ func (bt *bluetoothTransport) Write(b []byte) (int, error) {
 	}
 	// Check the backlog before adding to it: a write "succeeding" here only
 	// means the kernel accepted the bytes, so the question that matters is
-	// whether everything written earlier actually drained to the radio.
-	stallErr := bt.checkTXDrain()
+	// whether everything written earlier actually drained to the radio. Bail
+	// out rather than queueing behind them — the port is about to be torn down,
+	// and piling another frame onto a queue we have just declared dead can only
+	// block us in the kernel.
+	if err := bt.checkTXDrain(); err != nil {
+		return 0, err
+	}
 
 	if bt.ioDebug {
 		// Log START before the write and DONE after, with elapsed time. If a
@@ -340,16 +375,9 @@ func (bt *bluetoothTransport) Write(b []byte) (int, error) {
 			len(b), backlog, qErr, hexHead(b, 24))
 		n, err := bt.file.Write(b)
 		log.Printf("bluetooth: WRITE done  %d/%d bytes in %s err=%v", n, len(b), time.Since(start), err)
-		if err != nil {
-			return n, err
-		}
-		return n, stallErr
-	}
-	n, err := bt.file.Write(b)
-	if err != nil {
 		return n, err
 	}
-	return n, stallErr
+	return bt.file.Write(b)
 }
 
 func (bt *bluetoothTransport) Close() error {
