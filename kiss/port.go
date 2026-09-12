@@ -114,8 +114,11 @@ func (p *Port) readerLoop() {
 			// EOF or transport error.
 			if p.closed.CompareAndSwap(false, true) {
 				// Unexpected disconnect: we won the CAS, so we are responsible
-				// for teardown. Close stopCh to stop the writer, then close the
-				// dead transport (no ExitKISS on a dead link), and fire onOffline.
+				// for teardown. Report the cause first — "port N went offline"
+				// on its own gives an operator nothing to act on, and the
+				// distinction between a clean EOF, a removed device and a
+				// transport error decides what they should do about it.
+				log.Printf("kiss: port %d read failed (%v) -- taking port offline", p.num, err)
 				p.online.Store(false)
 				close(p.stopCh)
 				p.tr.Close()
