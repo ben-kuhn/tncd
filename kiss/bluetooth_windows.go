@@ -3,12 +3,14 @@
 package kiss
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -34,6 +36,58 @@ const soSndTimeo = 0x1005
 // that a wedged TX path is reported while the link is still worth reconnecting.
 const btSendTimeout = 10 * time.Second
 
+// Connect retry policy.
+//
+// BlueZ absorbs transient connect failures internally (InProgress,
+// br-connection-busy) and only reports once it has genuinely given up, so the
+// Linux path effectively retries for free. A raw Winsock connect() has no such
+// cushion: one refused page surfaces immediately and, without this loop, costs
+// a full bridge backoff cycle (5s growing to 60s) before the next attempt.
+//
+// Field observation this is sized against: a UV-PRO refused connect() with
+// WSAENETUNREACH for ~95 minutes straight and then succeeded on an ordinary
+// retry with nothing else changed. Short in-Open retries turn that class of
+// transient refusal into a brief hiccup instead of minutes of dead air.
+const (
+	btConnectAttempts   = 3
+	btConnectRetryDelay = 2 * time.Second
+)
+
+// wsaErrorNames renders the Winsock failures a Bluetooth connect actually
+// produces. The default rendering is a prose sentence that is easy to misread
+// — WSAETIMEDOUT in particular says "the connected party did not properly
+// respond", which looks like an application-level timeout rather than a page
+// timeout — and prose cannot be grepped or compared across runs. Logging
+// NAME (number) keeps failures unambiguous and diffable.
+var wsaErrorNames = map[syscall.Errno]string{
+	windows.WSAENETUNREACH:  "WSAENETUNREACH",
+	windows.WSAETIMEDOUT:    "WSAETIMEDOUT",
+	windows.WSAECONNREFUSED: "WSAECONNREFUSED",
+	windows.WSAEHOSTDOWN:    "WSAEHOSTDOWN",
+	windows.WSAEHOSTUNREACH: "WSAEHOSTUNREACH",
+	windows.WSAEINVAL:       "WSAEINVAL",
+	windows.WSAEACCES:       "WSAEACCES",
+	wsaServiceNotFound:      "WSASERVICE_NOT_FOUND",
+}
+
+// wsaServiceNotFound is WSASERVICE_NOT_FOUND, returned when an SDP service
+// search finds no matching record on the remote device. x/sys/windows does not
+// define it. It is the specific failure that pinning `channel` avoids.
+const wsaServiceNotFound = syscall.Errno(10108)
+
+// describeWSAError renders err as "NAME (number): prose", falling back to the
+// bare error when it is not a Winsock errno.
+func describeWSAError(err error) string {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return err.Error()
+	}
+	if name, ok := wsaErrorNames[errno]; ok {
+		return fmt.Sprintf("%s (%d): %v", name, uint32(errno), err)
+	}
+	return fmt.Sprintf("winsock error %d: %v", uint32(errno), err)
+}
+
 // bluetoothTransport is a Windows Bluetooth SPP transport over Winsock RFCOMM.
 type bluetoothTransport struct {
 	cfg     BluetoothConfig
@@ -44,9 +98,9 @@ type bluetoothTransport struct {
 }
 
 // NewBluetoothTransport returns a Windows Bluetooth SPP transport. It connects
-// to cfg.BDAddr; the SPP service UUID drives SDP channel discovery, so
-// cfg.Channel is informational only. The device must already be paired in
-// Windows.
+// to cfg.BDAddr, using cfg.Channel as the RFCOMM channel when set and otherwise
+// resolving one from the SPP service UUID via SDP. The device must already be
+// paired in Windows.
 func NewBluetoothTransport(cfg BluetoothConfig) Transport {
 	return &bluetoothTransport{cfg: cfg, fd: windows.InvalidHandle}
 }
@@ -66,23 +120,28 @@ func (bt *bluetoothTransport) Open() error {
 	}
 	bt.started = true
 
-	fd, err := windows.Socket(windows.AF_BTH, windows.SOCK_STREAM, windows.BTHPROTO_RFCOMM)
+	// Channel: an explicit config value pins it and skips the SDP lookup;
+	// otherwise the SPP UUID drives discovery inside connect().
+	channel, pinned, err := parseSPPChannel(bt.cfg.Channel)
 	if err != nil {
 		windows.WSACleanup()
 		bt.started = false
-		return fmt.Errorf("bluetooth: socket: %w", err)
+		return err
+	}
+	sa := &windows.SockaddrBth{BtAddr: addr}
+	route := "SDP lookup"
+	if pinned {
+		sa.Port = uint32(channel)
+		route = fmt.Sprintf("pinned channel %d", channel)
+	} else {
+		sa.ServiceClassId = sppServiceClassID // Port 0 + UUID => SDP channel lookup
 	}
 
-	sa := &windows.SockaddrBth{
-		BtAddr:         addr,
-		ServiceClassId: sppServiceClassID,
-		Port:           0, // 0 + ServiceClassId => SDP channel lookup
-	}
-	if err := windows.Connect(fd, sa); err != nil {
-		windows.Closesocket(fd)
+	fd, err := bt.dial(sa, route)
+	if err != nil {
 		windows.WSACleanup()
 		bt.started = false
-		return fmt.Errorf("bluetooth: connect %s: %w", bt.cfg.BDAddr, err)
+		return err
 	}
 
 	// Make sends report reality instead of succeeding into a buffer that may
@@ -104,14 +163,66 @@ func (bt *bluetoothTransport) Open() error {
 	if err := windows.SetsockoptInt(fd, windows.SOL_SOCKET, windows.SO_SNDBUF, 0); err != nil {
 		log.Printf("bluetooth: SO_SNDBUF=0 failed (%v); sends may buffer silently", err)
 	}
-	tv := windows.Timeval{Sec: int32(btSendTimeout / time.Second)}
-	if err := windows.SetsockoptTimeval(fd, windows.SOL_SOCKET, soSndTimeo, &tv); err != nil {
-		log.Printf("bluetooth: SO_SNDTIMEO failed (%v); a stalled send may block indefinitely", err)
+	// Winsock takes SO_SNDTIMEO as a DWORD of milliseconds, not the BSD
+	// struct timeval. x/sys/windows has no timeval path to offer here —
+	// SetsockoptTimeval is a stub that unconditionally returns EWINDOWS — so
+	// setting it that way silently left every Windows build with no send
+	// timeout at all. SetsockoptInt passes the DWORD the API actually wants.
+	timeoutMS := int(btSendTimeout / time.Millisecond)
+	if err := windows.SetsockoptInt(fd, windows.SOL_SOCKET, soSndTimeo, timeoutMS); err != nil {
+		log.Printf("bluetooth: SO_SNDTIMEO=%dms failed (%v); a stalled send may block indefinitely", timeoutMS, err)
 	}
 
 	bt.fd = fd
 	bt.open = true
 	return nil
+}
+
+// dial makes up to btConnectAttempts connect() calls, returning the connected
+// socket or the last failure.
+//
+// Every attempt is logged with its duration and a decoded Winsock error. That
+// instrumentation is the point: connect failures here have been intermittent
+// and self-resolving, so the question a log has to answer is "which call
+// failed, how long did it block, and with exactly which errno" — for example
+// WSASERVICE_NOT_FOUND (SDP found no SPP record, so pin `channel`) versus
+// WSAETIMEDOUT (the radio never answered the page) versus WSAENETUNREACH.
+// Without the numbers those cases are indistinguishable prose.
+func (bt *bluetoothTransport) dial(sa *windows.SockaddrBth, route string) (windows.Handle, error) {
+	var lastErr error
+	started := time.Now()
+
+	for attempt := 1; attempt <= btConnectAttempts; attempt++ {
+		fd, err := windows.Socket(windows.AF_BTH, windows.SOCK_STREAM, windows.BTHPROTO_RFCOMM)
+		if err != nil {
+			return windows.InvalidHandle, fmt.Errorf("bluetooth: socket: %w", err)
+		}
+
+		attemptStart := time.Now()
+		err = windows.Connect(fd, sa)
+		elapsed := time.Since(attemptStart)
+
+		if err == nil {
+			log.Printf("bluetooth: connected to %s via %s on attempt %d/%d (%s, %s total)",
+				bt.cfg.BDAddr, route, attempt, btConnectAttempts,
+				elapsed.Round(time.Millisecond), time.Since(started).Round(time.Millisecond))
+			return fd, nil
+		}
+
+		windows.Closesocket(fd)
+		lastErr = err
+		log.Printf("bluetooth: connect attempt %d/%d to %s via %s failed after %s -- %s",
+			attempt, btConnectAttempts, bt.cfg.BDAddr, route,
+			elapsed.Round(time.Millisecond), describeWSAError(err))
+
+		if attempt < btConnectAttempts {
+			time.Sleep(btConnectRetryDelay)
+		}
+	}
+
+	return windows.InvalidHandle, fmt.Errorf("bluetooth: connect %s via %s: %d attempts over %s, last error %s",
+		bt.cfg.BDAddr, route, btConnectAttempts,
+		time.Since(started).Round(time.Millisecond), describeWSAError(lastErr))
 }
 
 func (bt *bluetoothTransport) Read(p []byte) (int, error) {
@@ -136,6 +247,14 @@ func (bt *bluetoothTransport) Write(p []byte) (int, error) {
 	buf := windows.WSABuf{Len: uint32(len(p)), Buf: &p[0]}
 	var sent uint32
 	if err := windows.WSASend(bt.fd, &buf, 1, &sent, 0, nil, nil); err != nil {
+		// WSAETIMEDOUT here is SO_SNDTIMEO expiring, not a connect failure —
+		// but Windows renders it as "the connected party did not properly
+		// respond", which reads like one. Say which layer actually stalled so
+		// the log points at the radio's TX path instead of the link setup.
+		if err == windows.WSAETIMEDOUT {
+			return 0, fmt.Errorf("bluetooth: TX stalled -- %s did not accept %d bytes within %s",
+				bt.cfg.BDAddr, len(p), btSendTimeout)
+		}
 		return 0, err
 	}
 	return int(sent), nil
