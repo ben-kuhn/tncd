@@ -60,21 +60,32 @@ func (p *Port) Start() error {
 }
 
 // sendParams writes any non-nil KISS parameter frames to the transport.
+//
+// A failure here is logged rather than fatal: the TNC keeps its previous (or
+// default) timing, which is degraded but workable, and if the transport is
+// genuinely dead the first real frame will trip writerLoop's failTX and take
+// the port offline with a clearer error. What it must not do is fail silently
+// — an unset TXDelay produces truncated transmissions that look like RF
+// trouble rather than a configuration write that never landed.
 func (p *Port) sendParams() {
-	if p.params.TXDelay != nil {
-		p.tr.Write(WrapCommand(0, 0x01, uint8(*p.params.TXDelay)))
+	params := []struct {
+		name string
+		code uint8
+		val  *int
+	}{
+		{"txdelay", 0x01, p.params.TXDelay},
+		{"persistence", 0x02, p.params.Persistence},
+		{"slottime", 0x03, p.params.SlotTime},
+		{"txtail", 0x04, p.params.TXTail},
+		{"fullduplex", 0x05, p.params.FullDuplex},
 	}
-	if p.params.Persistence != nil {
-		p.tr.Write(WrapCommand(0, 0x02, uint8(*p.params.Persistence)))
-	}
-	if p.params.SlotTime != nil {
-		p.tr.Write(WrapCommand(0, 0x03, uint8(*p.params.SlotTime)))
-	}
-	if p.params.TXTail != nil {
-		p.tr.Write(WrapCommand(0, 0x04, uint8(*p.params.TXTail)))
-	}
-	if p.params.FullDuplex != nil {
-		p.tr.Write(WrapCommand(0, 0x05, uint8(*p.params.FullDuplex)))
+	for _, prm := range params {
+		if prm.val == nil {
+			continue
+		}
+		if _, err := p.tr.Write(WrapCommand(0, prm.code, uint8(*prm.val))); err != nil {
+			log.Printf("kiss: port %d could not set %s=%d (%v)", p.num, prm.name, *prm.val, err)
+		}
 	}
 }
 

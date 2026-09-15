@@ -16,14 +16,26 @@ import (
 // fakeSender implements bridge.PortSender, recording data + command sends.
 type fakeSender struct {
 	ch   chan []byte
-	cmds chan struct{ cmd uint8; val []byte }
+	cmds chan struct {
+		cmd uint8
+		val []byte
+	}
 }
+
 func newFakeSender() *fakeSender {
-	return &fakeSender{ch: make(chan []byte, 8), cmds: make(chan struct{ cmd uint8; val []byte }, 8)}
+	return &fakeSender{ch: make(chan []byte, 8), cmds: make(chan struct {
+		cmd uint8
+		val []byte
+	}, 8)}
 }
-func (f *fakeSender) Send(raw []byte)                        { f.ch <- append([]byte{}, raw...) }
-func (f *fakeSender) SendCommand(cmd uint8, val []byte)      { f.cmds <- struct{ cmd uint8; val []byte }{cmd, append([]byte{}, val...)} }
-func (f *fakeSender) Online() bool                           { return true }
+func (f *fakeSender) Send(raw []byte) { f.ch <- append([]byte{}, raw...) }
+func (f *fakeSender) SendCommand(cmd uint8, val []byte) {
+	f.cmds <- struct {
+		cmd uint8
+		val []byte
+	}{cmd, append([]byte{}, val...)}
+}
+func (f *fakeSender) Online() bool { return true }
 
 func newBridge(t *testing.T, eng *engine.Engine, fs *fakeSender) *bridge.Bridge {
 	t.Helper()
@@ -189,7 +201,7 @@ func TestKISSTCPExitKISSDropped(t *testing.T) {
 	}
 	defer conn.Close()
 
-	conn.Write([]byte{kiss.FEND, 0xFF, kiss.FEND}) // exit-KISS
+	conn.Write([]byte{kiss.FEND, 0xFF, kiss.FEND})         // exit-KISS
 	conn.Write(kiss.WrapCommandBytes(0, 0x01, []byte{40})) // TXDELAY should forward
 	select {
 	case c := <-fs.cmds:

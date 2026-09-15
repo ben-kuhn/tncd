@@ -25,11 +25,11 @@ func newReconnFake() *reconnFakeTransport {
 	return &reconnFakeTransport{readCh: make(chan struct{})}
 }
 
-func (f *reconnFakeTransport) Open() error                    { atomic.AddInt32(&f.opens, 1); return nil }
-func (f *reconnFakeTransport) EnterKISS() error               { return nil }
-func (f *reconnFakeTransport) ExitKISS()                      {}
-func (f *reconnFakeTransport) Write(p []byte) (int, error)    { return len(p), nil }
-func (f *reconnFakeTransport) Read(p []byte) (int, error)     { <-f.readCh; return 0, io.EOF }
+func (f *reconnFakeTransport) Open() error                 { atomic.AddInt32(&f.opens, 1); return nil }
+func (f *reconnFakeTransport) EnterKISS() error            { return nil }
+func (f *reconnFakeTransport) ExitKISS()                   {}
+func (f *reconnFakeTransport) Write(p []byte) (int, error) { return len(p), nil }
+func (f *reconnFakeTransport) Read(p []byte) (int, error)  { <-f.readCh; return 0, io.EOF }
 func (f *reconnFakeTransport) Close() error {
 	f.once.Do(func() { close(f.readCh) })
 	return nil

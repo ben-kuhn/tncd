@@ -91,8 +91,8 @@ type Frame struct {
 	Type     FrameType
 	NR, NS   uint8 // 0–7 (mod-8) or 0–127 (mod-128); NS only for I, NR for I and S frames
 	PF       bool
-	Modulo   uint8 // 8 (default/mod-8) or 128 (mod-128 extended I/S control)
-	Command  bool  // true = command (dst C-bit set), false = response
+	Modulo   uint8  // 8 (default/mod-8) or 128 (mod-128 extended I/S control)
+	Command  bool   // true = command (dst C-bit set), false = response
 	PID      uint8  // I and UI frames only
 	Info     []byte // I and UI frames only
 }
@@ -286,7 +286,7 @@ func (f *Frame) Bytes() []byte {
 	switch {
 	case f.Type.IsI():
 		if f.Modulo == 128 {
-			buf = append(buf, f.NS<<1)                 // bit0=0, NS in 7..1
+			buf = append(buf, f.NS<<1)               // bit0=0, NS in 7..1
 			buf = append(buf, f.NR<<1|boolBit(f.PF)) // NR in 7..1, PF bit0
 		} else {
 			buf = append(buf, f.NR<<5|boolBit(f.PF)<<4|f.NS<<1)

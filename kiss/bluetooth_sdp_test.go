@@ -17,9 +17,9 @@ func TestParseBTAddrLE(t *testing.T) {
 		{"3481f4aab3d3", [6]byte{0xD3, 0xB3, 0xAA, 0xF4, 0x81, 0x34}, false},      // no sep, lowercase
 		{"00:00:00:00:00:01", [6]byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
 		{"38:D2:00:01:52:8F", [6]byte{0x8F, 0x52, 0x01, 0x00, 0xD2, 0x38}, false},
-		{"34:81:F4:AA:B3", [6]byte{}, true},        // too short
-		{"34:81:F4:AA:B3:ZZ", [6]byte{}, true},     // bad hex
-		{"", [6]byte{}, true},                      // empty
+		{"34:81:F4:AA:B3", [6]byte{}, true},    // too short
+		{"34:81:F4:AA:B3:ZZ", [6]byte{}, true}, // bad hex
+		{"", [6]byte{}, true},                  // empty
 	}
 	for _, tc := range tests {
 		got, err := parseBTAddrLE(tc.in)

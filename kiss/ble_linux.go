@@ -14,6 +14,16 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
+// BLE KISS service and characteristic UUIDs, lowercase to match BlueZ.
+const (
+	// bleKISSService is advertised by conforming TNCs.
+	bleKISSService = "00000001-ba2a-46c9-ae49-01b0961f68bb"
+	// bleKISSTXChar accepts KISS data written to the TNC, with response.
+	bleKISSTXChar = "00000002-ba2a-46c9-ae49-01b0961f68bb"
+	// bleKISSRXChar notifies KISS data coming from the TNC.
+	bleKISSRXChar = "00000003-ba2a-46c9-ae49-01b0961f68bb"
+)
+
 // BLE KISS transport over BlueZ's D-Bus GATT API.
 //
 // Connect, resolve GATT, subscribe to the RX characteristic, and write KISS

@@ -122,6 +122,7 @@ func (r *Runtime) Wait() { r.eng.Run() }
 //  2. close the listeners (AGWPE, KISS-over-TCP, API),
 //  3. bridge.Shutdown() (KISS exit strings + port close),
 //  4. engine.Stop().
+//
 // Safe to call from any goroutine.
 func (r *Runtime) Shutdown() {
 	r.eng.Do(func() {

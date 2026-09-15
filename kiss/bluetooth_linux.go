@@ -59,11 +59,6 @@ type bluetoothTransport struct {
 	cfg  BluetoothConfig
 	file *os.File // raw OS file wrapping the socket fd
 
-	// ioDebug logs every Read/Write with byte counts, duration, and errors.
-	// Enabled by setting TNCD_BT_WRITE_DEBUG in the environment. Used to prove
-	// whether a write actually delivers or parks (no error, no bytes on air).
-	ioDebug bool
-
 	// txStall tracks how long the socket send queue has been backed up.
 	// Touched only by the writer goroutine via Write.
 	txStall txStallDetector
@@ -72,15 +67,7 @@ type bluetoothTransport struct {
 // NewBluetoothTransport returns a Transport that connects to a Bluetooth SPP
 // KISS TNC via BlueZ D-Bus.
 func NewBluetoothTransport(cfg BluetoothConfig) Transport {
-	return &bluetoothTransport{cfg: cfg, ioDebug: os.Getenv("TNCD_BT_WRITE_DEBUG") != ""}
-}
-
-// hexHead returns a short hex preview of up to n bytes for logging.
-func hexHead(b []byte, n int) string {
-	if len(b) < n {
-		n = len(b)
-	}
-	return fmt.Sprintf("% x", b[:n])
+	return &bluetoothTransport{cfg: cfg}
 }
 
 // Open connects to the Bluetooth SPP device.
@@ -216,13 +203,6 @@ func disconnectAudioProfiles(deviceObj dbus.BusObject, bdaddr string) {
 func (bt *bluetoothTransport) Read(b []byte) (int, error) {
 	if bt.file == nil {
 		return 0, fmt.Errorf("bluetooth: not open")
-	}
-	if bt.ioDebug {
-		n, err := bt.file.Read(b)
-		if n > 0 || err != nil {
-			log.Printf("bluetooth: READ  %d bytes err=%v [%s]", n, err, hexHead(b[:max(n, 0)], 24))
-		}
-		return n, err
 	}
 	return bt.file.Read(b)
 }
@@ -364,19 +344,6 @@ func (bt *bluetoothTransport) Write(b []byte) (int, error) {
 		return 0, err
 	}
 
-	if bt.ioDebug {
-		// Log START before the write and DONE after, with elapsed time. If a
-		// write parks (no send-buffer credit) the DONE line is delayed or never
-		// appears — the definitive signal that the byte never left the host.
-		// backlog is the pre-write queue depth: ~0 on a healthy link.
-		backlog, qErr := bt.txQueueDepth()
-		start := time.Now()
-		log.Printf("bluetooth: WRITE start %d bytes backlog=%d (qerr=%v) [%s]",
-			len(b), backlog, qErr, hexHead(b, 24))
-		n, err := bt.file.Write(b)
-		log.Printf("bluetooth: WRITE done  %d/%d bytes in %s err=%v", n, len(b), time.Since(start), err)
-		return n, err
-	}
 	return bt.file.Write(b)
 }
 
@@ -439,8 +406,13 @@ func (p *sppProfile) Release() *dbus.Error {
 	return nil
 }
 
-// profileConn is the long-lived D-Bus connection used for the profile export.
-// It must stay open for the lifetime of the profile.
+// profileConn owns the D-Bus connection the Profile1 object is exported on.
+// BlueZ calls back into that object (NewConnection) for the life of the
+// process, so the connection must stay open; this package-level reference is
+// what keeps it from being collected. Write-only by design — nothing reads it
+// back, it exists purely to own the handle.
+//
+//lint:ignore U1000 keep-alive reference; see above
 var profileConn *dbus.Conn
 
 // profileMu guards profileRegistered and profileConn.

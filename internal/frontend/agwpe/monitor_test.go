@@ -13,16 +13,25 @@ import (
 
 type capClient struct {
 	mon  bool
-	last struct{ kind byte; from, to string; data []byte }
-	n    int
+	last struct {
+		kind     byte
+		from, to string
+		data     []byte
+	}
+	n int
 }
+
 func (c *capClient) SendAGWPE(_ uint8, kind byte, _ uint8, from, to string, data []byte) {
-	c.n++; c.last.kind = kind; c.last.from = from; c.last.to = to; c.last.data = data
+	c.n++
+	c.last.kind = kind
+	c.last.from = from
+	c.last.to = to
+	c.last.data = data
 }
-func (c *capClient) Monitoring() bool                { return c.mon }
+func (c *capClient) Monitoring() bool                 { return c.mon }
 func (c *capClient) RegisteredCalls() map[string]bool { return map[string]bool{} }
-func (c *capClient) LastActivity() time.Time         { return time.Now() }
-func (c *capClient) CloseTransport()                 {}
+func (c *capClient) LastActivity() time.Time          { return time.Now() }
+func (c *capClient) CloseTransport()                  {}
 
 func TestMonitorSinkUIFormat(t *testing.T) {
 	eng := engine.New()

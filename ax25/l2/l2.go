@@ -183,7 +183,7 @@ func (t *Table) removeConn(c *Conn) {
 }
 
 // startT1 starts (or restarts) the T1 retransmit/poll timer for conn.
-// Uses c.t1Value for the duration (Karn adaptive will update this in Task 9).
+// Uses c.t1Value, which the Karn/SRTT estimator keeps up to date.
 // The closure captures the returned *Timer in self so that a stale expiry
 // (fired after a subsequent startT1 replaced c.t1) is a no-op (I4 guard).
 func (t *Table) startT1(c *Conn) {
@@ -1249,8 +1249,8 @@ func (t *Table) sendSREJHoles(c *Conn, src, dst string, upto uint8) {
 
 // dispatchS handles received S-frames (RR, RNR, REJ).
 // Order: ackFrames first, then RNR/RR busy-flag, then REJ retransmit.
-// Mirrors tncd.py:2064-2096. The poll-response side (P=1 → deferred RR F=1)
-// is Task 10 — see TODO below.
+// The poll-response side (P=1 → deferred RR F=1) is handled via the T2
+// delayed-ACK path rather than replying inline.
 func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 	// local=dst, remote=src
 	c := t.Get(port, dst, src)

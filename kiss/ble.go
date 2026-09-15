@@ -15,15 +15,9 @@ package kiss
 // minutes while nothing reached the air (see bluetooth_linux.go's TX stall
 // detection, which exists only to paper over that gap).
 
-// BLE KISS service and characteristic UUIDs, lowercase to match BlueZ.
-const (
-	// bleKISSService is advertised by conforming TNCs.
-	bleKISSService = "00000001-ba2a-46c9-ae49-01b0961f68bb"
-	// bleKISSTXChar accepts KISS data written to the TNC, with response.
-	bleKISSTXChar = "00000002-ba2a-46c9-ae49-01b0961f68bb"
-	// bleKISSRXChar notifies KISS data coming from the TNC.
-	bleKISSRXChar = "00000003-ba2a-46c9-ae49-01b0961f68bb"
-)
+// The service and characteristic UUIDs live beside the only implementation
+// that resolves them (ble_linux.go). Move them here if a second platform
+// gains BLE support.
 
 // bleATTOverhead is the ATT protocol overhead per write: one opcode byte plus
 // a two-byte attribute handle. The usable payload is MTU minus this.

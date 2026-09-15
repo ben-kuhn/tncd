@@ -272,8 +272,13 @@ type fakeMonitorSink struct {
 	dst  string
 	n    int
 }
+
 func (s *fakeMonitorSink) OnRXFrame(port int, f *ax25.Frame) {
-	s.n++; s.port = port; s.typ = f.Type; s.src = f.Src.String(); s.dst = f.Dst.String()
+	s.n++
+	s.port = port
+	s.typ = f.Type
+	s.src = f.Src.String()
+	s.dst = f.Dst.String()
 }
 
 // TestMonitorDistribution: bus emits decoded frame to registered MonitorSink;

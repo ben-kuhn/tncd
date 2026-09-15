@@ -8,7 +8,11 @@ import (
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
 )
 
-type recRaw struct{ ports []int; raws [][]byte }
+type recRaw struct {
+	ports []int
+	raws  [][]byte
+}
+
 func (r *recRaw) OnRawRX(port int, raw []byte) {
 	r.ports = append(r.ports, port)
 	r.raws = append(r.raws, append([]byte{}, raw...))
@@ -29,10 +33,18 @@ func TestRawRXSinkRegistration(t *testing.T) {
 	}
 }
 
-type recTx struct{ ports []int; frames []*ax25.Frame }
-func (r *recTx) OnTXFrame(port int, f *ax25.Frame) { r.ports = append(r.ports, port); r.frames = append(r.frames, f) }
+type recTx struct {
+	ports  []int
+	frames []*ax25.Frame
+}
+
+func (r *recTx) OnTXFrame(port int, f *ax25.Frame) {
+	r.ports = append(r.ports, port)
+	r.frames = append(r.frames, f)
+}
 
 type recConn struct{ evs []ConnEvent }
+
 func (r *recConn) OnConn(e ConnEvent) { r.evs = append(r.evs, e) }
 
 func TestTxAndConnSinkRegistration(t *testing.T) {

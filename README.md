@@ -135,28 +135,28 @@ On **Windows** (2.0 beta), tncd connects natively over Winsock RFCOMM
 and `bdaddr = AA:BB:CC:DD:EE:FF` (the 2.0 installer lists paired devices for
 you). No virtual COM port needed.
 
-> [!WARNING]
-> **Bluetooth on Windows is unreliable for sustained transfers.** Prefer a
-> serial or TCP TNC on Windows; if you need Bluetooth, prefer Linux.
+> [!NOTE]
+> **Some radios buffer frames inside the radio, on every platform.** This is a
+> property of the radio, not of Bluetooth and not of any one operating system.
 >
-> The Windows Bluetooth stack can stop delivering data to the radio while
-> still accepting everything tncd writes. Frames are queued instead of
-> transmitted — often for minutes — and then flushed all at once the moment
-> the radio sends something inbound. Receive keeps working throughout, so the
-> link looks healthy: the port stays online, counters advance, and the log
-> shows frames going out. Nothing reaches the air.
+> The symptom: tncd reports frames as transmitted while nothing reaches the
+> air. Receive keeps working, so the link looks healthy — the port stays
+> online, counters advance, the log shows traffic going out. The frames are
+> sitting in the radio's own TX queue and are typically released minutes later,
+> when the radio next receives something. Classic SPP has no delivery
+> acknowledgement, so no socket-level check can detect this; only an
+> independent receiver on the frequency distinguishes "sent" from
+> "transmitted".
 >
-> The cause is RFCOMM credit-based flow control, which is not visible through
-> the socket API on any OS, so tncd cannot see it coming. It is most
-> disruptive during a Winlink session: the peer stops hearing you mid-transfer
-> and eventually disconnects.
+> tncd surfaces it rather than failing silently: it logs `TX stalled` or
+> `TX write failed`, takes the port offline, and reconnects. **If reconnecting
+> does not restore traffic, the frames are stuck in the radio** — tncd says so
+> after a few futile relinks. Power-cycling the radio clears it; reconnecting
+> generally will not. A radio that behaves this way is unsuitable for sustained
+> transfers such as Winlink sessions, on any platform.
 >
-> tncd now detects the condition instead of failing silently — it logs
-> `TX stalled` or `TX write failed`, takes the port offline, and reconnects.
-> **Reconnecting usually does not clear it.** In testing, only resetting the
-> Bluetooth adapter restored transmission (unplug/replug a USB dongle, or
-> disable and re-enable the radio in Device Manager). Power-cycling the TNC
-> may also help. If it recurs, switch that port to serial or TCP.
+> Measured against a Mobilinkd TNC4: sustained 10 KB Winlink uploads complete
+> on Windows and Linux alike, with matching frame counts and timing.
 
 On **macOS**, use the paired device's virtual serial port — `type = serial`
 with the `/dev/cu.*` path — since tncd has no native macOS Bluetooth transport.

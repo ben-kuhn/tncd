@@ -12,8 +12,8 @@ const (
 func WrapData(kissPort uint8, ax25Frame []byte) []byte {
 	var result []byte
 	result = append(result, FEND)
-	// cmd byte: port in high nibble, 0x00 for data frame
-	cmdByte := (kissPort << 4) | 0x00
+	// cmd byte: port in high nibble, low nibble 0 for a data frame
+	cmdByte := kissPort << 4
 	result = append(result, cmdByte)
 
 	// escape payload

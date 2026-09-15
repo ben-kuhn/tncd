@@ -41,7 +41,6 @@ type PortSender interface {
 // suppression. Mirrors Python's deque(maxlen=20).
 const echoRingSize = 20
 
-
 // Bridge wires L2, KISS ports, and AGWPE clients together.
 type Bridge struct {
 	eng     *engine.Engine
@@ -857,9 +856,9 @@ func (b *Bridge) portAwaitingReply(port int) bool {
 // relinkEscalateAfter is how many consecutive wedge relinks on one port stay
 // routine before the operator is told that reconnecting is not working. Set
 // low because a relink that is going to help helps on the first try: the
-// Bluetooth TX credit stall that motivated this watchdog survives reconnecting
-// entirely, and on the air it produced six silent relink cycles while nothing
-// reached the radio.
+// failure that motivated this watchdog was a radio holding frames in its own
+// TX queue, which a fresh link cannot clear, and on the air it produced six
+// silent relink cycles while nothing reached the radio.
 const relinkEscalateAfter = 3
 
 // shouldEscalateRelink reports whether this relink should carry the
@@ -894,7 +893,7 @@ func (b *Bridge) checkRXWedge(now time.Time) {
 			log.Printf("bridge: port %d RX wedged -- %.0fs silence with unacked TX; relinking (keeping session)",
 				port, since.Seconds())
 		}
-		b.lastRX[port] = now // avoid a relink storm while the new link settles
+		b.lastRX[port] = now        // avoid a relink storm while the new link settles
 		b.reconnectPort(port, true) // keep L2 so the transfer resumes, not drops
 	}
 }
@@ -945,6 +944,6 @@ func (b *Bridge) ConnectionSnapshot() []l2pkg.ConnInfo { return b.l2.Snapshot() 
 // offlineSentinel is used before a port's goroutine posts online.
 type offlineSentinel struct{}
 
-func (*offlineSentinel) Send([]byte)              {}
+func (*offlineSentinel) Send([]byte)               {}
 func (*offlineSentinel) SendCommand(uint8, []byte) {}
 func (*offlineSentinel) Online() bool              { return false }
