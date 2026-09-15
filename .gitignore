@@ -19,3 +19,19 @@ README.html
 /out/
 *.deb
 *.rpm
+
+# Local bench/scratch artifacts. These live in the working tree during
+# hardware testing and must never reach a public repo — the BPQ bench config
+# and its session logs can carry station credentials. (Session logs are already
+# covered by *.log above; these are the rest.)
+/bench-bpq/
+/bench-*.conf
+/result
+
+# Personal OTA/bench configs (station-specific, not examples). Named
+# individually rather than by glob: tncd-api-ota.ini and tncd-multiport.ini
+# are tracked fixtures and must stay visible to git.
+/tncd-ota.ini
+/tncd-ota-direwolf-pty.ini
+/tncd-srej-p2p.ini
+/tncd-v22-bench.ini
