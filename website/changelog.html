@@ -165,6 +165,66 @@
 
 <main>
 
+  <!-- v1.102-Beta -->
+  <div class="release">
+    <div class="release-header">
+      <h2>v1.102-Beta</h2>
+      <span class="date">September 2026</span>
+      <a class="tag beta" href="https://github.com/ben-kuhn/tncd/releases/tag/v1.102-Beta">release</a>
+    </div>
+    <div class="release-body">
+      <div class="beta-note">
+        <strong>Beta &mdash; tncd 2.0 line.</strong> The pure-Go rewrite. Newer and
+        <strong>not yet as thoroughly tested as the stable 1.3.x Python line</strong>,
+        which remains the recommended version for production Linux stations.
+        <strong>Windows and macOS are available only on this 2.0 beta line.</strong>
+      </div>
+
+      <h3>Fixed &mdash; Windows Bluetooth transmit</h3>
+      <ul>
+        <li><strong>Windows Bluetooth could transmit only the first frame</strong> after a link
+          came up. A socket send-buffer option was applied to an already-connected RFCOMM socket,
+          and every send after the first was accepted, reported as fully sent, and silently
+          discarded &mdash; the port stayed online, counters advanced, and the log showed traffic
+          going out with nothing on the air. Confirmed with an independent receiver monitoring the
+          frequency: <strong>1 frame transmitted before the fix, 40 after</strong>, with everything
+          else held constant. Windows Bluetooth is now at parity with Linux: sustained 10&nbsp;KB
+          Winlink uploads complete on both, with matching frame counts and timing.</li>
+        <li><strong>Send timeouts now actually apply on Windows.</strong> The timeout was being set
+          through a call that fails unconditionally on Windows, so a stalled send could block
+          indefinitely.</li>
+        <li><strong>Partial writes no longer truncate a frame.</strong> A short write was reported
+          as success, which could cut a KISS frame mid-stream.</li>
+        <li><strong>Serial port discovery works on FreeBSD.</strong> <code>tncd ports</code>
+          previously failed outright there.</li>
+      </ul>
+
+      <h3>New</h3>
+      <ul>
+        <li><strong>BLE KISS transport</strong> (<code>type = ble</code>) on Linux, for radios
+          exposing the BLE KISS service. Unlike classic Bluetooth SPP, each write is acknowledged
+          by the radio itself.</li>
+        <li><strong>Optional <code>channel</code> setting</strong> for Bluetooth ports. Leave it
+          unset to discover the channel automatically; setting it skips that lookup, removing one
+          step that can fail while connecting. Applies to Windows and FreeBSD.</li>
+        <li><strong>Clearer Bluetooth connect diagnostics</strong> &mdash; connect attempts are
+          retried briefly and logged with the precise error and how long each took, so a failure to
+          connect says what actually went wrong.</li>
+      </ul>
+
+      <h3>Known limitation</h3>
+      <ul>
+        <li><strong>Some radios queue frames inside the radio</strong> and release them minutes
+          later, so tncd reports frames as transmitted while nothing reaches the air. This is a
+          property of the radio, not of Bluetooth or of any one operating system &mdash; it behaves
+          the same on Linux and Windows. tncd reports it and reconnects; if reconnecting does not
+          restore traffic, power-cycle the radio. A radio that does this is not suitable for
+          sustained transfers such as Winlink sessions. The Benshi/BTech UV-PRO is affected and has
+          been reported to its vendor; the Mobilinkd TNC4 is not.</li>
+      </ul>
+    </div>
+  </div>
+
   <!-- v1.101-Beta -->
   <div class="release">
     <div class="release-header">
