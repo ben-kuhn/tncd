@@ -144,25 +144,23 @@ func (bt *bluetoothTransport) Open() error {
 		return err
 	}
 
-	// Make sends report reality instead of succeeding into a buffer that may
-	// never drain.
+	// Deliberately NOT setting SO_SNDBUF=0 here.
 	//
-	// By default Winsock copies each send into a stack-level send buffer and
-	// completes immediately, so WSASend returns success even when RFCOMM
-	// flow control (credit starvation) means the bytes never reach the radio.
-	// Observed on-air: frames "sent" over ~20 minutes stayed queued and then
-	// all flushed at once the instant the radio transmitted something inbound
-	// — while tncd had logged every one of them as transmitted.
+	// It used to be set, to stop Winsock copying each send into a stack-level
+	// buffer that completes immediately: frames "sent" over ~20 minutes stayed
+	// queued and then flushed at once when the radio next received something,
+	// while tncd logged every one as transmitted. That symptom has since been
+	// root-caused to the radio buffering frames in its own TX queue, which no
+	// socket option can affect — so the setting was addressing a problem it
+	// never had jurisdiction over.
 	//
-	// SO_SNDBUF=0 disables that intermediate buffering (each send goes
-	// straight to the transport), and SO_SNDTIMEO bounds how long a send may
-	// block. A stalled TX path then surfaces as a real write error, which
-	// takes the port offline for a reconnect instead of silently swallowing
-	// traffic. KISS frames are small and infrequent, so unbuffered sends cost
-	// nothing here.
-	if err := windows.SetsockoptInt(fd, windows.SOL_SOCKET, windows.SO_SNDBUF, 0); err != nil {
-		log.Printf("bluetooth: SO_SNDBUF=0 failed (%v); sends may buffer silently", err)
-	}
+	// Meanwhile Winsock wants buffer sizes set before connect, and applying
+	// SO_SNDBUF=0 to an already-connected RFCOMM socket left the send path in
+	// a state where the first WSASend reached the air and every later one was
+	// accepted, reported as fully sent, and silently discarded.
+	//
+	// SO_SNDTIMEO below still bounds a genuinely stuck send.
+
 	// Winsock takes SO_SNDTIMEO as a DWORD of milliseconds, not the BSD
 	// struct timeval. x/sys/windows has no timeval path to offer here —
 	// SetsockoptTimeval is a stub that unconditionally returns EWINDOWS — so
@@ -244,20 +242,49 @@ func (bt *bluetoothTransport) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	buf := windows.WSABuf{Len: uint32(len(p)), Buf: &p[0]}
-	var sent uint32
-	if err := windows.WSASend(bt.fd, &buf, 1, &sent, 0, nil, nil); err != nil {
-		// WSAETIMEDOUT here is SO_SNDTIMEO expiring, not a connect failure —
-		// but Windows renders it as "the connected party did not properly
-		// respond", which reads like one. Say which layer actually stalled so
-		// the log points at the radio's TX path instead of the link setup.
-		if err == windows.WSAETIMEDOUT {
-			return 0, fmt.Errorf("bluetooth: TX stalled -- %s did not accept %d bytes within %s",
-				bt.cfg.BDAddr, len(p), btSendTimeout)
+	// Send until the whole frame is gone.
+	//
+	// SO_SNDBUF=0 means Winsock does no buffering of its own: WSASend hands
+	// bytes straight to the transport and is therefore free to accept fewer
+	// than offered when the peer is slow to grant RFCOMM credits. io.Writer
+	// requires that a short write be reported as an error, and callers rely on
+	// it — kiss.port writes a whole KISS frame and checks only the error. So
+	// returning (sent, nil) after a partial send truncated the frame mid-KISS:
+	// the TNC dropped the fragment, the stream desynced, and nothing reached
+	// the air while every counter still said "transmitted". Observed on a
+	// UV-PRO as exactly one frame per SPP link; a Mobilinkd TNC4 drains fast
+	// enough that it never short-wrote and so never showed the bug. Linux is
+	// unaffected because os.File.Write already loops.
+	var total int
+	for total < len(p) {
+		chunk := p[total:]
+		buf := windows.WSABuf{Len: uint32(len(chunk)), Buf: &chunk[0]}
+		var sent uint32
+		if err := windows.WSASend(bt.fd, &buf, 1, &sent, 0, nil, nil); err != nil {
+			// WSAETIMEDOUT here is SO_SNDTIMEO expiring, not a connect failure
+			// — but Windows renders it as "the connected party did not
+			// properly respond", which reads like one. Say which layer
+			// actually stalled so the log points at the radio's TX path
+			// instead of the link setup.
+			if err == windows.WSAETIMEDOUT {
+				return total, fmt.Errorf("bluetooth: TX stalled -- %s accepted %d of %d bytes within %s",
+					bt.cfg.BDAddr, total, len(p), btSendTimeout)
+			}
+			return total, err
 		}
-		return 0, err
+		if sent == 0 {
+			return total, fmt.Errorf("bluetooth: TX stalled -- %s accepted %d of %d bytes then stopped",
+				bt.cfg.BDAddr, total, len(p))
+		}
+		if int(sent) < len(chunk) {
+			// Rare and diagnostic: this is the condition that silently
+			// corrupted frames before the loop existed.
+			log.Printf("bluetooth: partial send to %s (%d of %d bytes, %d/%d of frame) -- continuing",
+				bt.cfg.BDAddr, sent, len(chunk), total+int(sent), len(p))
+		}
+		total += int(sent)
 	}
-	return int(sent), nil
+	return total, nil
 }
 
 // Close closes the socket (unblocking any in-flight WSARecv in the reader
