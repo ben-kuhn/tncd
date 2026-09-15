@@ -9,15 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ben-kuhn/tncd/v2/ax25"
 	l2pkg "github.com/ben-kuhn/tncd/v2/ax25/l2"
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
 	"github.com/ben-kuhn/tncd/v2/internal/netutil"
-	"github.com/ben-kuhn/tncd/v2/ax25"
 )
 
 type fakeSender struct{ online bool }
+
 func (fakeSender) Send([]byte)               {}
 func (fakeSender) SendCommand(uint8, []byte) {}
 func (f fakeSender) Online() bool            { return f.online }

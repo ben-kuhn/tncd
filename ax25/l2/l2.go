@@ -183,7 +183,7 @@ func (t *Table) removeConn(c *Conn) {
 }
 
 // startT1 starts (or restarts) the T1 retransmit/poll timer for conn.
-// Uses c.t1Value for the duration (Karn adaptive will update this in Task 9).
+// Uses c.t1Value, which the Karn/SRTT estimator keeps up to date.
 // The closure captures the returned *Timer in self so that a stale expiry
 // (fired after a subsequent startT1 replaced c.t1) is a no-op (I4 guard).
 func (t *Table) startT1(c *Conn) {
@@ -280,19 +280,21 @@ func (t *Table) t3Expired(c *Conn) {
 	t.startT1(c)
 }
 
-// sendRRGuarded sends RR F=1 (response, PF=true) with conn.recvSeq, but
-// suppresses duplicates sent within 3.0s with the same N(R).
-// Mirrors tncd.py:2034-2055 (_send_rr_guarded).
-func (t *Table) sendRRGuarded(c *Conn, src, dst string) {
-	now := t.clock.Now()
-	nr := c.recvSeq
-	if nr == c.lastRRNR && !c.lastRRTime.IsZero() && now.Sub(c.lastRRTime) < 3*time.Second {
-		return // suppress duplicate
-	}
-	c.lastRRTime = now
-	c.lastRRNR = nr
+// sendRRResponse answers a poll: it sends RR F=1 (response, PF=true) with
+// conn.recvSeq. A response to a P=1 poll is mandatory in AX.25 (the peer's T1
+// recovery checkpoint), so it is sent unconditionally and never suppressed.
+//
+// This is the reference behavior: Dire Wolf's enquiry_response (ax25_link.c,
+// per X.25 2.4.6.11) always answers a poll with F=1, even for a duplicate or
+// out-of-range I-frame whose data is discarded. Flood avoidance on shared
+// half-duplex channels belongs on the *unsolicited* ack path (the T2 delayed
+// ack, scheduleT2), which coalesces N(R) updates — never on poll responses.
+// A time-window guard here (the former 3s dup-RR suppressor) deadlocks a slow
+// link: when N(R) is stuck on a retransmit, every poll within the window is
+// swallowed, so the peer's T1 keeps firing and it retransmits forever.
+func (t *Table) sendRRResponse(c *Conn, src, dst string) {
 	rr := respFrame(src, dst, c.Via, ax25.RR, true)
-	rr.NR = nr
+	rr.NR = c.recvSeq
 	t.sendFrame(c.Port, rr)
 }
 
@@ -1131,7 +1133,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 				// Outside window (or old duplicate): discard; honor a poll.
 				if f.PF {
 					cancelT2(c)
-					t.sendRRGuarded(c, src, dst)
+					t.sendRRResponse(c, src, dst)
 				} else {
 					t.scheduleT2(c, src, dst)
 				}
@@ -1166,7 +1168,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 		// Acknowledge the advanced V(R).
 		if f.PF {
 			cancelT2(c)
-			t.sendRRGuarded(c, src, dst)
+			t.sendRRResponse(c, src, dst)
 		} else {
 			t.scheduleT2(c, src, dst)
 		}
@@ -1189,7 +1191,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 			// Mirrors tncd.py:1806-1815.
 			if f.PF {
 				cancelT2(c)
-				t.sendRRGuarded(c, src, dst)
+				t.sendRRResponse(c, src, dst)
 			} else {
 				t.scheduleT2(c, src, dst)
 			}
@@ -1199,7 +1201,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 	c.recvSeq = (f.NS + 1) % c.modulo
 	if f.PF {
 		cancelT2(c)
-		t.sendRRGuarded(c, src, dst)
+		t.sendRRResponse(c, src, dst)
 	} else {
 		t.scheduleT2(c, src, dst)
 	}
@@ -1247,8 +1249,8 @@ func (t *Table) sendSREJHoles(c *Conn, src, dst string, upto uint8) {
 
 // dispatchS handles received S-frames (RR, RNR, REJ).
 // Order: ackFrames first, then RNR/RR busy-flag, then REJ retransmit.
-// Mirrors tncd.py:2064-2096. The poll-response side (P=1 → deferred RR F=1)
-// is Task 10 — see TODO below.
+// The poll-response side (P=1 → deferred RR F=1) is handled via the T2
+// delayed-ACK path rather than replying inline.
 func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 	// local=dst, remote=src
 	c := t.Get(port, dst, src)
@@ -1314,14 +1316,14 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 		if conn2 != nil && conn2.State == Connected {
 			if f.Type == ax25.REJ {
 				// Immediate: avoid double retransmit.
-				t.sendRRGuarded(conn2, src, dst)
+				t.sendRRResponse(conn2, src, dst)
 			} else {
 				// Deferred: let queued I-frames advance recvSeq first.
 				c2 := conn2
 				s, d := src, dst
 				t.defer_(func() {
 					if c2.State == Connected {
-						t.sendRRGuarded(c2, s, d)
+						t.sendRRResponse(c2, s, d)
 					}
 				})
 			}

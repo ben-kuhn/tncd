@@ -682,8 +682,8 @@ func TestFRMROfXIDPreservesConnection(t *testing.T) {
 	tbl, rec, _ := newHarness(1200)
 	setV22(tbl, 0)
 	setSREJ(tbl, 0, true)
-	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)                 // SABME
-	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp))  // -> Connected + XID sent
+	c, _ := tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil)                // SABME
+	tbl.OnFrame(0, mkFrame(ax25.UA, "N0CALL-2", "KU0HN-10", pf, resp)) // -> Connected + XID sent
 	rec.sent = nil
 	// Peer FRMRs our XID (partial v2.2: accepted SABME, rejects XID).
 	tbl.OnFrame(0, mkFrame(ax25.FRMR, "N0CALL-2", "KU0HN-10", resp))

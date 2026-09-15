@@ -60,21 +60,32 @@ func (p *Port) Start() error {
 }
 
 // sendParams writes any non-nil KISS parameter frames to the transport.
+//
+// A failure here is logged rather than fatal: the TNC keeps its previous (or
+// default) timing, which is degraded but workable, and if the transport is
+// genuinely dead the first real frame will trip writerLoop's failTX and take
+// the port offline with a clearer error. What it must not do is fail silently
+// — an unset TXDelay produces truncated transmissions that look like RF
+// trouble rather than a configuration write that never landed.
 func (p *Port) sendParams() {
-	if p.params.TXDelay != nil {
-		p.tr.Write(WrapCommand(0, 0x01, uint8(*p.params.TXDelay)))
+	params := []struct {
+		name string
+		code uint8
+		val  *int
+	}{
+		{"txdelay", 0x01, p.params.TXDelay},
+		{"persistence", 0x02, p.params.Persistence},
+		{"slottime", 0x03, p.params.SlotTime},
+		{"txtail", 0x04, p.params.TXTail},
+		{"fullduplex", 0x05, p.params.FullDuplex},
 	}
-	if p.params.Persistence != nil {
-		p.tr.Write(WrapCommand(0, 0x02, uint8(*p.params.Persistence)))
-	}
-	if p.params.SlotTime != nil {
-		p.tr.Write(WrapCommand(0, 0x03, uint8(*p.params.SlotTime)))
-	}
-	if p.params.TXTail != nil {
-		p.tr.Write(WrapCommand(0, 0x04, uint8(*p.params.TXTail)))
-	}
-	if p.params.FullDuplex != nil {
-		p.tr.Write(WrapCommand(0, 0x05, uint8(*p.params.FullDuplex)))
+	for _, prm := range params {
+		if prm.val == nil {
+			continue
+		}
+		if _, err := p.tr.Write(WrapCommand(0, prm.code, uint8(*prm.val))); err != nil {
+			log.Printf("kiss: port %d could not set %s=%d (%v)", p.num, prm.name, *prm.val, err)
+		}
 	}
 }
 
@@ -114,8 +125,11 @@ func (p *Port) readerLoop() {
 			// EOF or transport error.
 			if p.closed.CompareAndSwap(false, true) {
 				// Unexpected disconnect: we won the CAS, so we are responsible
-				// for teardown. Close stopCh to stop the writer, then close the
-				// dead transport (no ExitKISS on a dead link), and fire onOffline.
+				// for teardown. Report the cause first — "port N went offline"
+				// on its own gives an operator nothing to act on, and the
+				// distinction between a clean EOF, a removed device and a
+				// transport error decides what they should do about it.
+				log.Printf("kiss: port %d read failed (%v) -- taking port offline", p.num, err)
 				p.online.Store(false)
 				close(p.stopCh)
 				p.tr.Close()
@@ -128,19 +142,41 @@ func (p *Port) readerLoop() {
 }
 
 // writerLoop drains the TX channel and writes to the transport.
+//
+// A write failure takes the port offline rather than just ending this
+// goroutine. Returning silently would leave the reader running and the port
+// still reporting Online while nothing can ever be transmitted again — frames
+// would be accepted and dropped into a dead TX path with no indication to the
+// operator (the "tncd says it's transmitting, but it isn't" silent failure).
+// Taking the port offline lets the bridge tear down and reconnect it.
 func (p *Port) writerLoop() {
 	defer p.wg.Done()
 	for {
 		select {
 		case frame := <-p.txCh:
 			if _, err := p.tr.Write(frame); err != nil {
-				// Transport gone; drain any remaining sends and return.
+				log.Printf("kiss: port %d TX write failed (%v) -- taking port offline", p.num, err)
+				p.failTX()
 				return
 			}
 		case <-p.stopCh:
 			return
 		}
 	}
+}
+
+// failTX tears the port down after an unrecoverable transport write error.
+// Mirrors the readerLoop's disconnect path: whoever wins the closed CAS owns
+// teardown (stop the peer loop, close the dead transport, fire onOffline).
+func (p *Port) failTX() {
+	if !p.closed.CompareAndSwap(false, true) {
+		return // Close() or the reader already owns teardown
+	}
+	p.online.Store(false)
+	close(p.stopCh)
+	// Closing the transport unblocks the reader goroutine's pending Read.
+	p.tr.Close()
+	p.onOffline(p.num)
 }
 
 // Send wraps ax25Frame in a KISS data frame (port nibble 0) and queues it

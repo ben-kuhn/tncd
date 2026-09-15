@@ -2,7 +2,6 @@ package l2
 
 import (
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/ben-kuhn/tncd/v2/ax25"
@@ -10,8 +9,11 @@ import (
 )
 
 // fakeClock: manual time, synchronous timers fired via advance().
+//
+// Deliberately unsynchronised: the engine serialises all L2 work onto one
+// goroutine, and these tests drive it synchronously, so a mutex here would
+// only imply a thread-safety guarantee the tests do not actually rely on.
 type fakeClock struct {
-	mu     sync.Mutex
 	now    time.Time
 	timers []*fakeTimer
 }

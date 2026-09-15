@@ -61,18 +61,14 @@ type Conn struct {
 
 	// T1 state
 	t1Polls int
-	t1Value time.Duration // current T1 (Karn adaptive arrives in Task 9)
+	t1Value time.Duration // current T1, adapted from the Karn/SRTT estimate below
 
 	// RNR/flow control
 	remoteBusy bool
 
-	// T2 delayed ACK state (Task 10)
+	// T2 delayed-ACK state: the peer a deferred RR F=1 is owed.
 	t2Src string
 	t2Dst string
-
-	// Duplicate RR suppression (Task 9/10)
-	lastRRTime time.Time
-	lastRRNR   uint8
 
 	incoming bool // true if this connection was remote-initiated
 
@@ -85,11 +81,13 @@ type Conn struct {
 	rxBuf       map[uint8]rxEntry // out-of-order I-frames keyed by N(S)
 	srejSent    map[uint8]bool    // N(S) already requested via SREJ (dedup)
 
-	// Karn RTT estimation (Task 9)
+	// Karn RTT estimation: smoothed RTT and variance, updated in ackFrames.
+	// Retransmitted I-frames are excluded (Karn's algorithm) so an ambiguous
+	// sample cannot poison the estimate.
 	srtt   time.Duration
 	rttvar time.Duration
 
-	// Per-I-frame timestamps for RTT (Task 9)
+	// Per-I-frame send times, consumed to produce one RTT sample per ACK.
 	iframeTimestamps map[uint8]time.Time
 }
 

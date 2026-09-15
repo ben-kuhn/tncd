@@ -6,8 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -79,14 +77,11 @@ func (bt *bluetoothTransport) Open() error {
 	}
 
 	// Channel: an explicit config value pins it; otherwise discover via SDP.
-	channel := 0
-	if s := strings.TrimSpace(bt.cfg.Channel); s != "" {
-		ch, err := strconv.Atoi(s)
-		if err != nil || ch < 1 || ch > 30 {
-			return fmt.Errorf("bluetooth: invalid channel %q (want 1-30)", bt.cfg.Channel)
-		}
-		channel = ch
-	} else {
+	channel, pinned, err := parseSPPChannel(bt.cfg.Channel)
+	if err != nil {
+		return err
+	}
+	if !pinned {
 		ch, err := sdpDiscoverSPPChannel(addr)
 		if err != nil {
 			return fmt.Errorf("bluetooth: SDP discovery for %s: %w", bt.cfg.BDAddr, err)

@@ -135,6 +135,29 @@ On **Windows** (2.0 beta), tncd connects natively over Winsock RFCOMM
 and `bdaddr = AA:BB:CC:DD:EE:FF` (the 2.0 installer lists paired devices for
 you). No virtual COM port needed.
 
+> [!NOTE]
+> **Some radios buffer frames inside the radio, on every platform.** This is a
+> property of the radio, not of Bluetooth and not of any one operating system.
+>
+> The symptom: tncd reports frames as transmitted while nothing reaches the
+> air. Receive keeps working, so the link looks healthy — the port stays
+> online, counters advance, the log shows traffic going out. The frames are
+> sitting in the radio's own TX queue and are typically released minutes later,
+> when the radio next receives something. Classic SPP has no delivery
+> acknowledgement, so no socket-level check can detect this; only an
+> independent receiver on the frequency distinguishes "sent" from
+> "transmitted".
+>
+> tncd surfaces it rather than failing silently: it logs `TX stalled` or
+> `TX write failed`, takes the port offline, and reconnects. **If reconnecting
+> does not restore traffic, the frames are stuck in the radio** — tncd says so
+> after a few futile relinks. Power-cycling the radio clears it; reconnecting
+> generally will not. A radio that behaves this way is unsuitable for sustained
+> transfers such as Winlink sessions, on any platform.
+>
+> Measured against a Mobilinkd TNC4: sustained 10 KB Winlink uploads complete
+> on Windows and Linux alike, with matching frame counts and timing.
+
 On **macOS**, use the paired device's virtual serial port — `type = serial`
 with the `/dev/cu.*` path — since tncd has no native macOS Bluetooth transport.
 

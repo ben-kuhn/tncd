@@ -41,7 +41,6 @@ type PortSender interface {
 // suppression. Mirrors Python's deque(maxlen=20).
 const echoRingSize = 20
 
-
 // Bridge wires L2, KISS ports, and AGWPE clients together.
 type Bridge struct {
 	eng     *engine.Engine
@@ -66,6 +65,11 @@ type Bridge struct {
 	// read-side wedge watchdog: no RX for RXWedgeTimeout while TX is unacked
 	// means a wedged Bluetooth SPP RX (see checkRXWedge).
 	lastRX []time.Time
+
+	// relinks[port] counts consecutive wedge relinks that have not restored
+	// traffic. Reset by any inbound frame, so it measures a single unbroken
+	// run of futile reconnects rather than a lifetime total (see checkRXWedge).
+	relinks []int
 
 	// idleSweepTimer and rxWedgeTimer are held so we can cancel them on Shutdown.
 	idleSweepTimer *engine.Timer
@@ -342,6 +346,11 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 	if f.Port >= 0 && f.Port < len(b.lastRX) {
 		b.lastRX[f.Port] = time.Now() // any frame proves the RX path is alive
 	}
+	if f.Port >= 0 && f.Port < len(b.relinks) {
+		// Traffic is flowing again, so the run of futile relinks is over and a
+		// later, unrelated wedge should start from the routine message.
+		b.relinks[f.Port] = 0
+	}
 
 	// Forward to L2 state machine (handles SABM/UA/DM/DISC/FRMR/I/RR/RNR/REJ).
 	b.l2.OnFrame(f.Port, frame)
@@ -432,9 +441,11 @@ func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, sende
 }
 
 // initLastRX (re)sizes lastRX and seeds every entry to now so a freshly-wired
-// port is never treated as wedged before its first frame arrives.
+// port is never treated as wedged before its first frame arrives. Also sizes
+// the matching relink counters.
 func (b *Bridge) initLastRX() {
 	b.lastRX = make([]time.Time, len(b.ports))
+	b.relinks = make([]int, len(b.ports))
 	now := time.Now()
 	for i := range b.lastRX {
 		b.lastRX[i] = now
@@ -842,6 +853,20 @@ func (b *Bridge) portAwaitingReply(port int) bool {
 	return false
 }
 
+// relinkEscalateAfter is how many consecutive wedge relinks on one port stay
+// routine before the operator is told that reconnecting is not working. Set
+// low because a relink that is going to help helps on the first try: the
+// failure that motivated this watchdog was a radio holding frames in its own
+// TX queue, which a fresh link cannot clear, and on the air it produced six
+// silent relink cycles while nothing reached the radio.
+const relinkEscalateAfter = 3
+
+// shouldEscalateRelink reports whether this relink should carry the
+// "reconnecting is not fixing it" warning rather than the routine message.
+func shouldEscalateRelink(consecutive int) bool {
+	return consecutive >= relinkEscalateAfter
+}
+
 // checkRXWedge relinks any port whose receive path has wedged: unacked TX
 // outstanding but total RX silence past rx_wedge_timeout. This is the automatic
 // form of the manual "restart the service" recovery for a half-wedged Bluetooth
@@ -856,9 +881,19 @@ func (b *Bridge) checkRXWedge(now time.Time) {
 		if !rxWedged(b.ports[port].Online(), timeout, b.portAwaitingReply(port), since) {
 			continue
 		}
-		log.Printf("bridge: port %d RX wedged -- %.0fs silence with unacked TX; relinking (keeping session)",
-			port, since.Seconds())
-		b.lastRX[port] = now // avoid a relink storm while the new link settles
+		b.relinks[port]++
+		if shouldEscalateRelink(b.relinks[port]) {
+			// Repeating the routine line would imply progress that is not
+			// happening. Say what the operator actually has to do: in testing,
+			// only resetting the Bluetooth adapter restored transmission.
+			log.Printf("bridge: port %d still wedged after %d relinks -- reconnecting is not clearing it; "+
+				"reset the Bluetooth adapter or power-cycle the TNC (consider serial/tcp for this port)",
+				port, b.relinks[port])
+		} else {
+			log.Printf("bridge: port %d RX wedged -- %.0fs silence with unacked TX; relinking (keeping session)",
+				port, since.Seconds())
+		}
+		b.lastRX[port] = now        // avoid a relink storm while the new link settles
 		b.reconnectPort(port, true) // keep L2 so the transfer resumes, not drops
 	}
 }
@@ -909,6 +944,6 @@ func (b *Bridge) ConnectionSnapshot() []l2pkg.ConnInfo { return b.l2.Snapshot() 
 // offlineSentinel is used before a port's goroutine posts online.
 type offlineSentinel struct{}
 
-func (*offlineSentinel) Send([]byte)              {}
+func (*offlineSentinel) Send([]byte)               {}
 func (*offlineSentinel) SendCommand(uint8, []byte) {}
 func (*offlineSentinel) Online() bool              { return false }

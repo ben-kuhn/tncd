@@ -2,8 +2,10 @@ package kiss
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -329,5 +331,63 @@ func TestCloseAfterReaderEOFTeardownJoins(t *testing.T) {
 		// Success: join completed within timeout.
 	case <-time.After(2 * time.Second):
 		t.Fatal("Port.Close() hung after reader-initiated teardown — join failed")
+	}
+}
+
+// writeFailTransport models a transport whose TX path has failed while RX still
+// looks alive: Read blocks until Close, Write returns an error. This is the
+// Bluetooth "frames accepted but never transmitted" shape once the send path
+// reports an error (e.g. a WSASend timeout on a credit-starved RFCOMM link).
+type writeFailTransport struct {
+	closedC chan struct{}
+	closeMu sync.Mutex
+	closed  bool
+}
+
+func newWriteFailTransport() *writeFailTransport {
+	return &writeFailTransport{closedC: make(chan struct{})}
+}
+func (w *writeFailTransport) Open() error      { return nil }
+func (w *writeFailTransport) EnterKISS() error { return nil }
+func (w *writeFailTransport) ExitKISS()        {}
+func (w *writeFailTransport) Close() error {
+	w.closeMu.Lock()
+	defer w.closeMu.Unlock()
+	if !w.closed {
+		w.closed = true
+		close(w.closedC)
+	}
+	return nil
+}
+func (w *writeFailTransport) Write(b []byte) (int, error) {
+	return 0, errors.New("transport TX stalled")
+}
+func (w *writeFailTransport) Read(b []byte) (int, error) {
+	<-w.closedC
+	return 0, io.EOF
+}
+
+// TestWriteErrorTriggersOffline: a failing transport write must take the port
+// offline (so the bridge reconnects) instead of silently killing the writer
+// goroutine and leaving the port "online" but unable to transmit — a silent
+// failure where tncd keeps accepting frames that can never reach the air.
+func TestWriteErrorTriggersOffline(t *testing.T) {
+	tr := newWriteFailTransport()
+	off := make(chan int, 1)
+	p := NewPort(4, tr, Params{}, func(RXFrame) {}, func(n int) { off <- n })
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	p.Send([]byte{0x01, 0x02, 0x03})
+	select {
+	case n := <-off:
+		if n != 4 {
+			t.Fatalf("offline port = %d, want 4", n)
+		}
+		if p.Online() {
+			t.Fatal("port still reports Online after a write failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("write error did not take the port offline (silent TX failure)")
 	}
 }

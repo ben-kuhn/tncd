@@ -272,8 +272,13 @@ type fakeMonitorSink struct {
 	dst  string
 	n    int
 }
+
 func (s *fakeMonitorSink) OnRXFrame(port int, f *ax25.Frame) {
-	s.n++; s.port = port; s.typ = f.Type; s.src = f.Src.String(); s.dst = f.Dst.String()
+	s.n++
+	s.port = port
+	s.typ = f.Type
+	s.src = f.Src.String()
+	s.dst = f.Dst.String()
 }
 
 // TestMonitorDistribution: bus emits decoded frame to registered MonitorSink;
@@ -706,6 +711,30 @@ func TestRXWedged(t *testing.T) {
 		if got := rxWedged(tc.online, tc.timeout, tc.activeTX, tc.since); got != tc.want {
 			t.Errorf("%s: rxWedged(online=%v, to=%v, tx=%v, since=%v) = %v, want %v",
 				tc.name, tc.online, tc.timeout, tc.activeTX, tc.since, got, tc.want)
+		}
+	}
+}
+
+// TestRelinkEscalation covers when repeated relinks should stop being reported
+// as routine. A Bluetooth TX credit stall survives reconnecting — observed on
+// the air, where the watchdog relinked six times without restoring a single
+// frame — so after a few futile cycles the operator needs to be told that
+// reconnecting will not fix it, rather than watching the same line repeat.
+func TestRelinkEscalation(t *testing.T) {
+	cases := []struct {
+		name  string
+		count int
+		want  bool
+	}{
+		{"first relink is routine", 1, false},
+		{"still routine below the threshold", relinkEscalateAfter - 1, false},
+		{"escalate at the threshold", relinkEscalateAfter, true},
+		{"escalate beyond the threshold", relinkEscalateAfter + 3, true},
+	}
+	for _, tc := range cases {
+		if got := shouldEscalateRelink(tc.count); got != tc.want {
+			t.Errorf("%s: shouldEscalateRelink(%d) = %v, want %v",
+				tc.name, tc.count, got, tc.want)
 		}
 	}
 }

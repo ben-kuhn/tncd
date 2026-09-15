@@ -37,6 +37,8 @@ func buildTransport(pc config.Port) (kiss.Transport, error) {
 			ReconnectDelay:    time.Duration(pc.ReconnectDelay * float64(time.Second)),
 			ReconnectMaxDelay: time.Duration(pc.ReconnectMaxDelay * float64(time.Second)),
 		}), nil
+	case "ble":
+		return kiss.NewBLETransport(kiss.BLEConfig{BDAddr: pc.BDAddr}), nil
 	default:
 		return nil, fmt.Errorf("unknown port type %q", pc.Type)
 	}
