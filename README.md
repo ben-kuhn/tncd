@@ -316,13 +316,20 @@ ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
 # listen_port = 8002
 ```
 
-### Read-only Monitoring API (2.0 Go line)
+### Monitoring API (2.0 Go line)
 
-The 2.0 Go build can expose a small read-only HTTP API for dashboards and web
-tooling. It is **disabled by default**; enable it with an `[api]` section. It is
-**unauthenticated** — its only protections are that it is read-only, bound to
-`127.0.0.1` by default, and off unless you turn it on. Do not expose it to an
-untrusted network.
+The 2.0 Go build can expose a small HTTP API for dashboards and web tooling. It
+is **disabled by default**; enable it with an `[api]` section. It is
+**unauthenticated** — its protections are that it is bound to `127.0.0.1` by
+default, off unless you turn it on, and read-only apart from the single
+reconnect endpoint below. Do not expose it to an untrusted network.
+
+That reconnect endpoint is guarded against drive-by requests from a web page
+(POST only, a custom header browsers cannot send cross-origin, and a same-host
+`Origin` check), but those guards stop **browsers, not scripts**. Anyone who can
+reach the port can relink your radio ports and interrupt a session, so treat
+reachability as the control and use `allowed_subnets` or a firewall if it is not
+on loopback.
 
 - `GET /api/status` — tncd version and per-port state with live frame counters.
 - `GET /api/connections` — active AX.25 connections with troubleshooting detail

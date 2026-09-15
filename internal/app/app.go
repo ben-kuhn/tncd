@@ -74,7 +74,7 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 			ln.Close()
 			return nil, fmt.Errorf("api server: %w", err)
 		}
-		slog.Info("read-only API started",
+		slog.Info("monitoring API started",
 			"listen", fmt.Sprintf("%s:%d", cfg.API.ListenHost, cfg.API.ListenPort))
 	}
 

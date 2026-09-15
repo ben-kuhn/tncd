@@ -92,7 +92,7 @@ Go module `github.com/ben-kuhn/tncd/v2`. Exported reusable packages at the top l
 - **`agwpe/`** — AGWPE 36-byte header + frame encode/decode.
 - **`internal/engine/`** — a single serialized event loop (one goroutine owns all L2/bridge state; everything else messages it via `Do`/`After`). This mirrors the asyncio serialization the half-duplex fixes depend on.
 - **`internal/bridge/`** — coordinator: connections table, dispatch by AX.25 frame type, TX-echo suppression, transport construction (`buildTransport`), and per-port auto-reconnect with backoff.
-- **`internal/frontend/{agwpe,kisstcp,api}/`** — the AGWPE TCP server, the KISS-over-TCP passthrough, and the read-only JSON/SSE monitoring API.
+- **`internal/frontend/{agwpe,kisstcp,api}/`** — the AGWPE TCP server, the KISS-over-TCP passthrough, and the JSON/SSE monitoring API (read-only apart from a guarded port-reconnect POST).
 - **`internal/netutil/`** — client-IP allowlist (`allowed_subnets`) shared by all three listeners, enforced by a filtering `net.Listener` at accept time.
 - **`internal/app/`** — `Runtime` (wires engine + bridge + frontends; `New`/`Wait`/`Shutdown`), shared by the console and Windows-service launch paths.
 - **`internal/config/`** — INI load, validation, and `genconfig` example.
