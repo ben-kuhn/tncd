@@ -2359,11 +2359,22 @@ class TestOfflinePort:
         bridge.kiss_clients[0].send.assert_not_called()
         transport.write.assert_not_called()
 
-    async def test_invalid_port_silently_ignored(self):
+    async def test_out_of_range_port_is_clamped_not_dropped(self):
+        """An out-of-range port must be clamped to 0 and the frame transmitted.
+
+        Replaces an earlier test that asserted the frame was silently ignored.
+        That behaviour was the bug: Xastir sends its position beacons as 'V'
+        with port 255 even when configured for radio port 0, so dropping made
+        every Xastir transmission vanish with no indication to the client.
+        Direwolf, which Xastir is developed against, clamps to 0 and keeps
+        going, and matching it is what makes the two interoperate.
+        """
         bridge, protocol, transport = self._make_bridge_with_protocol(port_count=1)
-        protocol.data_received(make_frame(5, ord('M'), b'SRC', b'DST', b'hello'))
-        bridge.kiss_clients[0].send.assert_not_called()
-        transport.write.assert_not_called()
+        # This fixture defaults every port offline; bring port 0 up so the test
+        # measures the clamp rather than the offline-port short-circuit.
+        bridge.kiss_clients[0].online = True
+        protocol.data_received(make_frame(255, ord('M'), b'KU0HN-2', b'APX222', b'beacon'))
+        bridge.kiss_clients[0].send.assert_called_once()
 
     def test_port_went_offline_disconnects_sessions(self):
         raw = configparser.ConfigParser()

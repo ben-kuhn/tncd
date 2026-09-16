@@ -202,8 +202,16 @@ class AGWPEServerProtocol(asyncio.Protocol):
         _routed_kinds = {b'M', b'V', b'C', b'c', b'v', b'D', b'd', b'K', b'g', b'H', b'y', b'Y'}
         if datakind_bytes in _routed_kinds:
             if port >= self.bridge.config.port_count:
-                logger.debug(f"Ignoring frame for invalid port {port}")
-                return
+                # Clamp rather than drop. Xastir sends its position beacons as
+                # 'V' with port 255 even when configured for radio port 0, so
+                # dropping made every Xastir transmission vanish with only a log
+                # line and no way for the client to know. Direwolf, which Xastir
+                # is developed against, resets an out-of-range port to 0 and
+                # keeps going; matching that is what makes them interoperate.
+                logger.warning(
+                    f"Port {port} out of range for {datakind_bytes.decode()!r}, "
+                    "using port 0 (client sent an invalid port)")
+                port = 0
 
         if datakind_bytes == b'P':
             logger.debug(f"LOGIN from={from_str!r} (accepted)")
