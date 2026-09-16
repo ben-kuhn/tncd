@@ -44,8 +44,8 @@ sequencing, RR acknowledgement, duplicate detection, and clean DISC handling.
 | `y`  | RX/TX | Outstanding frames query (per port) |
 | `Y`  | RX/TX | Outstanding frames query (per connection) — tracks unacked I-frames |
 | `H`  | RX/TX | Heard stations query |
-| `K`  | RX    | Raw KISS frame passthrough |
-| `k`  | RX    | Raw KISS mode toggle |
+| `K`  | RX/TX | Raw AX.25 frame: send from client, and receive when raw mode is on |
+| `k`  | RX    | Toggle raw AX.25 reception (Xastir uses this instead of `m`) |
 | `M`  | RX    | Send UI (unproto) frame |
 | `V`  | RX    | Send UI frame via digipeaters |
 | `v`  | RX    | Connect via digipeaters |

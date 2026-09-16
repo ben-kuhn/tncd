@@ -381,6 +381,80 @@ class TestRawKissFrame:
         bridge.send_to_kiss.assert_not_called()
 
 
+class TestRawMode:
+    """Xastir enables raw mode with 'k' and never sends 'm'. Before raw mode
+    existed it connected successfully and then received nothing (issue #2)."""
+
+    def test_k_toggles_raw_mode_on(self):
+        protocol, transport, bridge = make_protocol()
+        assert protocol.raw_mode is False
+        protocol.data_received(make_frame(0, ord('k')))
+        assert protocol.raw_mode is True
+
+    def test_k_toggles_raw_mode_off(self):
+        protocol, transport, bridge = make_protocol()
+        protocol.data_received(make_frame(0, ord('k')))
+        protocol.data_received(make_frame(0, ord('k')))
+        assert protocol.raw_mode is False
+
+    def test_raw_mode_independent_of_monitoring(self):
+        """'k' must not enable monitoring, nor 'm' raw mode."""
+        protocol, transport, bridge = make_protocol()
+        protocol.data_received(make_frame(0, ord('k')))
+        assert protocol.raw_mode is True
+        assert protocol.monitoring is False
+        protocol.data_received(make_frame(0, ord('m')))
+        assert protocol.monitoring is True
+        assert protocol.raw_mode is True
+
+
+class TestDispatchRaw:
+    """Wire format of the 'K' frames sent to raw-mode clients.
+
+    The leading byte is protocol, not padding: Dire Wolf writes chan<<4 there
+    and Xastir decodes AX.25 one byte past the 36-byte header, so dropping it
+    shifts the frame and every client fails to decode.
+    """
+
+    RAW = b'\x82\xa0\xa4\xa6@@`\xaeb\x82\x84\x86@a\x03\xf0hello'
+
+    def _bridge(self):
+        import tncd
+        b = tncd.Bridge.__new__(tncd.Bridge)
+        b.clients = []
+        return b
+
+    def test_k_frame_prepends_port_in_high_nibble(self):
+        b = self._bridge()
+        client = Mock()
+        client.raw_mode = True
+        b.clients = [client]
+        b._dispatch_raw(self.RAW, port=2)
+        args = client.send_frame.call_args[0]
+        data = args[4]
+        assert data[0] == (2 << 4), f"leading byte {data[0]:#04x}, want {2 << 4:#04x}"
+        assert data[1:] == self.RAW, "frame body must be passed through untouched"
+        assert args[1] == ord('K')
+
+    def test_only_raw_mode_clients_receive(self):
+        b = self._bridge()
+        raw_client, mon_client = Mock(), Mock()
+        raw_client.raw_mode = True
+        mon_client.raw_mode = False
+        b.clients = [raw_client, mon_client]
+        b._dispatch_raw(self.RAW, port=0)
+        raw_client.send_frame.assert_called_once()
+        mon_client.send_frame.assert_not_called()
+
+    def test_empty_frame_ignored(self):
+        b = self._bridge()
+        client = Mock()
+        client.raw_mode = True
+        b.clients = [client]
+        b._dispatch_raw(b'', port=0)
+        client.send_frame.assert_not_called()
+
+
 class TestMonitoring:
     def test_m_toggles_monitoring_on(self):
         """First 'm' enables monitoring."""
@@ -424,6 +498,9 @@ class TestKISSReceivePath:
         # Add a mock monitoring client
         client = Mock()
         client.monitoring = True
+        # Mock() attributes are truthy by default, which would make this client
+        # look like it had raw mode enabled and pull in extra 'K' frames.
+        client.raw_mode = False
         bridge.add_client(client)
         return bridge, client
 
@@ -1068,6 +1145,8 @@ class TestConnectedModeReceivePath:
         # Register W1ABC so the SABM is accepted (foreign SABMs are dropped).
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        # Mock() attributes are truthy, which would enable raw mode implicitly.
+        client.raw_mode = False
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -1083,6 +1162,7 @@ class TestConnectedModeReceivePath:
         bridge = self._make_bridge()
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -1095,6 +1175,7 @@ class TestConnectedModeReceivePath:
         # Register W1ABC so the SABM is accepted (foreign SABMs are dropped).
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -1260,6 +1341,7 @@ class TestConnectedModeReceivePath:
         bridge = self._make_bridge()
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         sabme = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                            control=ax25.Control(ax25.FrameType.SABME, poll_final=True))
@@ -1301,6 +1383,7 @@ class TestConnectedModeReceivePath:
         bridge = self._make_bridge()
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -1373,6 +1456,7 @@ class TestForeignFrameGuards:
         bridge = self._make_bridge()
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
                           control=ax25.Control(ax25.FrameType.SABM, poll_final=True))
@@ -1390,6 +1474,7 @@ class TestForeignFrameGuards:
         bridge = self._make_bridge()
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         # No active connection exists for W1ABC↔W2DEF, but W1ABC is registered.
         iframe = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
@@ -2218,6 +2303,7 @@ class TestMultiPortBridge:
         # Register W1ABC so the SABM is accepted (foreign SABMs are dropped).
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         # Incoming SABM on port 1
         sabm = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),
@@ -2328,6 +2414,7 @@ class TestSpecViolationFixes:
         # Register W1ABC so the no-connection DM is sent (foreign DISCs are dropped).
         client = Mock()
         client.registered_calls = {'W1ABC'}
+        client.raw_mode = False  # Mock() attrs are truthy; keep raw mode off
         bridge.add_client(client)
         # No connection exists for this callsign pair
         disc = ax25.Frame(dst=ax25.Address('W1ABC'), src=ax25.Address('W2DEF'),

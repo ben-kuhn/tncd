@@ -123,6 +123,7 @@ class AGWPEServerProtocol(asyncio.Protocol):
         self.buffer = b''
         self.traffic_debug = traffic_debug
         self.monitoring = False  # toggled by 'm' frame
+        self.raw_mode = False    # toggled by 'k' frame (raw AX.25 as 'K')
         self.registered_calls = set()  # callsigns registered via 'X' frame
         self.last_activity = time.monotonic()
 
@@ -420,9 +421,13 @@ class AGWPEServerProtocol(asyncio.Protocol):
                 self.bridge.send_to_kiss(port, raw)
 
         elif datakind_bytes == b'k':
-            # Toggle raw frame reception mode (K frames to client).
-            # We don't buffer raw frames for clients; log and ignore.
-            logger.debug("Raw KISS mode toggle received (not supported)")
+            # Toggle raw AX.25 reception. The client then receives every frame
+            # heard on the air as a 'K' frame instead of the decoded 'U'/'I'/'S'
+            # monitor text. Independent of monitoring: a client may use either,
+            # both, or neither. Xastir uses raw mode exclusively and never sends
+            # 'm', so ignoring 'k' left it connected but permanently silent.
+            self.raw_mode = not self.raw_mode
+            logger.debug(f"Raw AX.25 mode {'enabled' if self.raw_mode else 'disabled'}")
 
         elif datakind_bytes == b'y':
             # Outstanding frames waiting on a port. We have no TX queue; reply 0.
@@ -1667,6 +1672,12 @@ class Bridge:
             return
         if self.traffic_debug:
             print(hex_dump(raw_ax25, prefix="KISS RX: "))
+
+        # Deliver to clients in raw mode ('k') before decoding, so a frame we
+        # cannot parse still reaches them — they do their own decoding, and
+        # dropping it here would hide traffic that is on the air.
+        self._dispatch_raw(raw_ax25, port_num)
+
         try:
             frame = ax25.Frame.unpack(raw_ax25)
         except Exception as e:
@@ -1728,6 +1739,34 @@ class Bridge:
             f" <{frame_type_str} pid={pid:02X} Len={data_len} >"
             f"[{ts}]\r"
         ).encode()
+
+    def _dispatch_raw(self, raw_ax25, port=0):
+        """Forward one raw AX.25 frame to clients that enabled raw mode with 'k'.
+
+        The data field is a leading byte holding the port in its high nibble,
+        followed by the unmodified AX.25 frame. That byte is protocol, not
+        padding: Dire Wolf writes `chan << 4` there, and Xastir decodes the AX.25
+        header starting one byte past the 36-byte AGWPE header. Omitting it
+        shifts the frame by one and every client fails to decode.
+        """
+        if not raw_ax25:
+            return
+        data = bytes([(port & 0x0F) << 4]) + raw_ax25
+        # Callsigns are filled in where the frame parses; clients read the frame
+        # itself out of the data field, so an unparseable frame is still worth
+        # delivering with the header fields left empty.
+        src = dst = ''
+        try:
+            f = ax25.Frame.unpack(raw_ax25)
+            src, dst = str(f.src), str(f.dst)
+        except Exception:
+            pass
+        for client in self.clients:
+            if client.raw_mode:
+                try:
+                    client.send_frame(port, ord('K'), src.encode(), dst.encode(), data)
+                except Exception as e:
+                    logger.error(f"Error sending 'K' to client: {e}")
 
     def _dispatch_ui(self, frame, src, dst, port=0):
         """Forward a UI (UNPROTO) frame to monitoring clients as 'U'."""
