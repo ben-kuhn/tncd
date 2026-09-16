@@ -1,6 +1,6 @@
 # Maintainer: KU0HN <ku0hn@ku0hn.radio>
 pkgname=tncd
-pkgver=1.103_Beta
+pkgver=1.3.3
 pkgrel=1
 pkgdesc="AGWPE-to-KISS Translation Bridge"
 arch=('x86_64' 'aarch64' 'armv7h' 'riscv64')
@@ -9,7 +9,7 @@ license=('GPL-3.0-only')
 makedepends=('go')
 # The Go binary is fully static (CGO_ENABLED=0); no runtime depends.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v${pkgver//_/-}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('b102d11959d54f03381a2420bfa770088aed0c68fa7e22a071e933292e6d7a7d')
 
 build() {
     cd "$pkgname-${pkgver//_/-}"
