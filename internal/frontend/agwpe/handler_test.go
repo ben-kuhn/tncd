@@ -920,3 +920,48 @@ func TestInflightCapClosesFloodingClient(t *testing.T) {
 		t.Fatal("flooding client was not disconnected")
 	}
 }
+
+// TestOutOfRangePortIsClampedNotDropped pins the behaviour that lets Xastir
+// transmit at all.
+//
+// Xastir sends its position beacons as 'V' with port 255 even when configured
+// for radio port 0. tncd used to validate the port and drop the frame, so every
+// Xastir transmission vanished with only a log line and the client had no way to
+// know. Dire Wolf, which Xastir is developed against, resets an out-of-range
+// port to 0 and keeps going; matching that is what makes the two interoperable.
+func TestOutOfRangePortIsClampedNotDropped(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+
+	fp := newFakePort(true)
+	b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+		{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+	})
+
+	ln, conn := dialServe(t, eng, b)
+	defer ln.Close()
+	defer conn.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	// Port 255 on a single-port station: the exact frame Xastir sends.
+	writeFrame(t, conn, 255, 'M', 0xF0, "KU0HN-2", "APX222", []byte("beacon"))
+
+	deadline := time.Now().Add(2 * time.Second)
+	var parsed *ax25.Frame
+	for time.Now().Before(deadline) && parsed == nil {
+		for _, f := range decodeAX25Frames(fp.getSent()) {
+			if f.Type == ax25.UI {
+				parsed = f
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if parsed == nil {
+		t.Fatal("frame with out-of-range port was dropped; it must be clamped to port 0 and transmitted")
+	}
+	if got := parsed.Src.String(); got != "KU0HN-2" {
+		t.Errorf("src = %q, want KU0HN-2", got)
+	}
+}

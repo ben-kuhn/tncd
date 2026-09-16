@@ -40,12 +40,22 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 	log.Printf("agwpe: handle_frame: port=%d kind=%c from=%q to=%q len=%d",
 		port, kind, from, to, len(data))
 
-	// Validate port for routed kinds (tncd.py:200-205).
-	if routedKinds[kind] {
-		if port >= c.b.PortCount() {
-			log.Printf("agwpe: ignoring frame for invalid port %d (kind=%c)", port, kind)
-			return
-		}
+	// Clamp an out-of-range port rather than dropping the frame.
+	//
+	// Dropping looks safer and is worse in practice: Xastir sends its position
+	// beacons as 'V' with port 255 even when configured for radio port 0, so
+	// every transmission disappeared here with only a log line — the client had
+	// no idea it was not getting out. Dire Wolf, which Xastir is developed
+	// against, resets an out-of-range port to 0 and keeps going ("avoid
+	// subscript out of bounds, try to keep going"), which is why the same setup
+	// transmits fine through Dire Wolf and silently failed through tncd.
+	//
+	// Matching that behaviour costs nothing on a single-port station and, on a
+	// multi-port one, sends on port 0 instead of not transmitting at all. The
+	// log records the substitution so it is visible rather than mysterious.
+	if routedKinds[kind] && port >= c.b.PortCount() {
+		log.Printf("agwpe: port %d out of range for kind=%c, using port 0 (client sent an invalid port)", port, kind)
+		port = 0
 	}
 
 	switch kind {
