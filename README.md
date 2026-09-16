@@ -10,7 +10,7 @@
 > The 2.0 line is a **beta** and **not yet as thoroughly tested as the 1.3.x Python
 > line** — try it if you want the standalone binary or need Windows/macOS, but keep
 > 1.3.x on Linux if you need proven stability. Grab 2.0 betas (latest:
-> **v1.102-Beta**) from the
+> **v1.103-Beta**) from the
 > [GitHub releases](https://github.com/ben-kuhn/tncd/releases) or the
 > [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) overlay.
 > **Windows and macOS are available only on the 2.0 beta line.**
