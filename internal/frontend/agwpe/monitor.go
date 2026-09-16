@@ -16,6 +16,45 @@ type monitorSink struct{ b *bridge.Bridge }
 // 'U'/'I'/'S' monitor frames and delivers them to monitoring AGWPE clients.
 func NewMonitorSink(b *bridge.Bridge) bridge.MonitorSink { return &monitorSink{b: b} }
 
+type rawSink struct{ b *bridge.Bridge }
+
+// NewRawSink returns a RawRXSink that delivers every frame heard on the air to
+// AGWPE clients that enabled raw mode with 'k', as an AGWPE 'K' frame.
+//
+// This is the mode Xastir uses — it sends 'k' and never 'm', so without this it
+// connects successfully and then receives nothing at all.
+func NewRawSink(b *bridge.Bridge) bridge.RawRXSink { return &rawSink{b: b} }
+
+// OnRawRX forwards one raw AX.25 frame to every client in raw mode.
+//
+// The data field is the port number in the high nibble of a leading byte,
+// followed by the unmodified AX.25 frame. That leading byte is part of the
+// protocol, not padding: Dire Wolf writes `chan << 4` there, and Xastir decodes
+// the AX.25 header starting one byte past the 36-byte AGWPE header. Omitting it
+// shifts the whole frame by one and every client fails to decode.
+func (m *rawSink) OnRawRX(port int, raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	data := make([]byte, 0, len(raw)+1)
+	data = append(data, byte(port)<<4)
+	data = append(data, raw...)
+
+	// Callsigns are decoded for the header fields where possible; clients read
+	// the frame itself from the data field, so a malformed frame is still worth
+	// delivering with the fields left empty rather than dropped here.
+	var src, dst string
+	if f, err := ax25.Parse(raw); err == nil {
+		src, dst = f.Src.String(), f.Dst.String()
+	}
+
+	for _, c := range m.b.Clients() {
+		if c.RawMode() {
+			c.SendAGWPE(uint8(port), 'K', 0, src, dst, data)
+		}
+	}
+}
+
 func (m *monitorSink) OnRXFrame(port int, f *ax25.Frame) {
 	src := f.Src.String()
 	dst := f.Dst.String()

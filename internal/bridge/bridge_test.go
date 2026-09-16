@@ -31,6 +31,7 @@ type fakeClient struct {
 	mu              sync.Mutex
 	sent            []agwpeSend
 	monitoring      bool
+	rawMode         bool
 	registeredCalls map[string]bool
 	lastActivity    time.Time
 	closed          bool
@@ -66,6 +67,7 @@ func (c *fakeClient) SendAGWPE(port uint8, kind byte, pid uint8, from, to string
 }
 
 func (c *fakeClient) Monitoring() bool { return c.monitoring }
+func (c *fakeClient) RawMode() bool    { return c.rawMode }
 func (c *fakeClient) RegisteredCalls() map[string]bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

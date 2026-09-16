@@ -10,7 +10,7 @@
 > The 2.0 line is a **beta** and **not yet as thoroughly tested as the 1.3.x Python
 > line** — try it if you want the standalone binary or need Windows/macOS, but keep
 > 1.3.x on Linux if you need proven stability. Grab 2.0 betas (latest:
-> **v1.101-Beta**) from the
+> **v1.102-Beta**) from the
 > [GitHub releases](https://github.com/ben-kuhn/tncd/releases) or the
 > [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) overlay.
 > **Windows and macOS are available only on the 2.0 beta line.**
@@ -59,8 +59,8 @@ sequencing, RR acknowledgement, duplicate detection, and clean DISC handling.
 | `y`  | RX/TX | Outstanding frames query (per port) |
 | `Y`  | RX/TX | Outstanding frames query (per connection) — tracks unacked I-frames |
 | `H`  | RX/TX | Heard stations query |
-| `K`  | RX    | Raw KISS frame passthrough |
-| `k`  | RX    | Raw KISS mode toggle |
+| `K`  | RX/TX | Raw AX.25 frame: send from client, and receive when raw mode is on |
+| `k`  | RX    | Toggle raw AX.25 reception (Xastir uses this instead of `m`) |
 | `M`  | RX    | Send UI (unproto) frame |
 | `V`  | RX    | Send UI frame via digipeaters |
 | `v`  | RX    | Connect via digipeaters |
@@ -78,8 +78,9 @@ UI frames do not require the AX.25 layer 2 state machine — the bridge passes t
 directly between the AGWPE client and the KISS TNC:
 
 - **Send** — `M` (UI frame) and `V` (UI frame via digipeaters) transmit APRS packets
-- **Receive** — enable monitoring with `m`; received UI frames are delivered as `U`
-  monitor frames to all registered clients
+- **Receive** — either enable monitoring with `m`, in which case received UI
+  frames arrive as `U` monitor frames, or enable raw mode with `k` and receive
+  every frame as a `K` frame carrying the undecoded AX.25. Xastir uses raw mode.
 
 No special configuration is needed; APRS and connected-mode (Winlink/PAT) clients
 can share the same bridge instance simultaneously.

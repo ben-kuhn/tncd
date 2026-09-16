@@ -56,6 +56,7 @@ type client struct {
 
 	mu              sync.Mutex
 	monitoring      bool
+	rawMode         bool // client asked for raw AX.25 via 'k'
 	registeredCalls map[string]bool
 	lastActivity    time.Time
 	closed          bool
@@ -229,6 +230,15 @@ func (c *client) Monitoring() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.monitoring
+}
+
+// RawMode returns whether this client asked for raw AX.25 frames via 'k'.
+// Independent of Monitoring: a client may use either, both, or neither.
+// Xastir uses raw mode alone and never enables monitoring.
+func (c *client) RawMode() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rawMode
 }
 
 // RegisteredCalls returns the set of callsigns registered via 'X' frames.

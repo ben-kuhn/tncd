@@ -286,8 +286,15 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		}
 
 	case 'k':
-		// Toggle raw frame reception mode — not supported, log and ignore (tncd.py:422-425).
-		log.Printf("agwpe: raw KISS mode toggle received (not supported)")
+		// Toggle raw AX.25 reception. The client then receives every frame
+		// heard on the air as a 'K' frame instead of the decoded 'U'/'I'/'S'
+		// monitor text. Xastir uses this mode exclusively and never sends 'm',
+		// so ignoring 'k' left it connected but permanently silent.
+		c.mu.Lock()
+		c.rawMode = !c.rawMode
+		raw := c.rawMode
+		c.mu.Unlock()
+		log.Printf("agwpe: raw AX.25 mode %v", raw)
 
 	case 'y':
 		// Outstanding frames on port: reply 0 (tncd.py:427-430).

@@ -24,6 +24,7 @@ import (
 type Client interface {
 	SendAGWPE(port uint8, kind byte, pid uint8, from, to string, data []byte)
 	Monitoring() bool
+	RawMode() bool
 	RegisteredCalls() map[string]bool
 	LastActivity() time.Time
 	CloseTransport()

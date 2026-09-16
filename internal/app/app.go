@@ -44,6 +44,7 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 		return nil, fmt.Errorf("bridge start: %w", err)
 	}
 	b.RegisterMonitorSink(agwpeserver.NewMonitorSink(b))
+	b.RegisterRawRXSink(agwpeserver.NewRawSink(b))
 
 	warnIfExposed("agwpe", cfg.Server.ListenHost, cfg.Server.ListenPort, cfg.Server.AllowedSubnets)
 	ln, err := agwpeserver.Serve(eng, b, cfg.Server.ListenHost, cfg.Server.ListenPort, cfg.Server.AllowedSubnets)
