@@ -1,6 +1,9 @@
 package l2
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // ConnInfo is a read-only snapshot of one active connection, for the API.
 type ConnInfo struct {
@@ -25,6 +28,9 @@ type ConnInfo struct {
 // connection. Disconnecting conns are included so the bridge's RX-wedge
 // watchdog can treat a pending disconnect as traffic the port is awaiting
 // (a keepL2 relink lets the next DISC retransmit reach the air).
+// The result is sorted by (port, local, remote): the conns map iterates in
+// random order, and unsorted output makes the API/SSE connection list
+// visibly reshuffle between polls.
 // Must be called on the engine loop.
 func (t *Table) Snapshot() []ConnInfo {
 	out := make([]ConnInfo, 0, len(t.conns))
@@ -42,5 +48,14 @@ func (t *Table) Snapshot() []ConnInfo {
 			RemoteBusy: c.remoteBusy, SRTTms: c.srtt.Milliseconds(), SREJ: c.srejEnabled,
 		})
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		if out[i].Local != out[j].Local {
+			return out[i].Local < out[j].Local
+		}
+		return out[i].Remote < out[j].Remote
+	})
 	return out
 }
