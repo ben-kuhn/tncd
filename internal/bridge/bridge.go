@@ -353,6 +353,18 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 
 	b.logAX25(frame, "RX")
 
+	// A frame with an unused digipeater hop (H-bit clear) is the originator's
+	// direct transmission, not yet repeated. It is not for L2 yet (Dire Wolf
+	// lm_data_indication): answering it collides with the digipeater keying
+	// up, and the repeated copy would then be processed a second time.
+	// Monitors and raw sinks still get it below.
+	unrepeated := false
+	for _, v := range frame.Via {
+		if !v.CRH {
+			unrepeated = true
+		}
+	}
+
 	if f.Port >= 0 && f.Port < len(b.rxFrames) {
 		b.rxFrames[f.Port]++
 	}
@@ -366,7 +378,9 @@ func (b *Bridge) OnKISSFrame(f kiss.RXFrame) {
 	}
 
 	// Forward to L2 state machine (handles SABM/UA/DM/DISC/FRMR/I/RR/RNR/REJ).
-	b.l2.OnFrame(f.Port, frame)
+	if !unrepeated {
+		b.l2.OnFrame(f.Port, frame)
+	}
 
 	// Fan out to the frontend subscriber bus.
 	b.emitRawRX(f.Port, raw)
@@ -574,8 +588,8 @@ func (b *Bridge) connectPort(idx int, pc config.Port, epoch int) {
 	if err := port.Start(); err != nil {
 		log.Printf("bridge: port %d start error: %v", idx, err)
 		if pc.Reconnect {
-			delay := pc.ReconnectDelay
-			b.scheduleReconnect(idx, pc, delay)
+			// scheduleReconnect reads portEpoch, which is engine-loop state.
+			b.eng.Do(func() { b.scheduleReconnect(idx, pc, pc.ReconnectDelay) })
 		}
 		return
 	}
@@ -611,6 +625,10 @@ func (b *Bridge) portWentOffline(portNum int) {
 }
 
 // scheduleReconnect schedules a port reconnect attempt with exponential backoff.
+// Must be called on the engine loop. The attempt is bound to the port's
+// current epoch: if any newer connect attempt (a manual or wedge relink)
+// starts before the timer fires, the timer stands down instead of dialing
+// again and displacing that newer port.
 func (b *Bridge) scheduleReconnect(idx int, pc config.Port, delay float64) {
 	if delay <= 0 {
 		delay = 5
@@ -621,7 +639,12 @@ func (b *Bridge) scheduleReconnect(idx int, pc config.Port, delay float64) {
 	}
 	d := time.Duration(delay * float64(time.Second))
 	log.Printf("bridge: port %d reconnect in %.1fs", idx, delay)
+	armed := b.portEpoch[idx]
 	b.eng.After(d, func() {
+		if b.portEpoch[idx] != armed {
+			log.Printf("bridge: port %d scheduled reconnect cancelled (superseded by a newer attempt)", idx)
+			return
+		}
 		nextDelay := delay * 2
 		if nextDelay > maxDelay {
 			nextDelay = maxDelay

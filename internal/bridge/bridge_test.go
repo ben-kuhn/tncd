@@ -740,3 +740,45 @@ func TestRelinkEscalation(t *testing.T) {
 		}
 	}
 }
+
+// A frame whose digipeater path still has an unused hop (H-bit clear) is the
+// originator's direct transmission, not yet repeated. L2 must ignore it (Dire
+// Wolf lm_data_indication) — acting on it answers while the digipeater is
+// keying up and then processes the repeated copy a second time — but monitors
+// still see it.
+func TestUnrepeatedDigipeatedFrameNotProcessed(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fp := newFakePort(true)
+	cfg := &config.Config{
+		Server: config.Server{MaxClients: 8},
+		AX25:   config.AX25{MaxWindow: 3, N2Retry: 10},
+		Ports:  []config.Port{{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200}},
+	}
+	b := New(eng, cfg)
+	sink := &fakeMonitorSink{}
+	onLoop(t, eng, func() {
+		InjectPorts(b, eng, []l2pkg.PortParams{l2pkg.DeriveParams(1200, 3, 10, 0)}, []PortSender{fp})
+		b.AddClient(newFakeClient(false, "KU0HN-10"))
+		b.RegisterMonitorSink(sink)
+	})
+	sabm := func(repeated bool) []byte {
+		digi := mustAddr("WIDE1-1")
+		digi.CRH = repeated
+		f := &ax25.Frame{Src: mustAddr("N0CALL-2"), Dst: mustAddr("KU0HN-10"),
+			Via: []ax25.Address{digi}, Type: ax25.SABM, PF: true, Command: true}
+		return f.Bytes()
+	}
+	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: sabm(false)}) })
+	if n := len(fp.getSent()); n != 0 {
+		t.Fatalf("answered an unrepeated (direct) copy with %d frame(s)", n)
+	}
+	if sink.n != 1 {
+		t.Fatalf("monitor saw %d frames, want 1", sink.n)
+	}
+	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: sabm(true)}) })
+	if n := len(fp.getSent()); n != 1 {
+		t.Fatalf("repeated copy produced %d frame(s), want 1 UA", n)
+	}
+}
