@@ -144,6 +144,10 @@ func (bt *bluetoothTransport) Close() error {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
 	if bt.open {
+		// shutdown(2) first: close(2) alone is not guaranteed to wake a read
+		// blocked on the socket in the reader goroutine, and Port.Close joins
+		// that goroutine — a hang here would wedge relink and shutdown.
+		_ = unix.Shutdown(bt.fd, unix.SHUT_RDWR)
 		unix.Close(bt.fd)
 		bt.fd = -1
 		bt.open = false

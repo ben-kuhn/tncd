@@ -101,3 +101,15 @@ func TestParseRFCOMMChannel(t *testing.T) {
 		}
 	}
 }
+
+// A 32-bit data-element length (size index 7) near 2^32 must be rejected, not
+// wrap negative on 32-bit platforms (386/armhf) and slice out of range.
+func TestSDPElementHugeLengthRejected(t *testing.T) {
+	b := []byte{0x37, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00}
+	if _, _, _, ok := sdpElement(b, 0); ok {
+		t.Fatal("element claiming a 4 GiB value was accepted")
+	}
+	if _, ok := findRFCOMMChannel(b); ok {
+		t.Fatal("findRFCOMMChannel accepted a 4 GiB element")
+	}
+}

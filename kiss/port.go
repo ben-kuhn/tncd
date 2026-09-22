@@ -1,6 +1,7 @@
 package kiss
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -83,7 +84,7 @@ func (p *Port) sendParams() {
 		if prm.val == nil {
 			continue
 		}
-		if _, err := p.tr.Write(WrapCommand(0, prm.code, uint8(*prm.val))); err != nil {
+		if err := writeAll(p.tr, WrapCommand(0, prm.code, uint8(*prm.val))); err != nil {
 			log.Printf("kiss: port %d could not set %s=%d (%v)", p.num, prm.name, *prm.val, err)
 		}
 	}
@@ -154,7 +155,7 @@ func (p *Port) writerLoop() {
 	for {
 		select {
 		case frame := <-p.txCh:
-			if _, err := p.tr.Write(frame); err != nil {
+			if err := writeAll(p.tr, frame); err != nil {
 				log.Printf("kiss: port %d TX write failed (%v) -- taking port offline", p.num, err)
 				p.failTX()
 				return
@@ -163,6 +164,25 @@ func (p *Port) writerLoop() {
 			return
 		}
 	}
+}
+
+// writeAll writes all of b, looping over short writes. Several transports are
+// a single write(2) (go.bug.st/serial on Unix, the FreeBSD RFCOMM socket) and
+// may accept part of a frame; sending the rest later would otherwise never
+// happen, and the TNC would key up the truncated frame with a valid FCS. A
+// write that makes no progress is an error, so a dead link cannot spin here.
+func writeAll(w interface{ Write([]byte) (int, error) }, b []byte) error {
+	for len(b) > 0 {
+		n, err := w.Write(b)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return fmt.Errorf("transport accepted 0 of %d bytes", len(b))
+		}
+		b = b[n:]
+	}
+	return nil
 }
 
 // failTX tears the port down after an unrecoverable transport write error.

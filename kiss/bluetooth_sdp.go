@@ -124,7 +124,9 @@ func sdpElement(b []byte, off int) (etype byte, valOff, valLen int, ok bool) {
 	if etype == 0 { // nil: no value
 		valLen = 0
 	}
-	if p+valLen > len(b) {
+	// Compare against the remaining bytes, not p+valLen: a size-7 length near
+	// 2^32 wraps negative in a 32-bit int (386/armhf) and would pass p+valLen.
+	if valLen < 0 || valLen > len(b)-p {
 		return 0, 0, 0, false
 	}
 	return etype, p, valLen, true
