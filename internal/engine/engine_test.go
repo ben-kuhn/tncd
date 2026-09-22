@@ -63,3 +63,19 @@ func TestTimerCancel(t *testing.T) {
 		t.Fatal("cancelled timer fired")
 	}
 }
+
+// TestPanicRecoveredContinues proves a panicking handler does not kill the
+// loop: the panic is contained, and a later posted fn still runs. Pre-fix this
+// test crashes the whole test binary instead of failing politely.
+func TestPanicRecoveredContinues(t *testing.T) {
+	e := New()
+	var got []string
+	e.Do(func() { got = append(got, "before") })
+	e.Do(func() { panic("boom") })
+	e.Do(func() { got = append(got, "after") })
+	e.Do(func() { e.Stop() })
+	e.Run()
+	if len(got) != 2 || got[0] != "before" || got[1] != "after" {
+		t.Fatalf("loop did not continue after panic: got %v", got)
+	}
+}

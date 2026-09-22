@@ -72,6 +72,17 @@ type Bridge struct {
 	// run of futile reconnects rather than a lifetime total (see checkRXWedge).
 	relinks []int
 
+	// portEpoch[port] is bumped every time a connect attempt for the port is
+	// initiated (initial, auto-reconnect, manual relink, wedge relink). A dial
+	// captures the epoch at start and, on completion, discards-and-closes its
+	// fresh port if the epoch has moved on — otherwise a stale dial that
+	// finishes after a successful relink overwrites and orphans the healthy
+	// port (two decoders split one KISS byte stream, or every frame arrives
+	// twice on a multi-client TCP TNC). Mutated on the engine loop, with one
+	// exception: Start bumps it before the engine loop is running (app.New
+	// calls Start before Run), which is safe by construction.
+	portEpoch []int
+
 	// idleSweepTimer and rxWedgeTimer are held so we can cancel them on Shutdown.
 	idleSweepTimer *engine.Timer
 	rxWedgeTimer   *engine.Timer
@@ -92,6 +103,7 @@ func New(eng *engine.Engine, cfg *config.Config) *Bridge {
 	return &Bridge{
 		eng:          eng,
 		cfg:          cfg,
+		portEpoch:    make([]int, len(cfg.Ports)),
 		newTransport: buildTransport,
 	}
 }
@@ -387,14 +399,6 @@ func normalizeHBits(raw []byte) []byte {
 	return out
 }
 
-// min returns the smaller of two ints.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // isLocalCall reports whether call is registered by any current AGWPE client.
 // All reads happen on the engine loop — same as the existing owner lookup.
 func (b *Bridge) isLocalCall(_ int, call string) bool {
@@ -524,7 +528,8 @@ func (b *Bridge) Start() error {
 	for i, portCfg := range b.cfg.Ports {
 		idx := i
 		pc := portCfg
-		go b.connectPort(idx, pc)
+		b.portEpoch[idx]++
+		go b.connectPort(idx, pc, b.portEpoch[idx])
 	}
 
 	// Start idle sweep if configured.
@@ -546,7 +551,10 @@ func (b *Bridge) Start() error {
 
 // connectPort opens one KISS port in a background goroutine and posts the
 // result back to the engine loop. Mirrors tncd.py:1123-1142.
-func (b *Bridge) connectPort(idx int, pc config.Port) {
+// epoch is the portEpoch captured at initiation: if a newer connect attempt
+// superseded this one before the (possibly slow) dial completed, the fresh
+// port is discarded and closed instead of overwriting the healthy slot.
+func (b *Bridge) connectPort(idx int, pc config.Port, epoch int) {
 	tr, err := b.newTransport(pc)
 	if err != nil {
 		log.Printf("bridge: port %d build transport error: %v", idx, err)
@@ -573,6 +581,14 @@ func (b *Bridge) connectPort(idx int, pc config.Port) {
 	}
 
 	b.eng.Do(func() {
+		if b.portEpoch[idx] != epoch {
+			// A newer attempt (manual/wedge relink or a fresh auto-reconnect)
+			// owns this slot. Tear our own fresh port down rather than
+			// overwriting and orphaning the live one.
+			log.Printf("bridge: port %d stale connect discarded (superseded by a newer attempt)", idx)
+			port.Close()
+			return
+		}
 		b.ports[idx] = port
 		log.Printf("bridge: port %d online", idx)
 	})
@@ -610,12 +626,13 @@ func (b *Bridge) scheduleReconnect(idx int, pc config.Port, delay float64) {
 		if nextDelay > maxDelay {
 			nextDelay = maxDelay
 		}
-		go b.connectPortWithBackoff(idx, pc, nextDelay)
+		b.portEpoch[idx]++
+		go b.connectPortWithBackoff(idx, pc, nextDelay, b.portEpoch[idx])
 	})
 }
 
 // connectPortWithBackoff is like connectPort but also schedules retry on failure.
-func (b *Bridge) connectPortWithBackoff(idx int, pc config.Port, nextDelay float64) {
+func (b *Bridge) connectPortWithBackoff(idx int, pc config.Port, nextDelay float64, epoch int) {
 	tr, err := b.newTransport(pc)
 	if err != nil {
 		log.Printf("bridge: port %d build transport error (reconnect): %v", idx, err)
@@ -640,6 +657,11 @@ func (b *Bridge) connectPortWithBackoff(idx int, pc config.Port, nextDelay float
 	}
 
 	b.eng.Do(func() {
+		if b.portEpoch[idx] != epoch {
+			log.Printf("bridge: port %d stale reconnect discarded (superseded by a newer attempt)", idx)
+			port.Close()
+			return
+		}
 		b.ports[idx] = port
 		log.Printf("bridge: port %d reconnected", idx)
 	})
@@ -757,6 +779,11 @@ func (b *Bridge) reconnectPort(port int, keepL2 bool) bool {
 		b.l2.PortOffline(port)
 	}
 	b.resetPortCounters(port)
+	// A relink is a new connect attempt: bump the epoch so any still-dialing
+	// auto-reconnect that completes later discards itself instead of
+	// overwriting this fresh port (see connectPort's stale check).
+	b.portEpoch[port]++
+	epoch := b.portEpoch[port]
 	// Close the old port and reconnect off-loop (Close joins the reader
 	// goroutine and can block on socket teardown).
 	go func() {
@@ -771,7 +798,7 @@ func (b *Bridge) reconnectPort(port int, keepL2 bool) bool {
 		if pc.Type == "bluetooth" {
 			time.Sleep(bluetoothRelinkSettle)
 		}
-		b.connectPort(port, pc)
+		b.connectPort(port, pc, epoch)
 	}()
 	return true
 }
@@ -842,12 +869,16 @@ func rxWedged(online bool, timeout time.Duration, hasActiveTX bool, sinceLastRX 
 // unacked I-frames awaiting an ack (Connected). In either state, total RX
 // silence past the timeout means a wedged receive path, not an idle link — so
 // both the handshake wedge (SABM→UA) and the mid-transfer wedge are covered.
+// Disconnecting counts too: a port that wedges mid-disconnect never delivers
+// the UA, and counting it lets a keepL2 relink restore the TX path so the next
+// T1 retransmit of the DISC actually reaches the air.
 func (b *Bridge) portAwaitingReply(port int) bool {
 	for _, ci := range b.l2.Snapshot() {
 		if ci.Port != port {
 			continue
 		}
-		if ci.State == "connecting" || (ci.State == "connected" && ci.Unacked > 0) {
+		if ci.State == "connecting" || ci.State == "disconnecting" ||
+			(ci.State == "connected" && ci.Unacked > 0) {
 			return true
 		}
 	}

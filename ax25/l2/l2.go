@@ -314,6 +314,32 @@ func (t *Table) t1Expired(c *Conn) {
 	c.t1 = nil
 	pp := t.portParams(c.Port)
 
+	if c.State == Disconnecting {
+		// DISC retransmission while awaiting UA/DM. Dire Wolf retries DISC on
+		// T1 exactly like SABM, so a lost DISC does not wedge the link. (tncd.py
+		// and the pre-fix code had no branch here: the timer fired once, was not
+		// re-armed, and the conn zombied in the table forever.)
+		c.t1Polls++
+		if c.t1Polls > pp.N2Retry {
+			// N2 exhausted — give up. On a healthy link the peer is gone; on a
+			// wedged link the resends were harmlessly dropped. This removal is
+			// purely local cleanup, no on-air delivery is required.
+			c.State = Disconnected
+			if t.hooks.Disconnected != nil {
+				t.hooks.Disconnected(c)
+			}
+			t.removeConn(c)
+			return
+		}
+		// Connection-phase retransmits use a FIXED T1 (no Karn backoff), same
+		// reasoning as the Connecting branch.
+		c.t1Value = pp.T1
+		f := cmdFrame(c.Remote, c.Local, c.Via, ax25.DISC, true)
+		t.sendFrame(c.Port, f)
+		t.startT1(c)
+		return
+	}
+
 	if c.State == Connecting {
 		// SABM/SABME retransmission while waiting for UA (AX.25 6.3.1)
 		// tncd.py:1512-1539
@@ -521,6 +547,7 @@ func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, er
 func (t *Table) Disconnect(c *Conn) {
 	cancelT1(c)
 	c.State = Disconnecting
+	c.t1Polls = 0
 	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.DISC, true)
 	t.sendFrame(c.Port, f)
 	t.startT1(c)
@@ -583,7 +610,12 @@ func (t *Table) drainOutbound(c *Conn) {
 		// Pop first entry.
 		entry := c.outQueue[0]
 		c.outQueue = c.outQueue[1:]
-		chunk := entry.data
+		// Copy the head chunk before coalescing: entry.data may be a subslice
+		// of a caller-supplied payload, and append below could otherwise write
+		// into that backing array when it has spare capacity (corrupting the
+		// caller's buffer or a neighbour entry). Copying keeps the coalescing
+		// append on a fresh allocation whenever it grows past the head.
+		chunk := append([]byte(nil), entry.data...)
 		pid := entry.pid
 
 		// Coalesce adjacent entries with the same PID up to 256 bytes.
@@ -817,12 +849,16 @@ func (t *Table) RemoveOwned(owner any) {
 }
 
 // PortOffline handles a port going offline: cancels all timers, fires
-// Disconnected for Connected/Connecting conns on that port, and removes them.
+// Disconnected for Connected/Connecting/Disconnecting conns on that port, and
+// removes them. Disconnecting conns are reaped too: with the port dead the UA
+// can *never* arrive (the port transmits nothing), so local reaping is the
+// only possible cleanup.
 // Mirrors tncd.py:1246-1264 (_port_went_offline).
 func (t *Table) PortOffline(port int) {
 	var toRemove []*Conn
 	for _, c := range t.conns {
-		if c.Port == port && (c.State == Connected || c.State == Connecting) {
+		if c.Port == port &&
+			(c.State == Connected || c.State == Connecting || c.State == Disconnecting) {
 			toRemove = append(toRemove, c)
 		}
 	}
@@ -1228,6 +1264,15 @@ func (t *Table) deliverData(c *Conn, pid uint8, info []byte) {
 // sendSREJHoles sends a single SREJ (response) for each missing sequence number
 // in [V(R), upto) that is not buffered and not already requested, recording each
 // in srejSent (dedup). F=1 only on the SREJ for V(R) itself (also acknowledges).
+//
+// This is NOT a violation of having negotiated single-SREJ in XID: "single" vs
+// "multi" SREJ distinguishes the frame *encoding*, not how many SREJ frames may
+// be sent. Multi-SREJ packs the additional N(S) values into one SREJ's INFO
+// field (the X.25 extension); single-SREJ sends a separate SREJ frame per
+// missing N(S) — which is exactly what Dire Wolf's send_srej_frames does on its
+// srej_single path ("Multi-SREJ not enabled. Send separate SREJ for each
+// desired sequence number."), with F set only when N(R) == V(R) and dedup via
+// outstanding_srej[]. Verified against wb2osz/direwolf src/ax25_link.c.
 func (t *Table) sendSREJHoles(c *Conn, src, dst string, upto uint8) {
 	for i := 0; i < int(c.modulo); i++ { // bound defends against a bad upto
 		ns := (c.recvSeq + uint8(i)) % c.modulo
@@ -1263,7 +1308,8 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 
 	// Single-SREJ (v2.2): ackFrames above already acked <= N(R)-1 and left
 	// frame N(R) in the retransmit buffer. Retransmit ONLY that frame — not
-	// go-back-N. (We never send SREJ ourselves; sending is phase 3.5.)
+	// go-back-N. (We do send SREJ ourselves when negotiated — see
+	// sendSREJHoles; this branch handles an SREJ we receive.)
 	if f.Type == ax25.SREJ {
 		c.remoteBusy = false
 		if raw, ok := c.retransmitBuf[f.NR]; ok {

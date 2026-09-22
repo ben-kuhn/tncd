@@ -7,7 +7,7 @@ import (
 
 func TestSnapshotActiveOnly(t *testing.T) {
 	tbl := &Table{conns: map[connKey]*Conn{}}
-	// One connected, one disconnected.
+	// One connected, one disconnected, one disconnecting.
 	c := newConn(0, "KU0HN-10", "W0NE-10")
 	c.State = Connected
 	c.incoming = true
@@ -26,11 +26,24 @@ func TestSnapshotActiveOnly(t *testing.T) {
 	d := newConn(0, "AAA", "BBB") // Disconnected (default)
 	tbl.conns[makeKey(0, "AAA", "BBB")] = d
 
+	dc := newConn(0, "CCC", "DDD")
+	dc.State = Disconnecting // DISC sent, awaiting UA — must appear so the
+	// RX-wedge watchdog counts it as awaiting a reply.
+	tbl.conns[makeKey(0, "CCC", "DDD")] = dc
+
 	snap := tbl.Snapshot()
-	if len(snap) != 1 {
-		t.Fatalf("snapshot len = %d, want 1 (active only)", len(snap))
+	if len(snap) != 2 {
+		t.Fatalf("snapshot len = %d, want 2 (active incl. disconnecting)", len(snap))
 	}
-	got := snap[0]
+	// Snapshot iterates the conns map, so order is nondeterministic — find the
+	// Connected conn rather than assuming snap[0].
+	var got ConnInfo
+	for _, s := range snap {
+		if s.Local == "KU0HN-10" {
+			got = s
+			break
+		}
+	}
 	if got.Local != "KU0HN-10" || got.Remote != "W0NE-10" || got.State != "connected" ||
 		!got.Incoming || got.Modulo != 128 || got.SendSeq != 5 || got.RecvSeq != 3 ||
 		got.Unacked != 2 || got.SendQueue != 1 || got.T1Retries != 1 || !got.RemoteBusy ||

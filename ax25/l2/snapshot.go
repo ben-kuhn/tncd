@@ -8,7 +8,7 @@ type ConnInfo struct {
 	Local      string   `json:"local"`
 	Remote     string   `json:"remote"`
 	Via        []string `json:"via"`
-	State      string   `json:"state"` // lowercase: "connected" / "connecting"
+	State      string   `json:"state"` // lowercase: "connected" / "connecting" / "disconnecting"
 	Incoming   bool     `json:"incoming"`
 	Modulo     uint8    `json:"modulo"`
 	SendSeq    uint8    `json:"send_seq"`
@@ -21,12 +21,15 @@ type ConnInfo struct {
 	SREJ       bool     `json:"srej"`
 }
 
-// Snapshot returns info for every active (Connecting/Connected) connection.
+// Snapshot returns info for every active (Connecting/Connected/Disconnecting)
+// connection. Disconnecting conns are included so the bridge's RX-wedge
+// watchdog can treat a pending disconnect as traffic the port is awaiting
+// (a keepL2 relink lets the next DISC retransmit reach the air).
 // Must be called on the engine loop.
 func (t *Table) Snapshot() []ConnInfo {
 	out := make([]ConnInfo, 0, len(t.conns))
 	for _, c := range t.conns {
-		if c.State != Connecting && c.State != Connected {
+		if c.State != Connecting && c.State != Connected && c.State != Disconnecting {
 			continue
 		}
 		via := append([]string(nil), c.Via...)

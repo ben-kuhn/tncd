@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/version"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 // uninstallKey is the Add/Remove Programs registry key for tncd.
@@ -50,9 +54,39 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
+// hardenConfigDirACL replaces the config directory's inherited DACL with an
+// explicit SYSTEM + Administrators-only one. Default ACL inheritance makes the
+// dir admin-write-only in practice but does not guarantee it; a non-admin write
+// to tncd.ini would redirect a LocalSystem service, so the installer enforces
+// the ACL explicitly. Uses icacls (present since Vista, run from the already-
+// elevated installer) rather than raw DACL-building syscalls, which the pinned
+// x/sys does not expose.
+func hardenConfigDirACL(dir string) error {
+	// /inheritance:r drops inherited ACEs; /grant:r gives SYSTEM and
+	// Administrators full control, (OI)(CI) propagating to children like
+	// tncd.ini. Everyone/Users lose write access.
+	args := []string{
+		dir,
+		"/inheritance:r",
+		"/grant:r",
+		"SYSTEM:(OI)(CI)F",
+		"Administrators:(OI)(CI)F",
+	}
+	cmd := exec.Command("icacls", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("icacls %s: %v (%s)", dir, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // install copies the running binary and the given config into place, registers
 // and starts the service pointing at the installed copies, and writes an
 // Add/Remove Programs entry. Requires elevation (Program Files, HKLM, the SCM).
+//
+// Re-running install over an existing deployment is an upgrade: an installed
+// service whose exe is locked by its running process must be stopped so the new
+// binary can replace it, then restarted. The service registration itself is
+// kept (paths are stable across versions), so no uninstall is required.
 func install(srcCfg string) error {
 	// Validate the config before touching anything.
 	c, err := config.Load(srcCfg)
@@ -70,6 +104,13 @@ func install(srcCfg string) error {
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", cfgDir, err)
 	}
+	// The config dir will hold tncd.ini read by a LocalSystem service; default
+	// ACL inheritance is typically admin-write-only in practice but not
+	// guaranteed. Enforce an explicit SYSTEM+Administrators-only DACL so a
+	// non-admin write to tncd.ini cannot redirect a LocalSystem process.
+	if err := hardenConfigDirACL(cfgDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not restrict %s ACL: %v\n", cfgDir, err)
+	}
 
 	src, err := os.Executable()
 	if err != nil {
@@ -79,22 +120,109 @@ func install(srcCfg string) error {
 	destExe := filepath.Join(exeDir, "tncd.exe")
 	destCfg := filepath.Join(cfgDir, "tncd.ini")
 
+	// Upgrade path: stop a running tncd service so its exe handle is released
+	// and the new binary can be copied over it. Record whether we must restart
+	// it (and whether a service exists at all) before touching any file.
+	svcExists, wasRunning, err := stopRunningServiceForUpgrade()
+	if err != nil {
+		return fmt.Errorf("prepare upgrade: %w", err)
+	}
+
 	if err := copyFile(src, destExe); err != nil {
-		return fmt.Errorf("copy program to %s: %w", destExe, err)
+		// The exe may still be locked by a non-service process (a console tncd
+		// launched from the installed copy, or a service that was slow to stop).
+		// Windows permits renaming a running exe, so move the locked file aside
+		// (scheduling it for deletion on reboot) and retry with the fresh copy.
+		if rerr := replaceLockedExe(destExe); rerr != nil {
+			return fmt.Errorf("copy program to %s: %w", destExe, err)
+		}
+		if err := copyFile(src, destExe); err != nil {
+			return fmt.Errorf("copy program to %s: %w", destExe, err)
+		}
 	}
 	if err := copyFile(srcCfg, destCfg); err != nil {
 		return fmt.Errorf("copy config to %s: %w", destCfg, err)
 	}
 
-	if err := installServiceAt(destExe, destCfg); err != nil {
-		return fmt.Errorf("register service: %w", err)
-	}
-	if err := startService(); err != nil {
-		return fmt.Errorf("start service: %w", err)
+	if svcExists {
+		// Service already registered and pointing at the stable paths; restart
+		// it (if it was running) so the fresh binary takes effect. CreateService
+		// would fail on the existing registration, so we skip it entirely.
+		if wasRunning {
+			if err := startService(); err != nil {
+				return fmt.Errorf("restart service: %w", err)
+			}
+		}
+	} else {
+		if err := installServiceAt(destExe, destCfg); err != nil {
+			return fmt.Errorf("register service: %w", err)
+		}
+		if err := startService(); err != nil {
+			return fmt.Errorf("start service: %w", err)
+		}
 	}
 	if err := writeUninstallEntry(destExe); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write Add/Remove Programs entry: %v\n", err)
 	}
+	return nil
+}
+
+// stopRunningServiceForUpgrade stops the installed tncd service if it is
+// running, so its exe file is no longer locked and an upgrade can replace it.
+// Returns whether a service is registered at all and whether it was running
+// (so the caller knows to restart it after the file swap).
+func stopRunningServiceForUpgrade() (exists, wasRunning bool, err error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false, false, err
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return false, false, nil // not installed — fresh-install path
+	}
+	defer s.Close()
+
+	st, err := s.Query()
+	if err != nil {
+		return true, false, nil // registered but unqueryable; leave it alone
+	}
+	if st.State != svc.Running && st.State != svc.StartPending {
+		return true, false, nil // stopped — nothing to release
+	}
+	if _, err := s.Control(svc.Stop); err != nil {
+		return true, true, fmt.Errorf("stop service %s: %w", serviceName, err)
+	}
+	// Wait for the process to actually exit so the exe handle is released. If
+	// it does not stop in time, the rename fallback in install() still copes.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		cur, err := s.Query()
+		if err == nil && cur.State == svc.Stopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return true, true, nil
+}
+
+// replaceLockedExe moves a running/locked tncd.exe aside so a fresh copy can be
+// installed in its place. Windows allows renaming an exe that is in use; the
+// renamed file (still held by the old process) is scheduled for deletion on the
+// next reboot.
+func replaceLockedExe(destExe string) error {
+	old := destExe + ".old"
+	if err := os.Remove(old); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale %s: %w", old, err)
+	}
+	if err := os.Rename(destExe, old); err != nil {
+		return fmt.Errorf("rename locked exe to %s: %w", old, err)
+	}
+	scheduleFileDeleteOnReboot(old)
 	return nil
 }
 
@@ -124,14 +252,20 @@ func uninstall() error {
 	return nil
 }
 
+// scheduleFileDeleteOnReboot marks a single path for deletion at the next boot
+// via MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT). Used for files that are still
+// locked by a running process (the old exe after an upgrade rename).
+func scheduleFileDeleteOnReboot(path string) {
+	if w, err := windows.UTF16PtrFromString(path); err == nil {
+		_ = windows.MoveFileEx(w, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+	}
+}
+
 // scheduleDeleteOnReboot marks path (a file, or a directory's exe) for deletion
 // at the next boot via MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT).
 func scheduleDeleteOnReboot(dir string) {
-	for _, p := range []string{filepath.Join(dir, "tncd.exe"), dir} {
-		if w, err := windows.UTF16PtrFromString(p); err == nil {
-			_ = windows.MoveFileEx(w, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
-		}
-	}
+	scheduleFileDeleteOnReboot(filepath.Join(dir, "tncd.exe"))
+	scheduleFileDeleteOnReboot(dir)
 }
 
 func writeUninstallEntry(exe string) error {

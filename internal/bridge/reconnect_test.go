@@ -1,12 +1,15 @@
 package bridge
 
 import (
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ben-kuhn/tncd/v2/ax25"
+	l2pkg "github.com/ben-kuhn/tncd/v2/ax25/l2"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
 	"github.com/ben-kuhn/tncd/v2/kiss"
@@ -111,4 +114,235 @@ func TestPortNoReconnectWhenDisabled(t *testing.T) {
 	if got := ft.openCount(); got != 1 {
 		t.Fatalf("reconnect happened despite reconnect=false: open count = %d", got)
 	}
+}
+
+// gateFakeTransport is a kiss.Transport whose Open optionally blocks until
+// released, simulating a slow dial (a Bluetooth ConnectProfile can take 30s).
+// Close unblocks Read and records that it ran.
+type gateFakeTransport struct {
+	opened chan struct{}  // closed when Open is entered
+	gate   chan struct{}  // non-nil: Open blocks until this is closed
+	readCh chan struct{}  // Close closes it, unblocking Read with EOF
+
+	openOnce  sync.Once
+	closeOnce sync.Once
+	closes    int32
+	writes    int32
+}
+
+func newGateFake(gated bool) *gateFakeTransport {
+	f := &gateFakeTransport{
+		opened: make(chan struct{}),
+		readCh: make(chan struct{}),
+	}
+	if gated {
+		f.gate = make(chan struct{})
+	}
+	return f
+}
+
+func (f *gateFakeTransport) Open() error {
+	f.openOnce.Do(func() { close(f.opened) })
+	if f.gate != nil {
+		<-f.gate
+	}
+	return nil
+}
+func (f *gateFakeTransport) EnterKISS() error { return nil }
+func (f *gateFakeTransport) ExitKISS()        {}
+func (f *gateFakeTransport) Write(p []byte) (int, error) {
+	atomic.AddInt32(&f.writes, 1)
+	return len(p), nil
+}
+func (f *gateFakeTransport) Read(p []byte) (int, error) { <-f.readCh; return 0, io.EOF }
+func (f *gateFakeTransport) Close() error {
+	f.closeOnce.Do(func() { close(f.readCh) })
+	atomic.AddInt32(&f.closes, 1)
+	return nil
+}
+func (f *gateFakeTransport) closeCount() int { return int(atomic.LoadInt32(&f.closes)) }
+func (f *gateFakeTransport) writeCount() int { return int(atomic.LoadInt32(&f.writes)) }
+func (f *gateFakeTransport) openEntered() bool {
+	select {
+	case <-f.opened:
+		return true
+	default:
+		return false
+	}
+}
+
+// gateFactory hands out fakes in order, one per dial.
+func gateFactory(t *testing.T, fakes ...*gateFakeTransport) func(config.Port) (kiss.Transport, error) {
+	t.Helper()
+	var calls int32
+	return func(config.Port) (kiss.Transport, error) {
+		n := atomic.AddInt32(&calls, 1)
+		if int(n) > len(fakes) {
+			return nil, fmt.Errorf("unexpected extra dial #%d", n)
+		}
+		return fakes[n-1], nil
+	}
+}
+
+// portOnline polls the port's online flag from the engine loop.
+func portOnline(eng *engine.Engine, b *Bridge, port int) bool {
+	done := make(chan bool, 1)
+	eng.Do(func() { done <- b.PortOnline(port) })
+	select {
+	case v := <-done:
+		return v
+	case <-time.After(time.Second):
+		return false
+	}
+}
+
+// TestStaleReconnectDoesNotOrphanLivePort — 2026-09 audit finding. When an
+// auto-reconnect dial is still in flight (a Bluetooth connect can block for
+// tens of seconds) and a manual relink (or a wedge relink) succeeds first,
+// the stale dial eventually completes and posts b.ports[idx] = itsPort
+// unconditionally: it overwrites the healthy relinked port and ORPHANS it —
+// the orphan's reader/writer goroutines keep running and its onFrame callback
+// keeps feeding the bridge, so two decoders split one KISS byte stream (or,
+// for type=tcp against Dire Wolf, every frame is delivered twice).
+//
+// Required behavior: a stale connect completion notices the slot has been
+// refilled by a newer attempt, tears its own fresh port down, and leaves the
+// live one alone. This test fails pre-fix.
+func TestStaleReconnectDoesNotOrphanLivePort(t *testing.T) {
+	eng := engine.New()
+	b := New(eng, reconnCfg(true))
+
+	f1 := newGateFake(false) // initial link
+	f2 := newGateFake(true)  // auto-reconnect: Open blocks until released
+	f3 := newGateFake(false) // manual relink: opens immediately
+	b.newTransport = gateFactory(t, f1, f2, f3)
+
+	if err := b.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	go eng.Run()
+	t.Cleanup(func() {
+		onLoop(t, eng, func() { b.Shutdown() })
+		eng.Stop()
+	})
+
+	waitFor(t, f1.openEntered, 2*time.Second, "initial open")
+
+	// Link drops: reader EOF → portWentOffline → auto-reconnect armed (10ms).
+	f1.Close()
+
+	// The auto-reconnect dials f2 and parks inside its Open.
+	waitFor(t, f2.openEntered, 2*time.Second, "auto-reconnect dial")
+
+	// Operator hits "relink" while the auto-reconnect is still dialling.
+	onLoop(t, eng, func() {
+		if !b.ReconnectPort(0) {
+			t.Errorf("manual relink rejected")
+		}
+	})
+	waitFor(t, f3.openEntered, 2*time.Second, "manual relink dial")
+	waitFor(t, func() bool { return portOnline(eng, b, 0) }, 2*time.Second, "relink online")
+
+	// The stale auto-reconnect dial finally completes.
+	close(f2.gate)
+	time.Sleep(200 * time.Millisecond) // let it post its slot assignment
+
+	if f2.closeCount() == 0 {
+		t.Errorf("stale auto-reconnect completion was not discarded: it overwrote the " +
+			"live relinked port and its transport was never closed (orphaned port keeps " +
+			"reading from the TNC)")
+	}
+	if !portOnline(eng, b, 0) {
+		t.Errorf("port offline after relink; the live relink should have survived")
+	}
+
+	// A full shutdown must close every transport that was ever opened. Pre-fix
+	// the orphaned relink port is untracked and leaks (goroutines + socket).
+	onLoop(t, eng, func() { b.Shutdown() })
+	if f3.closeCount() == 0 {
+		t.Errorf("relinked port orphaned: never closed (not tracked in the slot)")
+	}
+}
+
+// connEventSink records bridge ConnEvents. Engine-loop only.
+type connEventSink struct{ events []ConnEvent }
+
+func (s *connEventSink) OnConn(e ConnEvent) { s.events = append(s.events, e) }
+
+// TestWedgeRelinkPreservesSession locks in the Bluetooth RX-wedge recovery
+// contract (bridge.checkRXWedge → reconnectPort(port, keepL2=true)): cycling
+// the transport must NOT tear down L2 sessions — an in-flight Winlink
+// transfer resumes on the fresh link rather than dropping. Any rework of the
+// reconnect paths (e.g. the stale-completion fix above) must preserve this.
+func TestWedgeRelinkPreservesSession(t *testing.T) {
+	eng := engine.New()
+	b := New(eng, reconnCfg(true))
+
+	f1 := newGateFake(false)
+	f2 := newGateFake(false)
+	b.newTransport = gateFactory(t, f1, f2)
+
+	if err := b.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	go eng.Run()
+	t.Cleanup(func() {
+		onLoop(t, eng, func() { b.Shutdown() })
+		eng.Stop()
+	})
+
+	waitFor(t, f1.openEntered, 2*time.Second, "initial open")
+
+	// Establish an outgoing session: SABM out (via Connect), UA in.
+	sink := &connEventSink{}
+	onLoop(t, eng, func() {
+		b.RegisterConnSink(sink)
+		if _, err := b.L2().Connect(0, "LOCAL-1", "REMOTE-2", nil); err != nil {
+			t.Errorf("Connect: %v", err)
+		}
+	})
+	dst, _ := ax25.ParseAddress("LOCAL-1")
+	src, _ := ax25.ParseAddress("REMOTE-2")
+	ua := &ax25.Frame{Dst: dst, Src: src, Type: ax25.UA, Command: false, PF: true}
+	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: ua.Bytes()}) })
+	onLoop(t, eng, func() {
+		c := b.L2().Get(0, "LOCAL-1", "REMOTE-2")
+		if c == nil || c.State != l2pkg.Connected {
+			t.Fatalf("setup: conn not Connected (c=%v)", c)
+		}
+	})
+
+	// Wedge watchdog fires: cycle the transport, keep L2.
+	onLoop(t, eng, func() {
+		if !b.reconnectPort(0, true) {
+			t.Fatalf("wedge relink rejected")
+		}
+	})
+	waitFor(t, f2.openEntered, 2*time.Second, "relink dial")
+	waitFor(t, func() bool { return portOnline(eng, b, 0) }, 2*time.Second, "relink online")
+
+	// The session must have survived: still Connected, no disconnect event.
+	onLoop(t, eng, func() {
+		c := b.L2().Get(0, "LOCAL-1", "REMOTE-2")
+		if c == nil {
+			t.Errorf("wedge relink dropped the session")
+			return
+		}
+		if c.State != l2pkg.Connected {
+			t.Errorf("session state = %s after wedge relink, want Connected", c.State)
+		}
+		for _, e := range sink.events {
+			if e.State == "disconnected" {
+				t.Errorf("wedge relink emitted a spurious disconnect event: %+v", e)
+			}
+		}
+	})
+
+	// And the session still transmits on the fresh transport.
+	onLoop(t, eng, func() {
+		if c := b.L2().Get(0, "LOCAL-1", "REMOTE-2"); c != nil {
+			b.L2().SendData(c, 0xF0, []byte("hello"))
+		}
+	})
+	waitFor(t, func() bool { return f2.writeCount() > 0 }, 2*time.Second, "TX on relinked transport")
 }

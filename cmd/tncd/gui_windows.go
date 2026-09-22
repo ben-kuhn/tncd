@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unsafe"
 
@@ -16,6 +17,11 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+// callsignRe matches the legal AX.25 callsign charset as entered by the
+// installer wizard ([A-Z0-9-], 1-6 chars). Guards the verbatim INI write in
+// buildConfig against anything that could break or forge the config file.
+var callsignRe = regexp.MustCompile(`^[A-Z0-9-]{1,6}$`)
 
 // maybeGUI runs the graphical installer / manage UI when tncd.exe was launched
 // by a double-click — a bare invocation (no args), interactive (not the SCM),
@@ -153,6 +159,16 @@ func installerWizard() error {
 		callsign := strings.ToUpper(strings.TrimSpace(callsignLE.Text()))
 		if callsign == "" {
 			walk.MsgBox(mw, "tncd", "Please enter your callsign.", walk.MsgBoxIconWarning)
+			return
+		}
+		// Defensive: the LineEdit makes CRLF injection impractical, but a
+		// callsign that breaks the INI (or an unexpected value with a newline)
+		// would ship a corrupt or forged config to the SYSTEM service. Validate
+		// the legal AX.25 callsign charset (the wizard writes it verbatim into
+		// the config's informational-only [server] callsign).
+		if !callsignRe.MatchString(callsign) {
+			walk.MsgBox(mw, "tncd", "Callsign may contain only letters, digits, and dashes (up to 6 chars).",
+				walk.MsgBoxIconWarning)
 			return
 		}
 		idx := portCB.CurrentIndex()

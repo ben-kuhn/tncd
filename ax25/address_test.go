@@ -39,6 +39,28 @@ func TestAddressString(t *testing.T) {
 	}
 }
 
+func TestDecodeAddressSanitizesControlBytes(t *testing.T) {
+	// F-new-3: on-air bytes outside printable ASCII must be mapped to '?' at
+	// decode time so a crafted callsign (e.g. one containing CR/LF) cannot
+	// forge log lines or AGWPE monitor output in the operator's display.
+	raw := []byte{
+		0x0D << 1, // '\r'
+		0x0A << 1, // '\n'
+		'A' << 1, 'B' << 1, 'C' << 1, 'D' << 1,
+		0x61, // ssid 0, crh 0, ext 1 (last address)
+	}
+	a, ext := decodeAddress(raw)
+	if !ext {
+		t.Errorf("ext = false, want true")
+	}
+	if a.Call != "??ABCD" {
+		t.Errorf("Call = %q, want %q (control bytes sanitised to '?')", a.Call, "??ABCD")
+	}
+	if a.String() != "??ABCD" {
+		t.Errorf("String() = %q, want %q", a.String(), "??ABCD")
+	}
+}
+
 func TestEncodeMasksSSID(t *testing.T) {
 	// SSID out of range (>15) must not spill into the CRH/reserved bits.
 	// Use SSID=0x1F (31) as in the brief; ssid&0x0F=0xF, want 0x60|(0xF<<1)|1 = 0x7f.

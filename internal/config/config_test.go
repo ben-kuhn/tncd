@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -309,6 +310,48 @@ func TestRXWedgeTimeoutDefault(t *testing.T) {
 	}
 	if ov.Ports[0].RXWedgeTimeout != 0 {
 		t.Errorf("explicit rx_wedge_timeout=0 = %d, want 0 (disabled)", ov.Ports[0].RXWedgeTimeout)
+	}
+}
+
+func TestN2RetryClamped(t *testing.T) {
+	// F-new-6: n2_retry <= 0 makes a connect give up after the first T1 with no
+	// warning; it must be clamped to >= 1 at load.
+	cfg, err := Load(write(t, "[ax25]\nn2_retry = 0\n\n[client.0]\ntype = serial\ndevice = /dev/x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AX25.N2Retry != 1 {
+		t.Errorf("N2Retry = %d, want 1 (clamped)", cfg.AX25.N2Retry)
+	}
+}
+
+func TestSerialParityStopBitsValidated(t *testing.T) {
+	// F-new-6: a parity/stopbits typo must be a load (check) error, not an
+	// endless reconnect loop once the serial port fails to Open.
+	cases := []struct{ ini, want string }{
+		{"parity = Q", "parity"},
+		{"stopbits = 3", "stopbits"},
+	}
+	for _, c := range cases {
+		ini := "[client.0]\ntype = serial\ndevice = /dev/x\n" + c.ini + "\n"
+		if _, err := Load(write(t, ini)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("parity/stopbits %q: err = %v, want containing %q", c.ini, err, c.want)
+		}
+	}
+	// Valid values still load.
+	if _, err := Load(write(t, "[client.0]\ntype = serial\ndevice = /dev/x\nparity = E\nstopbits = 1.5\n")); err != nil {
+		t.Errorf("valid parity/stopbits rejected: %v", err)
+	}
+}
+
+func TestPortCountCapped(t *testing.T) {
+	// F-new-6: >16 ports wraps the KISS-TCP/raw-'K' port nibble. Reject at load.
+	var b strings.Builder
+	for i := 0; i <= maxPorts; i++ {
+		fmt.Fprintf(&b, "[client.%d]\ntype = serial\ndevice = /dev/x%d\n", i, i)
+	}
+	if _, err := Load(write(t, b.String())); err == nil || !strings.Contains(err.Error(), "too many ports") {
+		t.Errorf("err = %v, want too-many-ports error", err)
 	}
 }
 

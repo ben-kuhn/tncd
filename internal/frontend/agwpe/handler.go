@@ -37,7 +37,7 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 	from := hdr.CallFrom
 	to := hdr.CallTo
 
-	log.Printf("agwpe: handle_frame: port=%d kind=%c from=%q to=%q len=%d",
+	log.Printf("agwpe: handle_frame: port=%d kind=%#02x from=%q to=%q len=%d",
 		port, kind, from, to, len(data))
 
 	// Clamp an out-of-range port rather than dropping the frame.
@@ -54,7 +54,7 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 	// multi-port one, sends on port 0 instead of not transmitting at all. The
 	// log records the substitution so it is visible rather than mysterious.
 	if routedKinds[kind] && port >= c.b.PortCount() {
-		log.Printf("agwpe: port %d out of range for kind=%c, using port 0 (client sent an invalid port)", port, kind)
+		log.Printf("agwpe: port %d out of range for kind=%#02x, using port 0 (client sent an invalid port)", port, kind)
 		port = 0
 	}
 

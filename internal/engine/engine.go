@@ -4,6 +4,8 @@
 package engine
 
 import (
+	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -102,7 +104,7 @@ func (e *Engine) Run() {
 		e.mu.Unlock()
 
 		for _, fn := range batch {
-			fn()
+			runSafely(fn)
 		}
 
 		// Check stop after running the batch (Stop sets the flag via a posted fn,
@@ -138,4 +140,17 @@ func (e *Engine) After(d time.Duration, fn func()) *Timer {
 // Now returns the current wall-clock time. Satisfies the Clock interface.
 func (e *Engine) Now() time.Time {
 	return time.Now()
+}
+
+// runSafely runs fn, recovering from any panic so that a bug in one handler
+// (a missed bounds check in a parser, a nil-map write, etc.) cannot crash the
+// whole process and take every listener — and the station — off the air.
+// The panic is logged with its stack so the defect stays diagnosable.
+func runSafely(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("engine: recovered panic in event handler: %v\n%s", r, debug.Stack())
+		}
+	}()
+	fn()
 }

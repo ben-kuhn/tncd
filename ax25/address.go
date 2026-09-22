@@ -90,10 +90,20 @@ func (a Address) encode(crh bool, ext bool) [7]byte {
 
 // decodeAddress reads a 7-byte AX.25 address from b.
 // Returns the Address, plus the extension bit (true = last address in the list).
+//
+// On-air bytes outside printable ASCII (control chars like CR/LF, and high
+// bytes) are mapped to '?' at parse time: they can otherwise reach operator
+// logs, the AGWPE monitor stream, and connection-table keys verbatim, letting
+// an on-air string forge log/monitor lines (see F-new-3). Two garbage calls
+// colliding on '?' is acceptable.
 func decodeAddress(b []byte) (Address, bool) {
 	call := make([]byte, 6)
 	for i := 0; i < 6; i++ {
-		call[i] = b[i] >> 1
+		c := b[i] >> 1
+		if c < 32 || c > 126 { // keep printable ASCII (incl. space padding)
+			c = '?'
+		}
+		call[i] = c
 	}
 	callStr := strings.TrimRight(string(call), " ")
 

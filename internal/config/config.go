@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 	"github.com/ben-kuhn/tncd/v2/kiss"
@@ -144,6 +145,13 @@ var knownKISSKeys = []string{
 	"tx_delay", "persistence", "slot_time", "tx_tail", "full_duplex",
 }
 
+// maxPorts caps the number of [client.N] sections. Beyond 16 the KISS-TCP /
+// raw-'K' port nibble (byte(port)<<4) wraps, and beyond 255 the AGWPE port
+// byte wraps. Realistic stations use <= 4; a config declaring more than 16 is
+// almost certainly a mistake worth surfacing at load rather than a wrap-around
+// bug on the wire.
+const maxPorts = 16
+
 // levenshtein computes the edit distance between two strings.
 func levenshtein(a, b string) int {
 	la, lb := len(a), len(b)
@@ -219,23 +227,30 @@ func warnUnknownKeys(section *ini.Section, known []string) {
 }
 
 // getInt returns an int from a section key with a fallback default.
+// An unparseable value falls back to the default and logs a warning, so a
+// typo like `listen_port = 800o` does not silently change behaviour.
 func getInt(s *ini.Section, key string, def int) int {
 	if s.HasKey(key) {
 		v, err := s.Key(key).Int()
 		if err == nil {
 			return v
 		}
+		log.Printf("warning: [%s] %s = %q is not a valid integer; using %d",
+			s.Name(), key, s.Key(key).String(), def)
 	}
 	return def
 }
 
 // getFloat returns a float64 from a section key with a fallback default.
+// An unparseable value falls back to the default and logs a warning.
 func getFloat(s *ini.Section, key string, def float64) float64 {
 	if s.HasKey(key) {
 		v, err := s.Key(key).Float64()
 		if err == nil {
 			return v
 		}
+		log.Printf("warning: [%s] %s = %q is not a valid number; using %v",
+			s.Name(), key, s.Key(key).String(), def)
 	}
 	return def
 }
@@ -278,12 +293,15 @@ func parseAllowlistKey(s *ini.Section, key string) (netutil.Allowlist, error) {
 }
 
 // getIntPtr returns a *int from a section key, or nil if absent.
+// An unparseable value logs a warning and returns nil (field left unset).
 func getIntPtr(s *ini.Section, key string) *int {
 	if s.HasKey(key) {
 		v, err := s.Key(key).Int()
 		if err == nil {
 			return &v
 		}
+		log.Printf("warning: [%s] %s = %q is not a valid integer; leaving unset",
+			s.Name(), key, s.Key(key).String())
 	}
 	return nil
 }
@@ -402,6 +420,12 @@ func Load(path string) (*Config, error) {
 		N2Retry:   getInt(ax25Sec, "n2_retry", 10),
 		T3Timeout: getInt(ax25Sec, "t3_timeout", 180),
 	}
+	if cfg.AX25.N2Retry < 1 {
+		// n2_retry <= 0 makes a connect give up after the first T1 (one SABM,
+		// ~3s) with no warning. Clamp so retries actually happen.
+		log.Printf("warning: [ax25] n2_retry = %d is invalid; using 1", cfg.AX25.N2Retry)
+		cfg.AX25.N2Retry = 1
+	}
 
 	// --- Parse [kisstcp] ---
 	kisstcpSec := f.Section("kisstcp")
@@ -468,6 +492,9 @@ func Load(path string) (*Config, error) {
 	// --- Validate contiguous numbering ---
 	if len(portEntries) == 0 {
 		return nil, fmt.Errorf("no [client.N] sections found; define at least [client.0]")
+	}
+	if len(portEntries) > maxPorts {
+		return nil, fmt.Errorf("too many ports: %d (max %d)", len(portEntries), maxPorts)
 	}
 	for i, pe := range portEntries {
 		if pe.idx != i {
@@ -575,6 +602,15 @@ func Load(path string) (*Config, error) {
 			RXWedgeTimeout:    getInt(s, "rx_wedge_timeout", rxWedgeDefault),
 		}
 
+		// Serial-only params validated at load: a typo in parity/stopbits must
+		// surface as a `tncd check` error, not as an endless reconnect loop once
+		// the serial port fails to Open.
+		if portType == "serial" {
+			if err := validateSerialParams(pe.name, &port); err != nil {
+				return nil, err
+			}
+		}
+
 		// Parse corresponding [kiss.N] section if present
 		if ks, ok := kissMap[i]; ok {
 			warnUnknownKeys(ks, knownKISSKeys)
@@ -590,7 +626,54 @@ func Load(path string) (*Config, error) {
 		cfg.Ports[i] = port
 	}
 
+	warnDuplicatePorts(cfg.Ports)
+
 	return cfg, nil
+}
+
+// warnDuplicatePorts flags two ports that share one physical TNC — the same
+// serial device or Bluetooth address — which would fight over the same link
+// (two decoders splitting one byte stream, or two SPP connections to one
+// radio). A warning beats silent misconfiguration; a typo'd address is
+// indistinguishable from a deliberate (if usually wrong) shared-TNC setup.
+func warnDuplicatePorts(ports []Port) {
+	seenDevice := map[string]int{}
+	seenAddr := map[string]int{}
+	for i, p := range ports {
+		if p.Device != "" {
+			if first, dup := seenDevice[p.Device]; dup {
+				log.Printf("warning: [client.%d] and [client.%d] share device %q — they will fight over the same TNC",
+					first, i, p.Device)
+			} else {
+				seenDevice[p.Device] = i
+			}
+		}
+		if p.BDAddr != "" {
+			if first, dup := seenAddr[p.BDAddr]; dup {
+				log.Printf("warning: [client.%d] and [client.%d] share Bluetooth address %q — they will fight over the same TNC",
+					first, i, p.BDAddr)
+			} else {
+				seenAddr[p.BDAddr] = i
+			}
+		}
+	}
+}
+
+// validateSerialParams checks parity/stopbits at load time so a typo produces
+// a `tncd check` error instead of an endless reconnect loop when the serial
+// port fails to Open. Mirrors kiss/parseParity and kiss/parseStopBits.
+func validateSerialParams(secName string, port *Port) error {
+	switch strings.ToUpper(port.Parity) {
+	case "", "N", "E", "O":
+	default:
+		return fmt.Errorf("[%s] invalid parity %q (use N, E, or O)", secName, port.Parity)
+	}
+	switch port.StopBits {
+	case 0, 1, 1.5, 2:
+	default:
+		return fmt.Errorf("[%s] invalid stopbits %v (use 1, 1.5, or 2)", secName, port.StopBits)
+	}
+	return nil
 }
 
 // Validate checks the config for logical errors and returns an error naming

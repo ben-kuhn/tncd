@@ -3,6 +3,7 @@ package kiss
 import (
 	"net"
 	"strconv"
+	"time"
 )
 
 type tcpTransport struct {
@@ -16,8 +17,15 @@ func NewTCPTransport(host string, port int) Transport {
 	return &tcpTransport{host: host, port: port}
 }
 
+// tcpDialTimeout bounds a TCP dial to a remote TNC. Without it a black-holed
+// host can block Open for minutes (the OS connect timeout), holding the
+// reconnect goroutine and starving the backoff chain. 10s is comfortably above
+// any LAN/WAN connect the TNC requires.
+const tcpDialTimeout = 10 * time.Second
+
 func (t *tcpTransport) Open() error {
-	conn, err := net.Dial("tcp", net.JoinHostPort(t.host, strconv.Itoa(t.port)))
+	d := net.Dialer{Timeout: tcpDialTimeout}
+	conn, err := d.Dial("tcp", net.JoinHostPort(t.host, strconv.Itoa(t.port)))
 	if err != nil {
 		return err
 	}
