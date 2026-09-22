@@ -16,7 +16,14 @@ jobs:
           go-version-file: go.mod
 
       - name: Unit tests
-        run: CGO_ENABLED=0 go test ./...
+        # -count=1 disables the test cache: a cached pass can mask a flaky
+        # test that only fails on some runs (e.g. map-iteration-order bugs).
+        run: CGO_ENABLED=0 go test -count=1 ./...
+
+      - name: Repeat timing-sensitive packages
+        # Ordering/timing bugs in the serialized core often need a second run
+        # with a different map/schedule order to surface.
+        run: CGO_ENABLED=0 go test -count=2 ./ax25/l2/ ./internal/bridge/ ./internal/engine/
 
       - name: Vet
         run: CGO_ENABLED=0 go vet ./...
