@@ -87,7 +87,7 @@ func hardenConfigDirACL(dir string) error {
 // service whose exe is locked by its running process must be stopped so the new
 // binary can replace it, then restarted. The service registration itself is
 // kept (paths are stable across versions), so no uninstall is required.
-func install(srcCfg string) error {
+func install(srcCfg string) (retErr error) {
 	// Validate the config before touching anything.
 	c, err := config.Load(srcCfg)
 	if err != nil {
@@ -127,6 +127,16 @@ func install(srcCfg string) error {
 	if err != nil {
 		return fmt.Errorf("prepare upgrade: %w", err)
 	}
+	// Rollback: if any step below fails after we stopped a running service,
+	// try to restart it so a failed upgrade does not leave the station off
+	// the air. Best-effort — the error return stands either way.
+	defer func() {
+		if retErr != nil && svcExists && wasRunning {
+			if err := startService(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not restart service after failed upgrade: %v\n", err)
+			}
+		}
+	}()
 
 	if err := copyFile(src, destExe); err != nil {
 		// The exe may still be locked by a non-service process (a console tncd
