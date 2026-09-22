@@ -708,7 +708,7 @@ func (b *Bridge) notifyConnected(c *l2pkg.Conn, incoming bool) {
 		}
 	} else {
 		// Outgoing: owner was set at connect time by the AGWPE frontend.
-		msg := []byte("*** CONNECTED With " + c.Remote + "\r")
+		msg := []byte("*** CONNECTED With Station " + c.Remote + "\r")
 		if c.Owner != nil {
 			c.Owner.(Client).SendAGWPE(uint8(c.Port), 'C', 0, c.Remote, c.Local, msg)
 		}
@@ -813,7 +813,8 @@ func (b *Bridge) notifyData(c *l2pkg.Conn, pid uint8, data []byte) {
 }
 
 // notifyDisconnected notifies the connection owner of a disconnect.
-// Mirrors tncd.py:1550 and 1938 (*** DISCONNECTED From {remote}\r).
+// Wording matches Dire Wolf's server.c ("*** DISCONNECTED From Station X"),
+// the implementation AGWPE clients are developed against.
 // emitConn is called unconditionally so API consumers see a disconnect event
 // for every connection, matching the unconditional connect emit in notifyConnected.
 func (b *Bridge) notifyDisconnected(c *l2pkg.Conn) {
@@ -821,7 +822,7 @@ func (b *Bridge) notifyDisconnected(c *l2pkg.Conn) {
 	if c.Owner == nil {
 		return
 	}
-	msg := []byte("*** DISCONNECTED From " + c.Remote + "\r")
+	msg := []byte("*** DISCONNECTED From Station " + c.Remote + "\r")
 	c.Owner.(Client).SendAGWPE(uint8(c.Port), 'd', 0, c.Remote, c.Local, msg)
 }
 

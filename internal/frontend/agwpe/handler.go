@@ -26,7 +26,7 @@ var routedKinds = map[byte]bool{
 const maxRegisteredCalls = 8
 
 // maxDigipeaters is the AX.25 digipeater limit for 'V'/'v' via lists.
-const maxDigipeaters = 8
+const maxDigipeaters = ax25.MaxDigipeaters
 
 // handleFrame dispatches a complete AGWPE frame. Must be called on the engine loop.
 // Mirrors tncd.py:184-457 (handle_frame).
@@ -149,6 +149,9 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 	case 'C':
 		// Initiate AX.25 connection (tncd.py:274-303).
 		log.Printf("agwpe: CONNECT %q -> %q", from, to)
+		if !c.validCalls(port, from, to, nil) {
+			return
+		}
 		if !c.b.PortOnline(port) {
 			log.Printf("agwpe: CONNECT on offline port %d: BUSY", port)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
@@ -176,6 +179,9 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		// Connect with non-standard PID (tncd.py:305-329).
 		// No offline-port check here — Python 'c' does not have one (tncd.py:305-329).
 		log.Printf("agwpe: CONNECT (PID=0x%02X) %q -> %q", pid, from, to)
+		if !c.validCalls(port, from, to, nil) {
+			return
+		}
 		// Check for active non-owner connection BEFORE calling Connect (tncd.py:313-316).
 		if existing := c.b.L2().Get(port, from, to); existing != nil &&
 			existing.State != l2pkg.Disconnected && existing.Owner != c {
@@ -210,6 +216,9 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 			vias = decodeVias(viaBytes, nVia)
 		}
 		log.Printf("agwpe: CONNECT %q -> %q via %v", from, to, vias)
+		if !c.validCalls(port, from, to, vias) {
+			return
+		}
 		if !c.b.PortOnline(port) {
 			log.Printf("agwpe: CONNECT on offline port %d: BUSY", port)
 			busy := fmt.Sprintf("*** BUSY From %s\r", from)
@@ -255,7 +264,10 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		if len(data) == 0 {
 			data = []byte{}
 		}
-		c.b.L2().SendData(conn, framePID, data)
+		if dropped := c.b.L2().SendData(conn, framePID, data); dropped > 0 {
+			log.Printf("agwpe: 'D' %s->%s: outbound queue full, dropped %d of the payload's 256-byte chunks",
+				from, to, dropped)
+		}
 
 	case 'd':
 		// Disconnect (tncd.py:391-406).
@@ -287,10 +299,15 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 		}
 		log.Printf("agwpe: raw KISS frame, %d bytes", len(raw))
 		if len(raw) > 0 {
-			conn := c.b.L2().Get(port, from, to)
-			if conn != nil && conn.Owner != nil && conn.Owner != c {
-				log.Printf("agwpe: rejecting non-owner 'K' for %s->%s", from, to)
-				return
+			// Ownership is judged by the addresses inside the frame — the
+			// header callsigns are client-chosen and need not match — so one
+			// client cannot inject frames into another client's session.
+			if f, err := ax25.Parse(raw); err == nil {
+				conn := c.b.L2().Get(port, f.Src.String(), f.Dst.String())
+				if conn != nil && conn.Owner != nil && conn.Owner != c {
+					log.Printf("agwpe: rejecting non-owner 'K' for %s->%s", f.Src, f.Dst)
+					return
+				}
 			}
 			c.b.SendToKISS(port, raw)
 		}
@@ -335,6 +352,21 @@ func (c *client) handleFrame(hdr agwpepkg.Header, data []byte) {
 	default:
 		log.Printf("agwpe: unknown frame type %q (%d)", string([]byte{kind}), kind)
 	}
+}
+
+// validCalls reports whether every callsign of a connect request encodes as an
+// AX.25 address. If not, it tells the client why with a 'd' and returns false:
+// an unencodable call would otherwise reach the air as a blank address.
+func (c *client) validCalls(port int, from, to string, vias []string) bool {
+	for _, call := range append([]string{from, to}, vias...) {
+		if _, err := ax25.ParseAddress(call); err != nil {
+			log.Printf("agwpe: refusing connect %q -> %q: %v", from, to, err)
+			msg := fmt.Sprintf("*** connect to %s refused: invalid callsign %q\r", to, call)
+			c.sendFrame(uint8(port), 'd', from, to, []byte(msg))
+			return false
+		}
+	}
+	return true
 }
 
 // sendVersion sends the 8-byte version response (tncd.py:513-516).

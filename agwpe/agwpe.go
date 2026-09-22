@@ -1,9 +1,9 @@
 package agwpe
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
-	"strings"
 )
 
 const HeaderSize = 36
@@ -33,15 +33,20 @@ func ParseHeader(b []byte) (Header, error) {
 		DataLen: binary.LittleEndian.Uint32(b[28:32]),
 	}
 
-	// Extract CallFrom (10 bytes at offset 8) and strip trailing NULs
-	callFromBytes := b[8:18]
-	h.CallFrom = strings.TrimRight(string(callFromBytes), "\x00")
-
-	// Extract CallTo (10 bytes at offset 18) and strip trailing NULs
-	callToBytes := b[18:28]
-	h.CallTo = strings.TrimRight(string(callToBytes), "\x00")
+	// CallFrom (offset 8) and CallTo (offset 18) are 10-byte NUL-terminated
+	// C strings; bytes after the first NUL are client garbage, not callsign.
+	h.CallFrom = cString(b[8:18])
+	h.CallTo = cString(b[18:28])
 
 	return h, nil
+}
+
+// cString returns b up to (not including) its first NUL.
+func cString(b []byte) string {
+	if i := bytes.IndexByte(b, 0); i >= 0 {
+		b = b[:i]
+	}
+	return string(b)
 }
 
 // Build produces a complete AGWPE frame (header + payload) with callsigns
