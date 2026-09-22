@@ -21,15 +21,49 @@ const ax25Overhead = 20
 type PortParams struct {
 	MaxWindow   int
 	N2Retry     int
-	T1          time.Duration // max(3s, 2*(window*frameTime + 1s))
+	T1          time.Duration // data-phase retransmit: max(3s, 2*(window*frameTime + 1s))
+	T1Setup     time.Duration // connection-phase retransmit base (FRACK); 0 means defaultT1Setup
 	T2          time.Duration // max(100ms, 1.2*frameTime)
 	T3          time.Duration // 0 disables
 	AX25Version int           // 20 (mod-8 only) or 22 (attempt SABME/mod-128); default 20
 	SREJ        bool          // v2.2 selective reject enabled for this port (default set by bridge)
 }
 
+// defaultT1Setup is the base connection-phase retransmit interval: how long to
+// wait for a UA after a SABM/SABME/DISC before resending.
+//
+// This is deliberately NOT derived from the data-phase T1. T1 is sized as
+// 2*(window*maxFrameTime + turnaround) -- the time to push a full window of
+// 256-byte I-frames and get an ack back -- which at 1200 baud is 13s. But a
+// connection handshake exchanges a ~17-byte command and a ~17-byte UA, about
+// 0.25s of air time at 1200 baud, so the data-phase timer sized the setup
+// retry for traffic that by definition is not flowing yet: a failed connect
+// took 130s at the default N2 of 10, and retries were sparse enough to miss a
+// timing-marginal radio's acceptance window entirely.
+//
+// 3s matches Dire Wolf's AX25_T1V_FRACK_DEFAULT, whose comment cites the real
+// TNCs it was chosen against ("KPC-3+ has 4. TM-D710A has 3").
+const defaultT1Setup = 3 * time.Second
+
+// setupT1 returns the connection-phase retransmit interval for a path with the
+// given number of digipeater hops. Each hop has to relay the command outbound
+// and the reply back, so the wait scales by 2m+1 -- Dire Wolf's INIT_T1V_SRT
+// (ax25_link.c: frack * (2 * (num_addr - 2) + 1)). tncd previously applied no
+// digipeater scaling at all, giving a 2-hop path the same patience as a direct
+// one.
+func setupT1(base time.Duration, digis int) time.Duration {
+	if base <= 0 {
+		base = defaultT1Setup
+	}
+	if digis < 0 {
+		digis = 0
+	}
+	return base * time.Duration(2*digis+1)
+}
+
 // DeriveParams computes PortParams from the on-air baud rate and config.
-// Mirrors tncd.py:1068-1087 exactly.
+// Mirrors tncd.py:1068-1087 for the data-phase timers; the connection-phase
+// timer (T1Setup) is a deliberate divergence, see defaultT1Setup.
 func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
 	if otaBaud <= 0 {
 		otaBaud = 1200
@@ -50,6 +84,7 @@ func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
 		MaxWindow: maxWindow,
 		N2Retry:   n2Retry,
 		T1:        time.Duration(t1Sec * float64(time.Second)),
+		T1Setup:   defaultT1Setup,
 		T2:        time.Duration(t2Sec * float64(time.Second)),
 		T3:        time.Duration(t3Seconds) * time.Second,
 	}
@@ -134,7 +169,7 @@ func (t *Table) Hooks() *Hooks {
 // portParams returns the PortParams for the given port (clamped to last if out of range).
 func (t *Table) portParams(port int) PortParams {
 	if port < 0 || len(t.params) == 0 {
-		return PortParams{N2Retry: 10, T1: 3 * time.Second}
+		return PortParams{N2Retry: 10, T1: 3 * time.Second, T1Setup: defaultT1Setup}
 	}
 	if port >= len(t.params) {
 		return t.params[len(t.params)-1]
@@ -342,7 +377,7 @@ func (t *Table) t1Expired(c *Conn) {
 		}
 		// Connection-phase retransmits use a FIXED T1 (no Karn backoff), same
 		// reasoning as the Connecting branch.
-		c.t1Value = pp.T1
+		c.t1Value = setupT1(pp.T1Setup, len(c.Via))
 		f := cmdFrame(c.Remote, c.Local, c.Via, ax25.DISC, true)
 		t.sendFrame(c.Port, f)
 		t.startT1(c)
@@ -376,7 +411,7 @@ func (t *Table) t1Expired(c *Conn) {
 		// so a timing-marginal radio's narrow acceptance window is missed and
 		// the peer never sees a retry in time. Reset to the base so every retry
 		// is evenly spaced.
-		c.t1Value = pp.T1
+		c.t1Value = setupT1(pp.T1Setup, len(c.Via))
 		if c.modulo == 128 {
 			t.sendSABME(c)
 		} else {
@@ -540,7 +575,7 @@ func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, er
 	c.t1Polls = 0
 	c.triedFallback = false
 	c.Via = via
-	c.t1Value = t.portParams(port).T1
+	c.t1Value = setupT1(t.portParams(port).T1Setup, len(via))
 
 	if t.portParams(port).AX25Version >= 22 {
 		c.modulo = 128

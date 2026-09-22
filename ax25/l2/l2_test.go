@@ -742,3 +742,85 @@ func TestIncomingSABMESuppressedOnOtherPort(t *testing.T) {
 		t.Error("phantom connection created on port 1 for overheard SABME")
 	}
 }
+
+// TestSetupT1 covers the connection-phase retransmit interval. It is
+// deliberately NOT the data-phase T1: sizing a SABM/UA exchange (~17 bytes each
+// way) with the time to push a full window of 256-byte I-frames gave 13s at
+// 1200 baud, so retries were ~4x sparser than Dire Wolf's and a failed connect
+// took 130s. Base 3s matches Dire Wolf's AX25_T1V_FRACK_DEFAULT, scaled 2m+1
+// per digipeater hop like its INIT_T1V_SRT.
+func TestSetupT1(t *testing.T) {
+	cases := []struct {
+		name  string
+		base  time.Duration
+		digis int
+		want  time.Duration
+	}{
+		{"direct path uses the base interval", 3 * time.Second, 0, 3 * time.Second},
+		{"one digipeater triples it", 3 * time.Second, 1, 9 * time.Second},
+		{"two digipeaters: 2m+1 = 5", 3 * time.Second, 2, 15 * time.Second},
+		{"honours a tuned frack", 4 * time.Second, 0, 4 * time.Second},
+		{"tuned frack still scales", 4 * time.Second, 1, 12 * time.Second},
+		{"unset base falls back to the default", 0, 0, defaultT1Setup},
+		{"negative digis cannot shorten the wait", 3 * time.Second, -1, 3 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := setupT1(tc.base, tc.digis); got != tc.want {
+			t.Errorf("%s: setupT1(%v, %d) = %v, want %v", tc.name, tc.base, tc.digis, got, tc.want)
+		}
+	}
+}
+
+// TestDeriveParamsSeparatesSetupFromDataT1 pins the divergence: at 1200 baud the
+// data-phase T1 is ~13s, and the connection-setup timer must NOT inherit it.
+func TestDeriveParamsSeparatesSetupFromDataT1(t *testing.T) {
+	pp := DeriveParams(1200, 3, 10, 180)
+	if pp.T1 < 10*time.Second {
+		t.Fatalf("precondition: data-phase T1 = %v, expected the ~13s window-derived value", pp.T1)
+	}
+	if pp.T1Setup != defaultT1Setup {
+		t.Errorf("T1Setup = %v, want %v (must not inherit the data-phase T1)", pp.T1Setup, defaultT1Setup)
+	}
+}
+
+// TestConnectUsesSetupT1 proves the wiring: an outgoing connect arms T1 with the
+// setup interval, not the data-phase one. Regression guard for the 13s SABME
+// spacing seen on the air 2026-09-22.
+func TestConnectUsesSetupT1(t *testing.T) {
+	tbl, _, _ := newHarness(1200)
+	c, err := tbl.Connect(0, "LOCAL-1", "REMOTE-2", nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if c.t1Value != defaultT1Setup {
+		t.Errorf("t1Value after Connect = %v, want %v (data-phase T1 is %v)",
+			c.t1Value, defaultT1Setup, tbl.portParams(0).T1)
+	}
+}
+
+// TestSetupRetriesAreNotDataPhaseSpaced is the on-the-wire regression guard for
+// the 2026-09-22 field report: SABME retries were ~13s apart at 1200 baud
+// because connection setup used the data-phase T1. Advancing one setup interval
+// at a time must produce one retransmission per step.
+func TestSetupRetriesAreNotDataPhaseSpaced(t *testing.T) {
+	tbl, rec, clk := newHarness(1200)
+	if dataT1 := tbl.portParams(0).T1; dataT1 <= 4*defaultT1Setup {
+		t.Fatalf("precondition: data-phase T1 = %v, too close to the setup interval "+
+			"for this test to distinguish them", dataT1)
+	}
+	tbl.Connect(0, "KU0HN-10", "N0CALL-2", nil) // setup frame #1
+	const steps = 4
+	for i := 0; i < steps; i++ {
+		clk.advance(defaultT1Setup)
+	}
+	got := 0
+	for _, f := range rec.sent {
+		if f.Type == ax25.SABM || f.Type == ax25.SABME {
+			got++
+		}
+	}
+	if want := 1 + steps; got != want {
+		t.Errorf("setup frames after %d x %v = %d, want %d "+
+			"(retries still spaced by the data-phase T1?)", steps, defaultT1Setup, got, want)
+	}
+}

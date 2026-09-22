@@ -499,6 +499,7 @@ func (b *Bridge) Start() error {
 			b.cfg.AX25.N2Retry,
 			b.cfg.AX25.T3Timeout,
 		)
+		params[i].T1Setup = time.Duration(b.cfg.AX25.Frack) * time.Second
 		params[i].AX25Version = b.cfg.Ports[i].AX25Version
 		params[i].SREJ = b.cfg.Ports[i].SREJ
 	}
