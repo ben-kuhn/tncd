@@ -122,8 +122,9 @@ def get_pw_ports(pid):
         # TX: first output channel from playback node
         if "playback" in node_name and port_name == "output_FL":
             tx_output = port_id
-        # RX: input from capture node
-        if "capture" in node_name and port_name == "input_MONO":
+        # RX: input from capture node (input_MONO with ADEVICE default,
+        # input_FL when addressed as an explicit pipewire:NODE device)
+        if "capture" in node_name and port_name in ("input_MONO", "input_FL"):
             rx_input = port_id
 
     return {"tx_output": tx_output, "rx_input": rx_input, "all": all_ports}
@@ -225,6 +226,38 @@ def pw_restore_settings(original=None):
         )
 
 
+def pw_loopback_pair(name):
+    """Create a virtual sink/source pair via pw-loopback.
+
+    Returns (proc, src_node, sink_node) where src_node/sink_node are the
+    PipeWire node names a Direwolf instance should open for RX/TX audio.
+    The pair is a pure in-memory loopback — no real audio device involved.
+    """
+    src = f"tncd-e2e-{name}-src"
+    sink = f"tncd-e2e-{name}-sink"
+    proc = subprocess.Popen(
+        ["pw-loopback",
+         "--capture-props",
+         f"{{media.class=Audio/Source node.name={src}}}",
+         "--playback-props",
+         f"{{media.class=Audio/Sink node.name={sink}}}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["pw-cli", "ls", "Node"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if f'node.name = "{src}"' in result.stdout and \
+           f'node.name = "{sink}"' in result.stdout:
+            return proc, src, sink
+        time.sleep(0.2)
+    kill_proc(proc)
+    raise RuntimeError(f"pw-loopback pair {name} did not appear in PipeWire")
+
+
 def pw_crosslink(pid_a, pid_b):
     """Cross-link two Direwolf instances' audio via PipeWire.
 
@@ -276,14 +309,20 @@ def pw_crosslink(pid_a, pid_b):
     return []
 
 
-def write_direwolf_config(path, mycall, agwport=0, kissport=0):
+def write_direwolf_config(path, mycall, agwport=0, kissport=0,
+                          src_node=None, sink_node=None):
     """Write a Direwolf configuration file.
 
-    Uses ADEVICE default — audio routing is handled by pw_crosslink()
-    after both instances are started.
+    Audio is a virtual sink/source pair (created by pw_loopback_pair())
+    addressed explicitly via ``ADEVICE pipewire:NODE=...`` so the test never
+    touches real audio devices.  Cross-linking of the two instances is
+    handled by pw_crosslink() after both are started.
     """
+    adev = "default"
+    if src_node and sink_node:
+        adev = f"pipewire:NODE={src_node} pipewire:NODE={sink_node}"
     lines = [
-        "ADEVICE default",
+        f"ADEVICE {adev}",
         "ACHANNELS 1",
         "ARATE 44100",
         f"MYCALL {mycall}",
@@ -347,11 +386,17 @@ def direwolf_pair(tmp_path, request):
     kiss_port_a = free_port() if kiss_mode == "tcp" else 0
     kiss_pty = kiss_mode == "pty"
 
+    # Virtual sink/source pairs so the test never touches real audio devices.
+    loop_a, src_a, sink_a = pw_loopback_pair("a")
+    loop_b, src_b, sink_b = pw_loopback_pair("b")
+
     conf_a = tmp_path / "direwolf-a.conf"
     conf_b = tmp_path / "direwolf-b.conf"
 
-    write_direwolf_config(conf_a, "N0CALL-1", agwport=0, kissport=kiss_port_a)
-    write_direwolf_config(conf_b, "N0CALL-2", agwport=agwpe_port_b, kissport=0)
+    write_direwolf_config(conf_a, "N0CALL-1", agwport=0, kissport=kiss_port_a,
+                          src_node=src_a, sink_node=sink_a)
+    write_direwolf_config(conf_b, "N0CALL-2", agwport=agwpe_port_b, kissport=0,
+                          src_node=src_b, sink_node=sink_b)
 
     # Log files to avoid stdout pipe buffer blocking Direwolf
     log_a = open(tmp_path / "direwolf-a.log", "w+b")
@@ -404,7 +449,9 @@ def direwolf_pair(tmp_path, request):
     finally:
         kill_proc(proc_a)
         kill_proc(proc_b)
-        # Clean up pw-loopback processes
+        # Clean up the virtual sink/source pairs and pw-loopback processes
+        kill_proc(loop_a)
+        kill_proc(loop_b)
         for lb in sink_ids:
             kill_proc(lb)
         pw_restore_settings(pw_original)
@@ -523,11 +570,16 @@ def direwolf_pair_agwpe(tmp_path):
     agwpe_port_a = free_port()
     agwpe_port_b = free_port()
 
+    loop_a, src_a, sink_a = pw_loopback_pair("a")
+    loop_b, src_b, sink_b = pw_loopback_pair("b")
+
     conf_a = tmp_path / "direwolf-a.conf"
     conf_b = tmp_path / "direwolf-b.conf"
 
-    write_direwolf_config(conf_a, "N0CALL-1", agwport=agwpe_port_a, kissport=0)
-    write_direwolf_config(conf_b, "N0CALL-2", agwport=agwpe_port_b, kissport=0)
+    write_direwolf_config(conf_a, "N0CALL-1", agwport=agwpe_port_a, kissport=0,
+                          src_node=src_a, sink_node=sink_a)
+    write_direwolf_config(conf_b, "N0CALL-2", agwport=agwpe_port_b, kissport=0,
+                          src_node=src_b, sink_node=sink_b)
 
     log_a = open(tmp_path / "direwolf-a.log", "w+b")
     log_b = open(tmp_path / "direwolf-b.log", "w+b")
@@ -559,6 +611,8 @@ def direwolf_pair_agwpe(tmp_path):
     finally:
         kill_proc(proc_a)
         kill_proc(proc_b)
+        kill_proc(loop_a)
+        kill_proc(loop_b)
         for lb in sink_ids:
             kill_proc(lb)
         pw_restore_settings(pw_original)
@@ -1110,11 +1164,16 @@ def direwolf_pair_pty(tmp_path):
 
     agwpe_port_b = free_port()
 
+    loop_a, src_a, sink_a = pw_loopback_pair("a")
+    loop_b, src_b, sink_b = pw_loopback_pair("b")
+
     conf_a = tmp_path / "direwolf-a.conf"
     conf_b = tmp_path / "direwolf-b.conf"
 
-    write_direwolf_config(conf_a, "N0CALL-1", agwport=0, kissport=0)
-    write_direwolf_config(conf_b, "N0CALL-2", agwport=agwpe_port_b, kissport=0)
+    write_direwolf_config(conf_a, "N0CALL-1", agwport=0, kissport=0,
+                          src_node=src_a, sink_node=sink_a)
+    write_direwolf_config(conf_b, "N0CALL-2", agwport=agwpe_port_b, kissport=0,
+                          src_node=src_b, sink_node=sink_b)
 
     log_a = open(tmp_path / "direwolf-a.log", "w+b")
     log_b = open(tmp_path / "direwolf-b.log", "w+b")
@@ -1150,6 +1209,8 @@ def direwolf_pair_pty(tmp_path):
     finally:
         kill_proc(proc_a)
         kill_proc(proc_b)
+        kill_proc(loop_a)
+        kill_proc(loop_b)
         for lb in sink_ids:
             kill_proc(lb)
         pw_restore_settings(pw_original)
@@ -1261,11 +1322,16 @@ def multiport_direwolf_pair(tmp_path):
     kiss_port_a = free_port()
     kiss_port_b = free_port()
 
+    loop_a, src_a, sink_a = pw_loopback_pair("a")
+    loop_b, src_b, sink_b = pw_loopback_pair("b")
+
     conf_a = tmp_path / "direwolf-a.conf"
     conf_b = tmp_path / "direwolf-b.conf"
 
-    write_direwolf_config(conf_a, "N0CALL-1", agwport=0, kissport=kiss_port_a)
-    write_direwolf_config(conf_b, "N0CALL-2", agwport=0, kissport=kiss_port_b)
+    write_direwolf_config(conf_a, "N0CALL-1", agwport=0, kissport=kiss_port_a,
+                          src_node=src_a, sink_node=sink_a)
+    write_direwolf_config(conf_b, "N0CALL-2", agwport=0, kissport=kiss_port_b,
+                          src_node=src_b, sink_node=sink_b)
 
     log_a = open(tmp_path / "direwolf-a.log", "w+b")
     log_b = open(tmp_path / "direwolf-b.log", "w+b")
@@ -1297,6 +1363,8 @@ def multiport_direwolf_pair(tmp_path):
     finally:
         kill_proc(proc_a)
         kill_proc(proc_b)
+        kill_proc(loop_a)
+        kill_proc(loop_b)
         for lb in sink_ids:
             kill_proc(lb)
         pw_restore_settings(pw_original)

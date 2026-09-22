@@ -39,6 +39,7 @@ from test_e2e import (
     kill_proc,
     pw_configure_for_test,
     pw_crosslink,
+    pw_loopback_pair,
     pw_restore_settings,
     wait_for_port,
     write_direwolf_config,
@@ -141,10 +142,15 @@ def direwolf_kiss_pair(tmp_path):
     kiss_port_a = free_port()
     kiss_port_b = free_port()
 
+    loop_a, src_a, sink_a = pw_loopback_pair("a")
+    loop_b, src_b, sink_b = pw_loopback_pair("b")
+
     conf_a = tmp_path / "dw-a.conf"
     conf_b = tmp_path / "dw-b.conf"
-    write_direwolf_config(conf_a, "DWA-1", agwport=0, kissport=kiss_port_a)
-    write_direwolf_config(conf_b, "DWB-2", agwport=0, kissport=kiss_port_b)
+    write_direwolf_config(conf_a, "DWA-1", agwport=0, kissport=kiss_port_a,
+                          src_node=src_a, sink_node=sink_a)
+    write_direwolf_config(conf_b, "DWB-2", agwport=0, kissport=kiss_port_b,
+                          src_node=src_b, sink_node=sink_b)
 
     log_a = open(tmp_path / "dw-a.log", "w+b")
     log_b = open(tmp_path / "dw-b.log", "w+b")
@@ -168,6 +174,8 @@ def direwolf_kiss_pair(tmp_path):
     finally:
         kill_proc(proc_a)
         kill_proc(proc_b)
+        kill_proc(loop_a)
+        kill_proc(loop_b)
         for lb in sink_ids:
             kill_proc(lb)
         pw_restore_settings(pw_original)
