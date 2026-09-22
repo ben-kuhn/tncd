@@ -273,11 +273,20 @@ func (t *Table) t3Expired(c *Conn) {
 	if c.State != Connected {
 		return
 	}
-	// Send RR P=1 command (liveness poll).
+	// Send RR P=1 command (liveness poll) and enter timer recovery: T1 now
+	// re-polls up to N2 times, so a dead idle link is eventually torn down.
+	c.t1Polls = 0
+	t.sendEnquiry(c)
+	t.startT1(c)
+}
+
+// sendEnquiry sends an RR P=1 command (a poll demanding RR/RNR F=1) and marks
+// the link as awaiting that answer (timer recovery).
+func (t *Table) sendEnquiry(c *Conn) {
 	rr := cmdFrame(c.Remote, c.Local, c.Via, ax25.RR, true)
 	rr.NR = c.recvSeq
 	t.sendFrame(c.Port, rr)
-	t.startT1(c)
+	c.polling = true
 }
 
 // sendRRResponse answers a poll: it sends RR F=1 (response, PF=true) with
@@ -377,8 +386,11 @@ func (t *Table) t1Expired(c *Conn) {
 		return
 	}
 
-	// Connected state: data-phase T1 (tncd.py:1541-1579).
-	if c.State != Connected || len(c.retransmitBuf) == 0 {
+	// Connected state: data-phase T1 (tncd.py:1541-1579). T1 only runs here
+	// while something is awaited — unacked I-frames or an unanswered T3 poll —
+	// so an expiry with an empty retransmit buffer is a lost poll answer and
+	// must re-poll (and count toward N2) rather than be ignored.
+	if c.State != Connected {
 		return
 	}
 	c.t1Polls++
@@ -394,15 +406,7 @@ func (t *Table) t1Expired(c *Conn) {
 	}
 
 	// Poll #1: send RR P=1 only; poll #2+: also retransmit.
-	rr := &ax25.Frame{
-		Dst:     mustParseAddr(c.Remote),
-		Src:     mustParseAddr(c.Local),
-		Type:    ax25.RR,
-		NR:      c.recvSeq,
-		PF:      true,
-		Command: true,
-	}
-	t.sendFrame(c.Port, rr)
+	t.sendEnquiry(c)
 
 	if c.t1Polls > 1 {
 		t.retransmitFrom(c, c.lastAcked)
@@ -520,13 +524,19 @@ func (t *Table) fallbackToSABM(c *Conn) bool {
 // getOrCreate may return a reused Conn from a prior session; all relevant state
 // (including triedFallback) is reset so that a fresh v2.2 attempt starts clean.
 func (t *Table) Connect(port int, local, remote string, via []string) (*Conn, error) {
+	// Every address must encode: an unparseable one would otherwise go on the
+	// air as a blank (all-space) callsign.
+	for _, call := range append([]string{local, remote}, via...) {
+		if _, err := ax25.ParseAddress(call); err != nil {
+			return nil, fmt.Errorf("l2: connect %s -> %s: %w", local, remote, err)
+		}
+	}
 	c := t.getOrCreate(port, local, remote)
 	if c == nil {
 		return nil, fmt.Errorf("l2: connection limit reached (%d)", maxConnections)
 	}
 	c.State = Connecting
-	c.sendSeq = 0
-	c.recvSeq = 0
+	c.resetSeqs()
 	c.t1Polls = 0
 	c.triedFallback = false
 	c.Via = via
@@ -560,10 +570,11 @@ const maxOutboundQueue = 512
 // maxIFrameInfo is the maximum info field size for an I-frame (tncd.py: 256 bytes).
 const maxIFrameInfo = 256
 
-// SendData fragments payload into ≤256-byte chunks, queues (chunk, pid),
-// drops when queue ≥ 512 with warning, then calls drainOutbound.
+// SendData fragments payload into ≤256-byte chunks, queues (chunk, pid), then
+// calls drainOutbound. Chunks that do not fit in the 512-entry queue are
+// dropped; the count is returned so the caller can report the loss.
 // Mirrors tncd.py:366-389 ('D' handler).
-func (t *Table) SendData(c *Conn, pid uint8, data []byte) {
+func (t *Table) SendData(c *Conn, pid uint8, data []byte) (dropped int) {
 	if len(data) == 0 {
 		data = []byte{}
 	}
@@ -581,14 +592,16 @@ func (t *Table) SendData(c *Conn, pid uint8, data []byte) {
 		}
 	}
 
-	for _, chunk := range chunks {
+	for i, chunk := range chunks {
 		if len(c.outQueue) >= maxOutboundQueue {
 			// Queue full — drop remaining chunks.
+			dropped = len(chunks) - i
 			break
 		}
 		c.outQueue = append(c.outQueue, outEntry{pid: pid, data: chunk})
 	}
 	t.drainOutbound(c)
+	return dropped
 }
 
 // Outstanding returns unacked + len(outQueue), the Y-frame fix.
@@ -628,24 +641,8 @@ func (t *Table) drainOutbound(c *Conn) {
 			chunk = append(chunk, next.data...)
 		}
 
-		// Build the I-frame.
 		ns := c.sendSeq
-		f := &ax25.Frame{
-			Dst:     mustParseAddr(c.Remote),
-			Src:     mustParseAddr(c.Local),
-			Type:    ax25.I,
-			NS:      ns,
-			NR:      c.recvSeq,
-			PF:      false,
-			Command: true,
-			PID:     pid,
-			Info:    chunk,
-			Modulo:  c.modulo,
-		}
-		for _, v := range c.Via {
-			a, _ := ax25.ParseAddress(v)
-			f.Via = append(f.Via, a)
-		}
+		f := iFrame(c, ns, pid, chunk)
 
 		// Store raw bytes in retransmitBuf, record first-TX timestamp.
 		raw := f.Bytes()
@@ -668,10 +665,11 @@ func (t *Table) drainOutbound(c *Conn) {
 // restart or cancel T1, then drain outbound queue.
 // Mirrors tncd.py:1581-1616.
 func (t *Table) ackFrames(c *Conn, nr uint8) {
-	pp := t.portParams(c.Port)
 	newlyAcked := (nr - c.lastAcked) % c.modulo
-	// Guard: reject backwards N(R) (would appear as a large forward ACK).
-	if int(newlyAcked) > pp.MaxWindow {
+	// Valid N(R) lies in [V(A), V(S)] (Dire Wolf is_good_nr). Anything else —
+	// a backwards N(R) from a retransmission, or one acking frames we never
+	// sent — would corrupt V(A), so it is ignored.
+	if outstanding := (c.sendSeq - c.lastAcked) % c.modulo; newlyAcked > outstanding {
 		return
 	}
 	if newlyAcked == 0 {
@@ -747,8 +745,13 @@ func (t *Table) updateSRTT(c *Conn, rtt time.Duration) {
 // dropping RTT timestamps (Karn's algorithm).
 // Mirrors tncd.py:1618-1640.
 func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
+	t.retransmitRange(c, fromSeq, c.sendSeq)
+}
+
+// retransmitRange retransmits buffered I-frames in [fromSeq, toSeq).
+func (t *Table) retransmitRange(c *Conn, fromSeq, toSeq uint8) {
 	seq := fromSeq
-	for {
+	for seq != toSeq {
 		raw, ok := c.retransmitBuf[seq]
 		if !ok {
 			break
@@ -759,22 +762,8 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 			break
 		}
 		// Rebuild with current N(R) (piggyback-acknowledge received frames).
-		f := &ax25.Frame{
-			Dst:     mustParseAddr(c.Remote),
-			Src:     mustParseAddr(c.Local),
-			Type:    ax25.I,
-			NS:      orig.NS,
-			NR:      c.recvSeq,
-			PF:      orig.PF,
-			Command: true,
-			PID:     orig.PID,
-			Info:    orig.Info,
-			Modulo:  c.modulo,
-		}
-		for _, v := range c.Via {
-			a, _ := ax25.ParseAddress(v)
-			f.Via = append(f.Via, a)
-		}
+		f := iFrame(c, orig.NS, orig.PID, orig.Info)
+		f.PF = orig.PF
 		// Update retransmitBuf with rebuilt frame.
 		c.retransmitBuf[seq] = f.Bytes()
 		// Karn: discard RTT sample for retransmitted frames.
@@ -784,11 +773,17 @@ func (t *Table) retransmitFrom(c *Conn, fromSeq uint8) {
 	}
 }
 
-// mustParseAddr parses an AX.25 address, returning the zero Address on failure.
-// Used only for known-good strings where parse errors cannot occur in practice.
-func mustParseAddr(s string) ax25.Address {
-	a, _ := ax25.ParseAddress(s)
-	return a
+// iFrame builds an I-frame command for conn c carrying the current N(R), the
+// link's modulo and its digipeater path. The one place I-frames are built, so
+// a new send path cannot forget the path or the modulo.
+func iFrame(c *Conn, ns, pid uint8, info []byte) *ax25.Frame {
+	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.I, false)
+	f.NS = ns
+	f.NR = c.recvSeq
+	f.PID = pid
+	f.Info = info
+	f.Modulo = c.modulo
+	return f
 }
 
 // OnFrame dispatches an inbound AX.25 frame to the appropriate handler.
@@ -910,9 +905,11 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 	ua := respFrame(src, dst, returnVia, ax25.UA, f.PF)
 	t.sendFrame(port, ua)
 
-	// Full state reset (tncd.py:1884-1896).
+	// Full state reset (tncd.py:1884-1896). SABM always establishes mod-8,
+	// even on a conn a previous SABME left at mod-128.
 	c.Via = returnVia
 	c.State = Connected
+	c.modulo = 8
 	c.resetSeqs()
 	c.t1 = cancelTimer(c.t1)
 	c.t2 = cancelTimer(c.t2)
@@ -1097,23 +1094,25 @@ func (t *Table) dispatchFRMR(port int, f *ax25.Frame, src, dst string) {
 	// retransmitBuf, iframeTimestamps, outQueue — NOT remote_busy.
 	// dispatchSABM also calls resetSeqs() which does reset remoteBusy, but
 	// FRMR should preserve the remote flow-control state.
+	busy := c.remoteBusy
 	c.State = Connecting
-	c.sendSeq = 0
-	c.recvSeq = 0
-	c.unacked = 0
-	c.lastAcked = 0
-	c.retransmitBuf = make(map[uint8][]byte)
-	c.iframeTimestamps = make(map[uint8]time.Time)
-	c.outQueue = c.outQueue[:0]
-	// Note: remoteBusy is NOT reset here
+	c.resetSeqs()
+	c.remoteBusy = busy // FRMR preserves the remote flow-control state
+	c.t1Polls = 0
+	c.triedFallback = false
 	c.t1 = cancelTimer(c.t1)
 	c.t2 = cancelTimer(c.t2)
 	c.t3 = cancelTimer(c.t3)
 
-	// Send fresh SABM (tncd.py:2026-2031).
-	// Note: in Python _dispatch_frmr, the frame arg is the FRMR frame, and
-	// it sends to src (remote) with dst (local) as source.
-	t.sendSABM(c)
+	// Re-establish at the link's modulo (tncd.py:2026-2031 always sent SABM,
+	// which left a mod-128 conn talking 2-byte control fields to a peer that
+	// had just agreed to mod-8). A peer that rejects the SABME still gets the
+	// usual DM/FRMR -> SABM fallback.
+	if c.modulo == 128 {
+		t.sendSABME(c)
+	} else {
+		t.sendSABM(c)
+	}
 	t.startT1(c)
 }
 
@@ -1128,6 +1127,8 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 	// Mirrors tncd.py:1749-1759.
 	if c != nil && c.State == Connecting {
 		c.State = Connected
+		c.t1 = cancelTimer(c.t1) // the SABM retry timer; nothing is awaited now
+		c.t1Polls = 0
 		c.sendSeq = 0
 		c.recvSeq = 0
 		if t.hooks.Connected != nil {
@@ -1215,13 +1216,23 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 	if f.NS != expectedNS {
 		// Out-of-sequence or duplicate frame.
 		gap := (f.NS - expectedNS) % c.modulo
-		if gap > 0 && int(gap) <= pp.MaxWindow {
-			// Gap within window: send REJ with V(R) = expected, echoing P/F.
+		if gap > 0 && int(gap) <= pp.MaxWindow && c.rejSent {
+			// Already in reject exception: the REJ we sent covers this gap, so
+			// don't ask again (every REJ makes the peer resend from V(R)).
+			// A poll still gets its mandatory RR F=1. (Dire Wolf / AX.25 6.4.4.3)
+			if f.PF {
+				cancelT2(c)
+				t.sendRRResponse(c, src, dst)
+			}
+		} else if gap > 0 && int(gap) <= pp.MaxWindow {
+			// Gap within window: send REJ with V(R) = expected, echoing P/F,
+			// and enter the reject exception condition.
 			// Mirrors tncd.py:1791-1805.
 			cancelT2(c)
 			rej := respFrame(src, dst, c.Via, ax25.REJ, f.PF)
 			rej.NR = expectedNS
 			t.sendFrame(port, rej)
+			c.rejSent = true
 		} else {
 			// True duplicate (or gap > window): discard data.
 			// Mirrors tncd.py:1806-1815.
@@ -1234,6 +1245,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 		}
 		return
 	}
+	c.rejSent = false // the requested frame arrived: exception cleared
 	c.recvSeq = (f.NS + 1) % c.modulo
 	if f.PF {
 		cancelT2(c)
@@ -1303,8 +1315,13 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 		return
 	}
 
-	// 1. Process cumulative ACK (always first, per Python order).
-	t.ackFrames(c, f.NR)
+	// 1. Process cumulative ACK (always first, per Python order). An SREJ
+	// acknowledges N(R)-1 only when F=1 (AX.25 2.2 4.3.2.4; Dire Wolf
+	// srej_frame); an F=0 SREJ's N(R) just names the frame to resend.
+	vsBefore := c.sendSeq // frames sent before this ack may drain new ones
+	if f.Type != ax25.SREJ || f.PF {
+		t.ackFrames(c, f.NR)
+	}
 
 	// Single-SREJ (v2.2): ackFrames above already acked <= N(R)-1 and left
 	// frame N(R) in the retransmit buffer. Retransmit ONLY that frame — not
@@ -1314,16 +1331,7 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 		c.remoteBusy = false
 		if raw, ok := c.retransmitBuf[f.NR]; ok {
 			if orig, err := ax25.ParseModulo(raw, int(c.modulo)); err == nil {
-				rf := &ax25.Frame{
-					Dst: mustParseAddr(c.Remote), Src: mustParseAddr(c.Local),
-					Type: ax25.I, Modulo: c.modulo,
-					NS: orig.NS, NR: c.recvSeq, Command: true,
-					PID: orig.PID, Info: orig.Info,
-				}
-				for _, v := range c.Via {
-					a, _ := ax25.ParseAddress(v)
-					rf.Via = append(rf.Via, a)
-				}
+				rf := iFrame(c, orig.NS, orig.PID, orig.Info)
 				c.retransmitBuf[f.NR] = rf.Bytes()
 				delete(c.iframeTimestamps, f.NR) // Karn: no RTT sample on retransmit
 				t.sendFrame(c.Port, rf)
@@ -1349,6 +1357,22 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 		t.retransmitFrom(c, f.NR)
 	}
 
+	// 4. Timer recovery: an F=1 response answers our RR P=1 enquiry. Resend
+	// whatever is still unacked right away (REJ already did) instead of
+	// waiting out another, doubled T1; with nothing outstanding the link is
+	// healthy again, so stop T1.
+	if !f.Command && f.PF && c.polling {
+		c.polling = false
+		if f.Type != ax25.REJ && !c.remoteBusy && len(c.retransmitBuf) > 0 {
+			t.retransmitRange(c, c.lastAcked, vsBefore)
+			t.startT1(c)
+		}
+		if len(c.retransmitBuf) == 0 {
+			c.t1 = cancelTimer(c.t1)
+			c.t1Polls = 0
+		}
+	}
+
 	// Poll-response side: if P=1, respond with RR F=1.
 	// Defer via Hooks.Defer so that any I-frames already queued on the event
 	// loop (from the same KISS burst) are processed first, advancing recvSeq
@@ -1356,7 +1380,8 @@ func (t *Table) dispatchS(port int, f *ax25.Frame, src, dst string) {
 	// Exception: REJ P=1 responds immediately — a deferred call_soon would
 	// invoke _retransmit_from a second time, flooding the TNC with duplicates.
 	// Mirrors tncd.py:2098-2116 (_dispatch_s poll-response block).
-	if f.PF {
+	// Only a command polls; an F=1 response must not be answered.
+	if f.PF && f.Command {
 		// Re-lookup in case state changed above (tncd.py:2108).
 		conn2 := t.Get(port, dst, src)
 		if conn2 != nil && conn2.State == Connected {
@@ -1454,7 +1479,7 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 	rsp := ax25.XIDParams{
 		FullDuplex:       false,
 		SREJ:             neg,
-		Modulo:           128,
+		Modulo:           int(c.modulo),
 		IFieldLenRxBytes: 256,
 		WindowRx:         window,
 	}
