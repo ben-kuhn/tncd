@@ -165,3 +165,21 @@ func TestParseModuloExtendedShort(t *testing.T) {
 		t.Fatal("ParseModulo(15-byte, 128) on an I-frame: expected error for missing 2nd control byte")
 	}
 }
+
+// AX.25 allows at most 8 digipeaters (10 addresses). A longer address field is
+// malformed and must not parse.
+func TestParseRejectsMoreThanEightDigipeaters(t *testing.T) {
+	mk := func(nVia int) []byte {
+		f := &Frame{Dst: Address{Call: "CQ"}, Src: Address{Call: "N0CALL"}, Type: UI, PID: 0xF0, Command: true}
+		for i := 0; i < nVia; i++ {
+			f.Via = append(f.Via, Address{Call: "WIDE", SSID: uint8(i % 16)})
+		}
+		return f.Bytes()
+	}
+	if _, err := Parse(mk(8)); err != nil {
+		t.Fatalf("8 digipeaters rejected: %v", err)
+	}
+	if _, err := Parse(mk(9)); err == nil {
+		t.Fatal("9 digipeaters accepted")
+	}
+}

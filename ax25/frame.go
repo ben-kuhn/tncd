@@ -84,6 +84,9 @@ const (
 	xidBase   = 0xAF
 )
 
+// MaxDigipeaters is the AX.25 limit on repeater addresses in one frame.
+const MaxDigipeaters = 8
+
 // Frame represents a parsed AX.25 frame.
 type Frame struct {
 	Dst, Src Address
@@ -133,6 +136,9 @@ func ParseModulo(raw []byte, modulo int) (*Frame, error) {
 		for {
 			if pos+7 > len(raw) {
 				return nil, fmt.Errorf("ax25: frame too short for via address")
+			}
+			if len(via) == MaxDigipeaters {
+				return nil, fmt.Errorf("ax25: more than %d digipeaters", MaxDigipeaters)
 			}
 			addr, ext := decodeAddress(raw[pos : pos+7])
 			pos += 7
@@ -199,12 +205,10 @@ func ParseModulo(raw []byte, modulo int) (*Frame, error) {
 			sBits = (ctl >> 2) & 0x03
 			f.PF = ctl2&0x01 != 0
 			f.NR = (ctl2 >> 1) & 0x7F
-			pos += 2
 		} else {
 			f.PF = ctl&0x10 != 0
 			f.NR = (ctl >> 5) & 0x07
 			sBits = (ctl >> 2) & 0x03
-			pos++
 		}
 		switch sBits {
 		case 0:
