@@ -151,6 +151,7 @@ header (command group + command id) followed by a typed body.
 | `READ_RF_CH` | 13 | Read the active channel's frequency when not in VFO mode |
 | `READ_SETTINGS` | 10 | Read the active channel index; squelch and power (structured for, not wired to hamlib in v1) |
 | `GET_HT_STATUS` | 20 | Source for `t` (get_ptt) |
+| `DO_PROG_FUNC` | 66 | Key/unkey the transmitter via the `MAIN_PTT` (13) effect, when PTT is enabled |
 
 `WRITE_RF_CH`, `WRITE_SETTINGS` and `STORE_SETTINGS` are **not** implemented in
 v1. Nothing in the v1 command set writes a channel record or persists to NVRAM.
@@ -231,16 +232,37 @@ listener per radio is the only genuinely compatible arrangement.
 | `\get_freq` | bare integer Hz |
 | `\set_freq <hz>` | `RPRT 0` |
 | `t` | `0` or `1`, from `GET_HT_STATUS`; `RPRT -4` if the spike shows it does not expose TX state |
-| `\set_ptt <n>` | `RPRT -4` (not implemented) |
+| `\set_ptt <n>` | `RPRT 0` when `allow_ptt = true` and the spike confirms hold semantics; otherwise `RPRT -4` |
 | `q` | close the connection |
 
 Answering `CHKVFO 0` is deliberate: PAT then uses an empty VFO prefix and never
 prepends VFO arguments to any command, removing a class of parsing complexity
 from v1.
 
-`\set_ptt` is not a real gap — PAT drives PTT only for soundcard modes; with a
-KISS TNC the radio keys itself. If the spike turns up a Benshi TX command it
-can be added.
+### PTT
+
+PTT is reachable: `DO_PROG_FUNC` (66) triggers a programmable-function effect
+remotely, and `MAIN_PTT` (13) keys the main-VFO transmitter. It is **disabled
+by default** (`allow_ptt = false`) for two reasons.
+
+First, the semantics are unproven. `DO_PROG_FUNC`'s payload is a single effect
+byte with no press/release parameter. HTCommander's own source notes that the
+edge actions `LOW_TO_HIGH` / `HIGH_TO_LOW` are "the likely candidates for a
+live press/release when triggering a function remotely" — i.e. it is not
+established that a remote key can be *held*. hamlib's `set_ptt 1` / `set_ptt 0`
+requires a genuine hold, so if the effect turns out to be a momentary tap,
+`\set_ptt` returns `RPRT -4` even when `allow_ptt = true`, rather than pretending
+to work.
+
+Second, safety. A remote key whose un-key path is unproven is a stuck-transmitter
+risk. So when PTT is enabled, tncd enforces its own **maximum key time**
+(`ptt_timeout`, default 30s): a key that is not released by the client is force-
+released by tncd, and the transport dropping or the client disconnecting also
+force-releases. The radio's own `tx_time_limit` setting (see `SET_TX_TIME_LIMIT`,
+42) remains the independent backstop and tncd never alters it.
+
+PAT does not need any of this — it drives PTT only for soundcard modes, and with
+a KISS TNC the radio keys itself. PTT exists for other hamlib clients.
 
 **Error codes**, pinned against hamlib `include/hamlib/rig.h`:
 
@@ -269,6 +291,8 @@ enabled = true
 listen_host = 127.0.0.1
 listen_port = 4532
 allowed_subnets = 127.0.0.1/32
+allow_ptt = false
+ptt_timeout = 30
 ```
 
 Plus one new key on the port itself, for the classic-Bluetooth case:
@@ -300,6 +324,9 @@ A short read-only spike runs before anything is built. In priority order:
 2. **Is `FREQ_MODE_SET_PAR` supported on the firmware on the bench radio?**
    HTCommander targets this radio family, so this is expected to pass.
 3. **Does the all-zero teardown restore prior state cleanly?**
+4. **Can `DO_PROG_FUNC(MAIN_PTT)` hold the transmitter keyed, or is it a
+   momentary tap?** Determines whether `\set_ptt` can be honored at all. Run
+   last and into a dummy load, since it is the only spike item that transmits.
 
 Secondary risks:
 
@@ -315,6 +342,9 @@ Secondary risks:
 - `benshi/` — golden-byte fixtures like `ax25/`/`agwpe/`, plus `FuzzGaiaFrame`
 - `internal/rig/` — request/response, timeout and teardown behavior against a
   fake control channel
+- PTT — tests that `allow_ptt = false` refuses with `RPRT -4`, that the
+  `ptt_timeout` force-release fires, and that a client disconnect or transport
+  drop while keyed also force-releases
 - `internal/frontend/rigctl/` — table-driven tests against an in-process fake
   rig, asserting the **exact wire responses** PAT's client parses: `CHKVFO 0`,
   bare-integer `\get_freq`, `RPRT` codes
