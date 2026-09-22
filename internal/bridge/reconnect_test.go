@@ -120,9 +120,9 @@ func TestPortNoReconnectWhenDisabled(t *testing.T) {
 // released, simulating a slow dial (a Bluetooth ConnectProfile can take 30s).
 // Close unblocks Read and records that it ran.
 type gateFakeTransport struct {
-	opened chan struct{}  // closed when Open is entered
-	gate   chan struct{}  // non-nil: Open blocks until this is closed
-	readCh chan struct{}  // Close closes it, unblocking Read with EOF
+	opened chan struct{} // closed when Open is entered
+	gate   chan struct{} // non-nil: Open blocks until this is closed
+	readCh chan struct{} // Close closes it, unblocking Read with EOF
 
 	openOnce  sync.Once
 	closeOnce sync.Once
@@ -345,4 +345,53 @@ func TestWedgeRelinkPreservesSession(t *testing.T) {
 		}
 	})
 	waitFor(t, func() bool { return f2.writeCount() > 0 }, 2*time.Second, "TX on relinked transport")
+}
+
+// TestPendingAutoReconnectYieldsToManualRelink — pre-2.0 audit finding. The
+// auto-reconnect backoff timer is armed when the port drops; if the operator
+// relinks manually before it fires, the timer must stand down. Otherwise it
+// dials again and overwrites the working relinked port without closing it
+// (duplicate RX on a multi-client TCP TNC; endless EBUSY retries on serial).
+func TestPendingAutoReconnectYieldsToManualRelink(t *testing.T) {
+	eng := engine.New()
+	cfg := reconnCfg(true)
+	cfg.Ports[0].ReconnectDelay = 0.3 // long enough to relink manually first
+	b := New(eng, cfg)
+
+	f1 := newGateFake(false) // initial link
+	f2 := newGateFake(false) // manual relink
+	var dials int32
+	inner := gateFactory(t, f1, f2)
+	b.newTransport = func(pc config.Port) (kiss.Transport, error) {
+		atomic.AddInt32(&dials, 1)
+		return inner(pc)
+	}
+
+	if err := b.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	go eng.Run()
+	t.Cleanup(func() {
+		onLoop(t, eng, func() { b.Shutdown() })
+		eng.Stop()
+	})
+	waitFor(t, f1.openEntered, 2*time.Second, "initial open")
+
+	f1.Close() // link drops: auto-reconnect armed for 300ms
+	waitFor(t, func() bool { return !portOnline(eng, b, 0) }, 2*time.Second, "port offline")
+
+	onLoop(t, eng, func() {
+		if !b.ReconnectPort(0) {
+			t.Errorf("manual relink rejected")
+		}
+	})
+	waitFor(t, func() bool { return portOnline(eng, b, 0) }, 2*time.Second, "relink online")
+
+	time.Sleep(600 * time.Millisecond) // past the armed backoff timer
+	if n := atomic.LoadInt32(&dials); n != 2 {
+		t.Errorf("dials = %d, want 2 (initial + manual); the stale backoff timer dialed again", n)
+	}
+	if f2.closeCount() != 0 || !portOnline(eng, b, 0) {
+		t.Errorf("relinked port was displaced (closed=%d online=%v)", f2.closeCount(), portOnline(eng, b, 0))
+	}
 }

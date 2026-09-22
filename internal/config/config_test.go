@@ -398,3 +398,31 @@ type = ble
 		t.Fatal("type=ble without bdaddr was accepted")
 	}
 }
+
+// KISS timing parameters are single bytes on the wire; an out-of-range value
+// would silently wrap (tx_delay = 300 -> 44), so it is a load error.
+func TestKISSParamOutOfRangeRejected(t *testing.T) {
+	for _, kv := range []string{"tx_delay = 300", "persistence = -1", "slot_time = 256", "tx_tail = 1000", "full_duplex = 2"} {
+		p := write(t, "[client.0]\ntype = serial\ndevice = /dev/x\n[kiss.0]\n"+kv+"\n")
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "kiss.0") {
+			t.Errorf("%q: err = %v, want a [kiss.0] range error", kv, err)
+		}
+	}
+	p := write(t, "[client.0]\ntype = serial\ndevice = /dev/x\n[kiss.0]\ntx_delay = 255\npersistence = 0\nfull_duplex = 1\n")
+	if _, err := Load(p); err != nil {
+		t.Fatalf("in-range params rejected: %v", err)
+	}
+}
+
+// [api] allowed_hosts lists the Host header values the API answers to.
+func TestAPIAllowedHosts(t *testing.T) {
+	p := write(t, "[api]\nenabled = true\nallowed_hosts = tncd.example.org, shack-pi:8002\n[client.0]\ntype = serial\ndevice = /dev/x\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"tncd.example.org", "shack-pi:8002"}
+	if fmt.Sprint(cfg.API.AllowedHosts) != fmt.Sprint(want) {
+		t.Fatalf("AllowedHosts = %q, want %q", cfg.API.AllowedHosts, want)
+	}
+}

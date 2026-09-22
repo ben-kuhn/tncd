@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -37,9 +38,11 @@ type sseClient struct {
 }
 
 // Serve starts the API server and registers its sinks. Connections from
-// outside allow are rejected at accept time. Registration is marshalled onto
-// the engine loop (safe during setup or while running).
-func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients int, serveUI bool, allow netutil.Allowlist) (*Server, error) {
+// outside allow are rejected at accept time. Requests are answered only when
+// their Host header is an IP literal, "localhost", or one of allowedHosts
+// (see hostGuard). Registration is marshalled onto the engine loop (safe
+// during setup or while running).
+func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients int, serveUI bool, allow netutil.Allowlist, allowedHosts ...string) (*Server, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -61,7 +64,7 @@ func Serve(eng *engine.Engine, b *bridge.Bridge, host string, port, maxClients i
 		mux.Handle("/", h)
 	}
 	s.httpSrv = &http.Server{
-		Handler: mux,
+		Handler: hostGuard(mux, allowedHosts),
 		// Slowloris guard. WriteTimeout and ReadTimeout stay zero: SSE
 		// streams are long-lived (and the 15s heartbeat keeps them off the
 		// idle timer).
@@ -162,6 +165,36 @@ func (s *Server) handlePortAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"port": port, "reconnecting": true})
+}
+
+// hostGuard refuses requests whose Host header names a host we were not told
+// about. This defeats DNS rebinding — a hostile page re-pointing its own name
+// at 127.0.0.1 to read the API or POST a relink — because such a request
+// carries the attacker's hostname. IP literals and "localhost" can't be
+// rebound, so they are always accepted; other names (LAN hostnames, tunnel
+// domains) must be listed in [api] allowed_hosts.
+func hostGuard(next http.Handler, allowed []string) http.Handler {
+	names := map[string]bool{"localhost": true}
+	for _, h := range allowed {
+		names[strings.ToLower(hostOnly(h))] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := strings.ToLower(hostOnly(r.Host))
+		if _, err := netip.ParseAddr(h); err != nil && !names[h] {
+			log.Printf("api: refusing request for Host %q (add it to [api] allowed_hosts if legitimate)", r.Host)
+			http.Error(w, "forbidden: unknown Host; add it to [api] allowed_hosts", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostOnly strips an optional :port and IPv6 brackets from a Host value.
+func hostOnly(h string) string {
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

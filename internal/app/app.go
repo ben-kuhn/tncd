@@ -67,7 +67,7 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 
 	if cfg.API.Enabled {
 		warnIfExposed("api", cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.AllowedSubnets)
-		r.apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients, cfg.API.ServeUI, cfg.API.AllowedSubnets)
+		r.apiSrv, err = apiserver.Serve(eng, b, cfg.API.ListenHost, cfg.API.ListenPort, cfg.API.MaxClients, cfg.API.ServeUI, cfg.API.AllowedSubnets, cfg.API.AllowedHosts...)
 		if err != nil {
 			if r.kissSrv != nil {
 				r.kissSrv.Close()

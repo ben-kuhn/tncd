@@ -51,3 +51,18 @@ func TestParseHeaderShort(t *testing.T) {
 		t.Fatal("expected error for short header")
 	}
 }
+
+// Callsign fields are NUL-terminated C strings: anything after the first NUL
+// is uninitialized client memory, not part of the callsign.
+func TestParseHeaderStopsAtFirstNUL(t *testing.T) {
+	b := Build(0, 'C', 0, "KU0HN-10", "N0CALL", nil)
+	copy(b[8:18], "KU0HN\x00xy\x00\x00\x00")
+	copy(b[18:28], "N0CALL\x00\x07\x00\x00")
+	h, err := ParseHeader(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.CallFrom != "KU0HN" || h.CallTo != "N0CALL" {
+		t.Fatalf("CallFrom=%q CallTo=%q, want KU0HN / N0CALL", h.CallFrom, h.CallTo)
+	}
+}

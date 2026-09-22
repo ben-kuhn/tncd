@@ -311,7 +311,7 @@ func TestReceivedSREJRetransmitsOneFrame(t *testing.T) {
 	}
 	rec.sent = nil
 
-	// Peer SREJs frame 1: acks 0, requests only 1.
+	// Peer SREJs frame 1 (F=0: no ack implied), requesting only frame 1.
 	srej := mkFrame(ax25.SREJ, "N0CALL-2", "KU0HN-10", resp, nr(1))
 	tbl.OnFrame(0, srej)
 

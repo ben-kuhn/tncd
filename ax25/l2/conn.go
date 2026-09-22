@@ -66,6 +66,12 @@ type Conn struct {
 	// RNR/flow control
 	remoteBusy bool
 
+	// polling is set while an RR P=1 enquiry awaits its F=1 answer (timer
+	// recovery); rejSent while a REJ awaits the frame it asked for (the v2.0
+	// reject exception, which allows only one outstanding REJ).
+	polling bool
+	rejSent bool
+
 	// T2 delayed-ACK state: the peer a deferred RR F=1 is owed.
 	t2Src string
 	t2Dst string
@@ -134,6 +140,8 @@ func (c *Conn) resetSeqs() {
 	c.iframeTimestamps = make(map[uint8]time.Time)
 	c.outQueue = c.outQueue[:0]
 	c.remoteBusy = false
+	c.polling = false
+	c.rejSent = false
 	c.xidPending = false
 	c.srejEnabled = false
 	c.rxBuf = make(map[uint8]rxEntry)

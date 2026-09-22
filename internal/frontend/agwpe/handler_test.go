@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -393,7 +394,7 @@ func TestUnprotoM(t *testing.T) {
 }
 
 // TestConnectCFlow: 'C' → SABM on fake port; inject UA via bridge.OnKISSFrame
-// → client reads 'C' frame with "*** CONNECTED With N0CALL-2\r".
+// → client reads 'C' frame with "*** CONNECTED With Station N0CALL-2\r".
 func TestConnectCFlow(t *testing.T) {
 	eng := engine.New()
 	go eng.Run()
@@ -443,7 +444,7 @@ func TestConnectCFlow(t *testing.T) {
 	if resp2.Kind != 'C' {
 		t.Fatalf("expected C notification, got %c (data=%q)", resp2.Kind, string(resp2.Data))
 	}
-	wantMsg := "*** CONNECTED With N0CALL-2\r"
+	wantMsg := "*** CONNECTED With Station N0CALL-2\r" // Dire Wolf server.c wording
 	if string(resp2.Data) != wantMsg {
 		t.Fatalf("connected msg = %q, want %q", string(resp2.Data), wantMsg)
 	}
@@ -963,5 +964,99 @@ func TestOutOfRangePortIsClampedNotDropped(t *testing.T) {
 	}
 	if got := parsed.Src.String(); got != "KU0HN-2" {
 		t.Errorf("src = %q, want KU0HN-2", got)
+	}
+}
+
+// connectedSession registers KU0HN-10 on a fresh client, connects to N0CALL-2
+// and completes the handshake, consuming the 'X' and 'C' replies.
+func connectedSession(t *testing.T) (*engine.Engine, *bridge.Bridge, *fakePort, net.Listener, net.Conn) {
+	t.Helper()
+	eng := engine.New()
+	go eng.Run()
+	t.Cleanup(eng.Stop)
+	fp := newFakePort(true)
+	b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+		{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+	})
+	ln, conn := dialServe(t, eng, b)
+	t.Cleanup(func() { conn.Close(); ln.Close() })
+	time.Sleep(20 * time.Millisecond)
+	writeFrame(t, conn, 0, 'X', 0, "KU0HN-10", "", nil)
+	readOneFrame(t, conn)
+	writeFrame(t, conn, 0, 'C', 0, "KU0HN-10", "N0CALL-2", nil)
+	sabm := waitForSABM(t, fp)
+	ua := &ax25.Frame{Dst: sabm.Src, Src: sabm.Dst, Type: ax25.UA, PF: true}
+	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: ua.Bytes()}) })
+	if c := readOneFrame(t, conn); c.Kind != 'C' {
+		t.Fatalf("expected 'C', got %c", c.Kind)
+	}
+	return eng, b, fp, ln, conn
+}
+
+// The remote's DISC is reported with Dire Wolf's wording.
+func TestRemoteDisconnectMessage(t *testing.T) {
+	eng, b, _, _, conn := connectedSession(t)
+	disc := &ax25.Frame{
+		Dst: ax25.Address{Call: "KU0HN", SSID: 10}, Src: ax25.Address{Call: "N0CALL", SSID: 2},
+		Type: ax25.DISC, PF: true, Command: true,
+	}
+	onLoop(t, eng, func() { b.OnKISSFrame(kiss.RXFrame{Port: 0, Data: disc.Bytes()}) })
+	d := readOneFrame(t, conn)
+	if d.Kind != 'd' || string(d.Data) != "*** DISCONNECTED From Station N0CALL-2\r" {
+		t.Fatalf("got %c %q, want 'd' \"*** DISCONNECTED From Station N0CALL-2\\r\"", d.Kind, d.Data)
+	}
+}
+
+// A connect to an unencodable callsign is refused with a reason, and nothing
+// is transmitted.
+func TestConnectInvalidCallsignRefused(t *testing.T) {
+	for _, kind := range []byte{'C', 'c', 'v'} {
+		eng := engine.New()
+		go eng.Run()
+		fp := newFakePort(true)
+		b := makeBridgeWithFakePort(t, eng, []*fakePort{fp}, []config.Port{
+			{Name: "Port 0", Type: "serial", Device: "/dev/null", OTABaudrate: 1200},
+		})
+		ln, conn := dialServe(t, eng, b)
+		time.Sleep(20 * time.Millisecond)
+		writeFrame(t, conn, 0, kind, 0, "KU0HN-10", "TOOLONGCALL", nil)
+		d := readOneFrame(t, conn)
+		if d.Kind != 'd' || !strings.Contains(string(d.Data), "invalid callsign") {
+			t.Errorf("%c: reply %c %q, want 'd' naming the invalid callsign", kind, d.Kind, d.Data)
+		}
+		time.Sleep(20 * time.Millisecond)
+		if n := len(fp.getSent()); n != 0 {
+			t.Errorf("%c: %d frame(s) transmitted for an invalid callsign", kind, n)
+		}
+		conn.Close()
+		ln.Close()
+		eng.Stop()
+	}
+}
+
+// 'K' ownership is decided by the addresses inside the raw frame, not by the
+// (unrelated, client-chosen) AGWPE header callsigns: a second client must not
+// inject frames into another client's session.
+func TestRawFrameIntoForeignSessionRejected(t *testing.T) {
+	eng, b, fp, ln, _ := connectedSession(t)
+	other, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	time.Sleep(20 * time.Millisecond)
+	writeFrame(t, other, 0, 'X', 0, "N0BODY", "", nil)
+	readOneFrame(t, other)
+	before := len(fp.getSent())
+	inject := &ax25.Frame{
+		Dst: ax25.Address{Call: "N0CALL", SSID: 2}, Src: ax25.Address{Call: "KU0HN", SSID: 10},
+		Type: ax25.I, PID: 0xF0, Info: []byte("spoof"), Command: true,
+	}
+	writeFrame(t, other, 0, 'K', 0, "N0BODY", "CQ", append([]byte{0}, inject.Bytes()...))
+	time.Sleep(50 * time.Millisecond)
+	onLoop(t, eng, func() {})
+	_ = b
+	if after := len(fp.getSent()); after != before {
+		t.Fatalf("foreign client's raw frame into an owned session was transmitted")
 	}
 }

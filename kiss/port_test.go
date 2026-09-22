@@ -391,3 +391,69 @@ func TestWriteErrorTriggersOffline(t *testing.T) {
 		t.Fatal("write error did not take the port offline (silent TX failure)")
 	}
 }
+
+// shortWriteTransport accepts at most `max` bytes per Write (as a raw
+// write(2) may) and records everything written.
+type shortWriteTransport struct {
+	idleTransport
+	max int
+	mu  sync.Mutex
+	got []byte
+}
+
+func (s *shortWriteTransport) Write(b []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(b) > s.max {
+		b = b[:s.max]
+	}
+	s.got = append(s.got, b...)
+	return len(b), nil
+}
+
+func (s *shortWriteTransport) written() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.got...)
+}
+
+// A transport that accepts only part of a frame per Write (go.bug.st/serial
+// on Unix and the FreeBSD RFCOMM socket are single write(2) calls) must still
+// get the whole KISS frame; a truncated frame would be keyed up by the TNC
+// with a freshly computed, valid FCS.
+func TestWriterCompletesShortWrites(t *testing.T) {
+	st := &shortWriteTransport{idleTransport: *newIdleTransport(0), max: 3}
+	p := NewPort(0, st, Params{}, func(RXFrame) {}, func(int) {})
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	payload := []byte("a frame much longer than three bytes")
+	p.Send(payload)
+	want := WrapData(0, payload)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(st.written()) < len(want) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := st.written(); !bytes.Equal(got, want) {
+		t.Fatalf("transport got %q, want the whole frame %q", got, want)
+	}
+}
+
+// A transport that makes no progress (0, nil) must take the port offline
+// rather than spin or silently drop the frame.
+func TestWriterZeroProgressTakesPortOffline(t *testing.T) {
+	st := &shortWriteTransport{idleTransport: *newIdleTransport(0), max: 0}
+	offline := make(chan int, 1)
+	p := NewPort(0, st, Params{}, func(RXFrame) {}, func(n int) { offline <- n })
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	p.Send([]byte("x"))
+	select {
+	case <-offline:
+	case <-time.After(2 * time.Second):
+		t.Fatal("zero-progress writer did not take the port offline")
+	}
+}
