@@ -54,6 +54,33 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
+// icacls grant targets: well-known SIDs, since the account names "SYSTEM" and
+// "Administrators" are localized (e.g. "Administratoren") and icacls rejects
+// the English names on non-English Windows.
+const (
+	sidLocalSystem    = "*S-1-5-18"
+	sidAdministrators = "*S-1-5-32-544"
+)
+
+// icaclsCommand returns the absolute icacls path (System32 — an elevated
+// installer must never resolve a tool through PATH) and the arguments that
+// reset dir's DACL: /inheritance:r drops inherited ACEs; /grant:r gives SYSTEM
+// and Administrators full control, (OI)(CI) propagating to children like
+// tncd.ini. Everyone/Users lose write access.
+func icaclsCommand(dir string) (string, []string, error) {
+	sys, err := windows.GetSystemDirectory()
+	if err != nil {
+		return "", nil, fmt.Errorf("locate System32: %w", err)
+	}
+	return filepath.Join(sys, "icacls.exe"), []string{
+		dir,
+		"/inheritance:r",
+		"/grant:r",
+		sidLocalSystem + ":(OI)(CI)F",
+		sidAdministrators + ":(OI)(CI)F",
+	}, nil
+}
+
 // hardenConfigDirACL replaces the config directory's inherited DACL with an
 // explicit SYSTEM + Administrators-only one. Default ACL inheritance makes the
 // dir admin-write-only in practice but does not guarantee it; a non-admin write
@@ -62,17 +89,11 @@ func copyFile(src, dst string) error {
 // elevated installer) rather than raw DACL-building syscalls, which the pinned
 // x/sys does not expose.
 func hardenConfigDirACL(dir string) error {
-	// /inheritance:r drops inherited ACEs; /grant:r gives SYSTEM and
-	// Administrators full control, (OI)(CI) propagating to children like
-	// tncd.ini. Everyone/Users lose write access.
-	args := []string{
-		dir,
-		"/inheritance:r",
-		"/grant:r",
-		"SYSTEM:(OI)(CI)F",
-		"Administrators:(OI)(CI)F",
+	path, args, err := icaclsCommand(dir)
+	if err != nil {
+		return err
 	}
-	cmd := exec.Command("icacls", args...)
+	cmd := exec.Command(path, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("icacls %s: %v (%s)", dir, err, strings.TrimSpace(string(out)))
 	}
