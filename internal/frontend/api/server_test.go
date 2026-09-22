@@ -333,3 +333,42 @@ func TestPortReconnectCSRFGuard(t *testing.T) {
 		}
 	}
 }
+
+// DNS-rebinding guard: a page on attacker.example that re-points its name at
+// 127.0.0.1 reaches the API with Host: attacker.example. Only IP literals,
+// localhost and configured allowed_hosts names are answered.
+func TestHostHeaderGuard(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	var b *bridge.Bridge
+	done := make(chan struct{})
+	eng.Do(func() { b = newBridge(t, eng); close(done) })
+	<-done
+	srv, err := Serve(eng, b, "127.0.0.1", 0, 16, true, netutil.Allowlist{}, "shack-pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOnLoop(eng, srv)
+	_, port, _ := strings.Cut(srv.Addr(), ":")
+	for host, want := range map[string]int{
+		"attacker.example:" + port: http.StatusForbidden,
+		"attacker.example":         http.StatusForbidden,
+		"127.0.0.1:" + port:        http.StatusOK,
+		"[::1]:" + port:            http.StatusOK,
+		"LOCALHOST:" + port:        http.StatusOK,
+		"shack-pi:" + port:         http.StatusOK,
+		"Shack-Pi":                 http.StatusOK,
+	} {
+		req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/api/status", nil)
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("Host %q: status %d, want %d", host, resp.StatusCode, want)
+		}
+	}
+}

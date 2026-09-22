@@ -52,6 +52,10 @@ type APIConfig struct {
 	ServeUI    bool   // default true — serve the embedded web monitor at /
 	// AllowedSubnets restricts client source IPs. Empty = allow all.
 	AllowedSubnets netutil.Allowlist
+	// AllowedHosts lists extra Host-header hostnames the API answers to
+	// (e.g. a tunnel or LAN name). IP literals and "localhost" are always
+	// accepted; any other name is refused, which blocks DNS rebinding.
+	AllowedHosts []string
 }
 
 // Port holds one [client.N] section's settings plus the associated [kiss.N] params.
@@ -126,7 +130,7 @@ var knownKISSTCPKeys = []string{
 // knownAPIKeys are the recognized keys in [api].
 var knownAPIKeys = []string{
 	"enabled", "listen_host", "listen_port", "max_clients", "serve_ui",
-	"allowed_subnets",
+	"allowed_subnets", "allowed_hosts",
 }
 
 // knownClientKeys are the recognized keys in [client.N].
@@ -280,6 +284,17 @@ func getString(s *ini.Section, key string, def string) string {
 		return s.Key(key).String()
 	}
 	return def
+}
+
+// getList returns a comma-separated key as trimmed, non-empty entries.
+func getList(s *ini.Section, key string) []string {
+	var out []string
+	for _, v := range strings.Split(getString(s, key, ""), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // parseAllowlistKey parses a comma-separated CIDR allowlist key. Absent or
@@ -457,6 +472,7 @@ func Load(path string) (*Config, error) {
 		MaxClients:     getInt(apiSec, "max_clients", 16),
 		ServeUI:        getBool(apiSec, "serve_ui", true),
 		AllowedSubnets: apiAllow,
+		AllowedHosts:   getList(apiSec, "allowed_hosts"),
 	}
 
 	// --- Collect client.N and kiss.N sections ---
@@ -621,6 +637,9 @@ func Load(path string) (*Config, error) {
 				TXTail:      getIntPtr(ks, "tx_tail"),
 				FullDuplex:  getIntPtr(ks, "full_duplex"),
 			}
+			if err := validateKISSParams(fmt.Sprintf("kiss.%d", i), port.KISS); err != nil {
+				return nil, err
+			}
 		}
 
 		cfg.Ports[i] = port
@@ -657,6 +676,27 @@ func warnDuplicatePorts(ports []Port) {
 			}
 		}
 	}
+}
+
+// validateKISSParams range-checks [kiss.N] values at load: each is one byte
+// on the wire, so an out-of-range value would otherwise wrap silently.
+func validateKISSParams(secName string, k kiss.Params) error {
+	for _, prm := range []struct {
+		key string
+		val *int
+		max int
+	}{
+		{"tx_delay", k.TXDelay, 255},
+		{"persistence", k.Persistence, 255},
+		{"slot_time", k.SlotTime, 255},
+		{"tx_tail", k.TXTail, 255},
+		{"full_duplex", k.FullDuplex, 1},
+	} {
+		if prm.val != nil && (*prm.val < 0 || *prm.val > prm.max) {
+			return fmt.Errorf("[%s] %s = %d is out of range (0-%d)", secName, prm.key, *prm.val, prm.max)
+		}
+	}
+	return nil
 }
 
 // validateSerialParams checks parity/stopbits at load time so a typo produces

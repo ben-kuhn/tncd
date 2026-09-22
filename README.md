@@ -340,6 +340,11 @@ reach the port can relink your radio ports and interrupt a session, so treat
 reachability as the control and use `allowed_subnets` or a firewall if it is not
 on loopback.
 
+To block DNS-rebinding attacks, the API only answers requests whose `Host` header
+is an IP address or `localhost`. If you reach it by name (a LAN hostname, or a
+Cloudflare/SSH tunnel domain), list those names in `allowed_hosts`, e.g.
+`allowed_hosts = shack-pi, tncd.example.org`. Otherwise requests get `403`.
+
 - `GET /api/status` — tncd version and per-port state with live frame counters.
 - `GET /api/connections` — active AX.25 connections with troubleshooting detail
   (V(S)/V(R) sequence numbers, unacked/queued frames, T1 retries, RNR busy,
