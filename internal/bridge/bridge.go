@@ -910,16 +910,34 @@ func (b *Bridge) portAwaitingReply(port int) bool {
 }
 
 // relinkEscalateAfter is how many consecutive wedge relinks on one port stay
-// routine before the operator is told that reconnecting is not working. Set
-// low because a relink that is going to help helps on the first try: the
-// failure that motivated this watchdog was a radio holding frames in its own
-// TX queue, which a fresh link cannot clear, and on the air it produced six
-// silent relink cycles while nothing reached the radio.
+// routine before the operator is told that reconnecting is not working. It is
+// also the hard budget: the relink that reaches it is the LAST one attempted
+// (see relinkBudgetSpent). Set low because a relink that is going to help helps
+// on the first try: the failure that motivated this watchdog was a radio
+// holding frames in its own TX queue, which a fresh link cannot clear, and on
+// the air it produced six silent relink cycles while nothing reached the radio.
 const relinkEscalateAfter = 3
 
 // shouldEscalateRelink reports whether this relink should carry the
 // "reconnecting is not fixing it" warning rather than the routine message.
 func shouldEscalateRelink(consecutive int) bool {
+	return consecutive >= relinkEscalateAfter
+}
+
+// relinkBudgetSpent reports whether a port has already used its whole run of
+// futile relinks and must stop cycling the transport.
+//
+// The watchdog cannot tell a wedged SPP link from a peer that simply is not
+// there: both present as total RX silence with TX outstanding, and on a quiet
+// channel there is no ambient traffic to break the tie. So rather than predict
+// which it is, relink and judge by the OUTCOME. A relink that helps produces
+// RX, which zeroes the counter (see handleFrame) and restores the full budget.
+// A counter that keeps climbing means relinking is restoring nothing — either
+// an unreachable station, or a wedge a fresh link cannot clear — and in both
+// readings further cycles only add dead air and eat N2 retries, because frames
+// sent while the port is relinking hit an offlineSentinel and never reach the
+// radio. Stopping lets L2 run its remaining retries out over a stable link.
+func relinkBudgetSpent(consecutive int) bool {
 	return consecutive >= relinkEscalateAfter
 }
 
@@ -934,16 +952,33 @@ func (b *Bridge) checkRXWedge(now time.Time) {
 			continue
 		}
 		since := now.Sub(b.lastRX[port])
-		if !rxWedged(b.ports[port].Online(), timeout, b.portAwaitingReply(port), since) {
+		awaiting := b.portAwaitingReply(port)
+		if !awaiting && port < len(b.relinks) {
+			// Nothing is waiting on a reply, so any run of futile relinks has
+			// ended with the session. Clear it here as well as on RX: a port
+			// that never received a single frame would otherwise stay at its
+			// spent budget forever, leaving the NEXT connect attempt — perhaps
+			// from somewhere with an actual path — running with no watchdog.
+			b.relinks[port] = 0
+		}
+		if !rxWedged(b.ports[port].Online(), timeout, awaiting, since) {
+			continue
+		}
+		if relinkBudgetSpent(b.relinks[port]) {
+			// Budget spent and still no traffic. Stay silent rather than
+			// repeating the warning every rxWedgeCheckInterval.
 			continue
 		}
 		b.relinks[port]++
 		if shouldEscalateRelink(b.relinks[port]) {
 			// Repeating the routine line would imply progress that is not
-			// happening. Say what the operator actually has to do: in testing,
-			// only resetting the Bluetooth adapter restored transmission.
-			log.Printf("bridge: port %d still wedged after %d relinks -- reconnecting is not clearing it; "+
-				"reset the Bluetooth adapter or power-cycle the TNC (consider serial/tcp for this port)",
+			// happening. State the fact rather than prescribing a cause: total
+			// RX silence reads identically whether the TNC link is wedged or
+			// the station being called simply cannot be heard, and telling the
+			// operator to reset the adapter is wrong advice in the second case.
+			log.Printf("bridge: port %d still wedged after %d relinks -- relinking has restored no traffic; "+
+				"last relink (check the path to the station, then the TNC link: "+
+				"reset the Bluetooth adapter or power-cycle the TNC)",
 				port, b.relinks[port])
 		} else {
 			log.Printf("bridge: port %d RX wedged -- %.0fs silence with unacked TX; relinking (keeping session)",
