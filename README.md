@@ -126,6 +126,14 @@ Direct serial connection to a TNC via USB or RS-232.
 
 Connects to a KISS-over-TCP server (e.g. Dire Wolf, QtSoundModem).
 
+> [!NOTE]
+> For a **remote** TNC (another host, not localhost), consider setting
+> `rx_wedge_timeout` on the port. It defaults to 0 (off) for `type = tcp`:
+> a half-open TCP connection whose receive side silently dies is only
+> detected by the OS keepalive on kernel timescales (typically hours). The
+> wedge watchdog notices "unacked TX outstanding but total RX silence" and
+> relinks the port within the configured timeout instead.
+
 ### Bluetooth TNC
 
 On **Linux**, tncd connects to Bluetooth TNCs natively using the BlueZ D-Bus
