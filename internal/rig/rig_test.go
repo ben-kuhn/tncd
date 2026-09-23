@@ -371,3 +371,72 @@ func TestCloseUnblocksInFlightRequest(t *testing.T) {
 		t.Fatal("request did not unblock after Close")
 	}
 }
+
+// (a) The existing TestStaleReplyIsNotDeliveredToNextRequest (fix round 1,
+// above) already covers the late-reply case and must keep passing -- verified
+// below in the same test run as the two new cases.
+
+// (b) Fix round 2's reviewer repro: request1's reply is genuinely LOST (never
+// sent at all, not just late). Once the straggler window has actually
+// elapsed, a later request must self-heal rather than staying one generation
+// behind forever -- the bug this round fixes made this fail permanently,
+// with the error "rig: radio did not reply in time" on every later request
+// of the command, until the process restarted.
+func TestLostReplySelfHealsAfterStragglerWindow(t *testing.T) {
+	ch := newFakeChannel()
+	timeout := 20 * time.Millisecond
+	r := New(ch, timeout)
+	defer r.Close()
+
+	// request1: genuinely lost -- nobody ever replies to it.
+	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("request1 err = %v, want ErrTimeout", err)
+	}
+
+	// Let request1's abandoned generation age past its straggler window
+	// before issuing request2, so the self-heal (not a race with a
+	// still-open window) is what's under test.
+	time.Sleep(timeout*staleReplyExpiryMultiplier + 20*time.Millisecond)
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		ch.reply(benshi.CmdFreqModeGetStatus, []byte{0x00, 0x08, 0xA4, 0xFB, 0x70})
+	}()
+
+	hz, err := r.GetFreq()
+	if err != nil {
+		t.Fatalf("request2: %v, want a clean reply -- the lost-reply gap must self-heal", err)
+	}
+	if hz != 145030000 {
+		t.Errorf("GetFreq = %d, want 145030000", hz)
+	}
+}
+
+// (c) The straggler window is a real, non-zero bound, not an alias for
+// immediate retirement: a reply arriving well before the window elapses is
+// still attributed to the older abandoned generation (protecting the
+// late-reply case in (a)), so the request waiting on the newer generation
+// still has to time out. This is the mirror image of (b) and proves both
+// ends of the window actually take effect.
+func TestAbandonedGenerationStaysProtectedWithinWindow(t *testing.T) {
+	ch := newFakeChannel()
+	timeout := 100 * time.Millisecond
+	r := New(ch, timeout) // window = 3*timeout = 300ms, far longer than the 5ms reply below
+	defer r.Close()
+
+	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("request1 err = %v, want ErrTimeout", err)
+	}
+
+	// Arrives quickly, nowhere near the straggler window's expiry, so it must
+	// still be consumed as the (still-plausible) answer to the abandoned
+	// generation and NOT delivered to request2.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		ch.reply(benshi.CmdFreqModeGetStatus, []byte{0x00, 0x08, 0xA4, 0xFB, 0x70})
+	}()
+
+	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("request2 err = %v, want ErrTimeout (the window must not be zero-length)", err)
+	}
+}

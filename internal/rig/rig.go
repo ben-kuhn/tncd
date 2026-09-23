@@ -22,6 +22,22 @@ var ErrTimeout = errors.New("rig: radio did not reply in time")
 // ErrClosed reports use of a rig whose channel has been closed.
 var ErrClosed = errors.New("rig: control channel closed")
 
+// staleReplyExpiryMultiplier bounds how long an abandoned (timed-out)
+// request's generation stays open for a late straggler before dispatch
+// force-retires it and lets replySeq catch up on its own. A genuinely late
+// reply is most plausible shortly after its own deadline -- the radio was
+// probably just a bit slower than our budget that one time -- so a few
+// multiples of the timeout comfortably covers that case without leaving a
+// truly lost reply wedging every later request of the same command behind a
+// gap that only a process restart would clear.
+const staleReplyExpiryMultiplier = 3
+
+// abandonedGen records a request that gave up without a reply, and when.
+type abandonedGen struct {
+	gen uint64
+	at  time.Time
+}
+
 // Rig is a request/response session with one radio.
 //
 // One request is in flight at a time: the radio is a single serial endpoint and
@@ -49,6 +65,12 @@ type Rig struct {
 	// waiting for it, so a straggler can never be mistaken for the answer to
 	// a later request that happens to share the same command code.
 	replySeq uint64
+	// abandoned holds generations whose request timed out without ever
+	// retiring, oldest first. A reply arriving inside its straggler window
+	// still retires it normally (dispatch's replySeq advance below);
+	// pruneExpiredLocked force-retires it once the window has elapsed, so a
+	// genuinely lost reply self-heals instead of wedging replySeq forever.
+	abandoned []abandonedGen
 
 	cachedHz  uint32
 	cachedOK  bool
@@ -249,6 +271,10 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 			return nil, fmt.Errorf("rig: write: %w", err)
 		}
 	case <-deadline.C:
+		// The write goroutine may still land on the wire after we give up on
+		// it, so this generation gets the same straggler grace as a reply
+		// timeout rather than being retired immediately.
+		r.abandon(gen)
 		return nil, ErrTimeout
 	case <-r.closedCh:
 		return nil, ErrClosed
@@ -258,9 +284,38 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 	case m := <-replyCh:
 		return m.Body, nil
 	case <-deadline.C:
+		r.abandon(gen)
 		return nil, ErrTimeout
 	case <-r.closedCh:
 		return nil, ErrClosed
+	}
+}
+
+// abandon records that gen's request gave up without a reply. A reply for it
+// may still be genuinely in flight, so it isn't force-retired immediately --
+// see pruneExpiredLocked.
+func (r *Rig) abandon(gen uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.replySeq < gen {
+		r.abandoned = append(r.abandoned, abandonedGen{gen: gen, at: time.Now()})
+	}
+}
+
+// pruneExpiredLocked force-retires any abandoned generation whose straggler
+// window has elapsed. Must be called with mu held, before dispatch's own
+// replySeq advance so an incoming reply is matched against a gap that's
+// already been caught up to reality.
+func (r *Rig) pruneExpiredLocked() {
+	for len(r.abandoned) > 0 {
+		oldest := r.abandoned[0]
+		if time.Since(oldest.at) < r.timeout*staleReplyExpiryMultiplier {
+			break // still within the window; a straggler for it is plausible
+		}
+		if r.replySeq < oldest.gen {
+			r.replySeq = oldest.gen
+		}
+		r.abandoned = r.abandoned[1:]
 	}
 }
 
@@ -303,6 +358,10 @@ func (r *Rig) dispatch(f benshi.Frame) {
 		return
 	}
 	r.mu.Lock()
+	// Force-retire any abandoned generation whose straggler window has
+	// already elapsed before considering this reply, so a genuinely lost
+	// reply doesn't leave replySeq permanently behind reqSeq.
+	r.pruneExpiredLocked()
 	// Retire the next outstanding generation unconditionally -- see the
 	// replySeq field doc. This must happen even when nobody is currently
 	// waiting (w == nil, or a later request already owns the slot), so a
@@ -310,6 +369,9 @@ func (r *Rig) dispatch(f benshi.Frame) {
 	// left to be misread as the answer to whatever request comes next.
 	if r.replySeq < r.reqSeq {
 		r.replySeq++
+		if len(r.abandoned) > 0 && r.abandoned[0].gen == r.replySeq {
+			r.abandoned = r.abandoned[1:] // this reply retired it directly
+		}
 	}
 	gen := r.replySeq
 	w, waitGen, cmd := r.waiting, r.waitGen, r.waitCmd
