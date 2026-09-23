@@ -236,44 +236,6 @@ func TestProbeRejectsFailureStatus(t *testing.T) {
 	}
 }
 
-// A late reply to a request that already timed out must not be delivered as
-// the answer to a LATER request of the same command -- see the replySeq
-// field doc in rig.go. Reproduces: request1 times out; the radio's slow
-// answer to request1 finally lands after request2 has already installed its
-// own waiting channel for the identical command; request2 must still get its
-// own (fresh) answer, not request1's stale one.
-func TestStaleReplyIsNotDeliveredToNextRequest(t *testing.T) {
-	ch := newFakeChannel()
-	r := New(ch, 100*time.Millisecond)
-	defer r.Close()
-
-	// request1: nobody answers within its deadline.
-	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
-		t.Fatalf("request1 err = %v, want ErrTimeout", err)
-	}
-
-	staleFreq := []byte{0x00, 0x08, 0x9E, 0x86, 0x00} // some frequency != 145030000
-	freshFreq := []byte{0x00, 0x08, 0xA4, 0xFB, 0x70} // 145030000 Hz
-
-	go func() {
-		// Both arrive comfortably inside request2's 100ms budget, but only
-		// after request2 (below) has had time to install its own waiting
-		// channel for CmdFreqModeGetStatus.
-		time.Sleep(20 * time.Millisecond)
-		ch.reply(benshi.CmdFreqModeGetStatus, staleFreq) // late answer to request1
-		time.Sleep(20 * time.Millisecond)
-		ch.reply(benshi.CmdFreqModeGetStatus, freshFreq) // genuine answer to request2
-	}()
-
-	hz, err := r.GetFreq()
-	if err != nil {
-		t.Fatalf("request2: %v", err)
-	}
-	if hz != 145030000 {
-		t.Errorf("GetFreq = %d, want 145030000 (the fresh reply, not request1's stale one)", hz)
-	}
-}
-
 // blockingChannel never returns from Write or Read until told to, so tests
 // can verify a request's timeout bounds the write itself, not just the wait
 // for a reply.
@@ -299,11 +261,14 @@ func (b *blockingChannel) Close() error { return nil }
 
 // A wedged transport that accepts a Write and never returns must not wedge
 // the caller either -- CLAUDE.md documents exactly this failure mode on a
-// stuck Bluetooth SPP socket.
+// stuck Bluetooth SPP socket. The call includes the post-timeout quiet
+// period (see quietPeriodMultiplier), so the bound here is timeout +
+// quietPeriod, not the bare timeout.
 func TestRequestTimesOutEvenWhenWriteBlocks(t *testing.T) {
 	ch := newBlockingChannel()
 	defer close(ch.unblock) // release the leaked internal Write/Read goroutines
-	r := New(ch, 50*time.Millisecond)
+	timeout := 50 * time.Millisecond
+	r := New(ch, timeout)
 	defer r.Close()
 
 	start := time.Now()
@@ -311,8 +276,9 @@ func TestRequestTimesOutEvenWhenWriteBlocks(t *testing.T) {
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Errorf("took %v, want roughly the 50ms timeout", elapsed)
+	want := timeout * (1 + quietPeriodMultiplier)
+	if elapsed := time.Since(start); elapsed > want+time.Second {
+		t.Errorf("took %v, want roughly %v (timeout + quiet period)", elapsed, want)
 	}
 }
 
@@ -372,31 +338,26 @@ func TestCloseUnblocksInFlightRequest(t *testing.T) {
 	}
 }
 
-// (a) The existing TestStaleReplyIsNotDeliveredToNextRequest (fix round 1,
-// above) already covers the late-reply case and must keep passing -- verified
-// below in the same test run as the two new cases.
+// Fix round 3 replaced the reply-matching schemes from rounds 0-2 (command-
+// type-only match, then two FIFO-generation designs) with a quiet-period
+// barrier: after a request times out, request() itself waits out
+// quietPeriodMultiplier*timeout (or an early straggler, or Close) before
+// returning, still holding reqMu, so no later request can be issued while a
+// straggler for the timed-out one could still arrive. See the doc comment on
+// quietPeriodMultiplier in rig.go for why matching was abandoned rather than
+// patched again. The four tests below are the reviewer's required scenarios.
 
-// (b) Fix round 2's reviewer repro: request1's reply is genuinely LOST (never
-// sent at all, not just late). Once the straggler window has actually
-// elapsed, a later request must self-heal rather than staying one generation
-// behind forever -- the bug this round fixes made this fail permanently,
-// with the error "rig: radio did not reply in time" on every later request
-// of the command, until the process restarted.
-func TestLostReplySelfHealsAfterStragglerWindow(t *testing.T) {
+// (1) LOST reply: request1's reply never arrives at all. request1's own call
+// already absorbs its quiet period before returning, so request2 can be
+// issued immediately afterward and must get its own correct reply.
+func TestLostReplyRequest2GetsOwnReply(t *testing.T) {
 	ch := newFakeChannel()
-	timeout := 20 * time.Millisecond
-	r := New(ch, timeout)
+	r := New(ch, 20*time.Millisecond)
 	defer r.Close()
 
-	// request1: genuinely lost -- nobody ever replies to it.
 	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("request1 err = %v, want ErrTimeout", err)
 	}
-
-	// Let request1's abandoned generation age past its straggler window
-	// before issuing request2, so the self-heal (not a race with a
-	// still-open window) is what's under test.
-	time.Sleep(timeout*staleReplyExpiryMultiplier + 20*time.Millisecond)
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
@@ -405,38 +366,118 @@ func TestLostReplySelfHealsAfterStragglerWindow(t *testing.T) {
 
 	hz, err := r.GetFreq()
 	if err != nil {
-		t.Fatalf("request2: %v, want a clean reply -- the lost-reply gap must self-heal", err)
+		t.Fatalf("request2: %v", err)
 	}
 	if hz != 145030000 {
 		t.Errorf("GetFreq = %d, want 145030000", hz)
 	}
 }
 
-// (c) The straggler window is a real, non-zero bound, not an alias for
-// immediate retirement: a reply arriving well before the window elapses is
-// still attributed to the older abandoned generation (protecting the
-// late-reply case in (a)), so the request waiting on the newer generation
-// still has to time out. This is the mirror image of (b) and proves both
-// ends of the window actually take effect.
-func TestAbandonedGenerationStaysProtectedWithinWindow(t *testing.T) {
+// (2) LATE reply: a straggler that arrives during request1's quiet period
+// must be discarded there, never delivered to request2.
+//
+// Both replies are scheduled on an absolute clock from test start, NOT
+// relative to when request2 happens to begin -- that's deliberate. If the
+// fresh reply's delay were measured from request2's own start, a broken
+// barrier (request2 starting immediately at request1's timeout, instead of
+// after the quiet period) could still coincidentally receive the fresh reply
+// before the independently-scheduled stale one arrives, and the test would
+// pass even with no barrier at all. Scheduling both on the same absolute
+// clock guarantees the stale reply always arrives first in wall-clock time,
+// so whichever request is listening when it fires is the one that (correctly
+// or incorrectly) receives it.
+func TestLateReplyDiscardedDuringQuietPeriod(t *testing.T) {
 	ch := newFakeChannel()
-	timeout := 100 * time.Millisecond
-	r := New(ch, timeout) // window = 3*timeout = 300ms, far longer than the 5ms reply below
+	timeout := 40 * time.Millisecond
+	r := New(ch, timeout) // quiet period = 3*timeout = 120ms
 	defer r.Close()
+
+	staleFreq := []byte{0x00, 0x08, 0x9E, 0x86, 0x00} // != 145030000
+	freshFreq := []byte{0x00, 0x08, 0xA4, 0xFB, 0x70} // 145030000 Hz
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	defer wg.Wait() // let both scheduled replies finish sending before r.Close() runs
+
+	go func() {
+		defer wg.Done()
+		time.Sleep(timeout + 10*time.Millisecond) // shortly after request1's own deadline
+		ch.reply(benshi.CmdFreqModeGetStatus, staleFreq)
+	}()
+	go func() {
+		defer wg.Done()
+		time.Sleep(timeout + 30*time.Millisecond)
+		ch.reply(benshi.CmdFreqModeGetStatus, freshFreq)
+	}()
 
 	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("request1 err = %v, want ErrTimeout", err)
 	}
 
-	// Arrives quickly, nowhere near the straggler window's expiry, so it must
-	// still be consumed as the (still-plausible) answer to the abandoned
-	// generation and NOT delivered to request2.
+	hz, err := r.GetFreq()
+	if err != nil {
+		t.Fatalf("request2: %v", err)
+	}
+	if hz != 145030000 {
+		t.Errorf("GetFreq = %d, want 145030000 (request2's own fresh reply, not request1's stale straggler)", hz)
+	}
+}
+
+// (3) CONSECUTIVE losses: several requests in a row get no reply at all; a
+// later request must still get its own correct reply, with no trailing.
+func TestConsecutiveLossesDoNotTrail(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, 10*time.Millisecond)
+	defer r.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+			t.Fatalf("request %d err = %v, want ErrTimeout", i+1, err)
+		}
+	}
+
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		ch.reply(benshi.CmdFreqModeGetStatus, []byte{0x00, 0x08, 0xA4, 0xFB, 0x70})
 	}()
 
-	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
-		t.Fatalf("request2 err = %v, want ErrTimeout (the window must not be zero-length)", err)
+	hz, err := r.GetFreq()
+	if err != nil {
+		t.Fatalf("final request: %v, want a clean reply -- consecutive losses must not trail", err)
+	}
+	if hz != 145030000 {
+		t.Errorf("GetFreq = %d, want 145030000", hz)
+	}
+}
+
+// (4) Close during the quiet period must return promptly with ErrClosed,
+// rather than waiting the period out.
+func TestCloseDuringQuietPeriodReturnsPromptly(t *testing.T) {
+	ch := newFakeChannel()
+	timeout := 20 * time.Millisecond
+	r := New(ch, timeout) // quiet period = 60ms
+	defer r.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.GetFreq()
+		done <- err
+	}()
+
+	// Let request1 pass its own timeout and enter the quiet period.
+	time.Sleep(timeout + 10*time.Millisecond)
+	start := time.Now()
+	r.Close()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("err = %v, want ErrClosed", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("Close took %v to unblock the quiet period, want near-instant", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request did not unblock after Close")
 	}
 }

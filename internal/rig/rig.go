@@ -22,62 +22,56 @@ var ErrTimeout = errors.New("rig: radio did not reply in time")
 // ErrClosed reports use of a rig whose channel has been closed.
 var ErrClosed = errors.New("rig: control channel closed")
 
-// staleReplyExpiryMultiplier bounds how long an abandoned (timed-out)
-// request's generation stays open for a late straggler before dispatch
-// force-retires it and lets replySeq catch up on its own. A genuinely late
-// reply is most plausible shortly after its own deadline -- the radio was
-// probably just a bit slower than our budget that one time -- so a few
-// multiples of the timeout comfortably covers that case without leaving a
-// truly lost reply wedging every later request of the same command behind a
-// gap that only a process restart would clear.
-const staleReplyExpiryMultiplier = 3
-
-// abandonedGen records a request that gave up without a reply, and when.
-type abandonedGen struct {
-	gen uint64
-	at  time.Time
-}
+// quietPeriodMultiplier sets how long request() blocks -- still holding
+// reqMu, so no other request can start -- after its OWN timeout, before
+// letting the next request begin. See waitOutQuietPeriod.
+//
+// The Benshi protocol carries no per-message correlation id, so once a
+// request times out, a reply of that command type that shows up afterward
+// cannot be attributed to the request it answers. Three earlier designs here
+// tried to guess anyway -- matching by command type alone, then two
+// FIFO-generation schemes -- and each guess was wrong in some real scenario:
+// dropping the straggler loses a genuine answer when it was merely slow;
+// delivering it to whatever is waiting next misattributes it when the
+// straggler was for an earlier, abandoned request. The only way to make an
+// unlabeled reply unambiguous is to guarantee at most one request is ever
+// outstanding, so nothing else can possibly be waiting when a straggler
+// shows up -- hence holding off the NEXT request instead of trying to match
+// the stray reply.
+//
+// The trade-off is added latency on the request immediately after a
+// timeout. That's acceptable here: timeouts are rare on a working link, and
+// rig control (QSY) happens before connecting to a station, not mid-QSO, so
+// a delayed poll costs nothing a user notices.
+const quietPeriodMultiplier = 3
 
 // Rig is a request/response session with one radio.
 //
-// One request is in flight at a time: the radio is a single serial endpoint and
-// replies carry no correlation id, so concurrent requests could not be matched
-// to their commands.
+// One request is in flight at a time: the radio is a single serial endpoint
+// and replies carry no correlation id, so concurrent requests could not be
+// matched to their commands. After a request times out, the NEXT request is
+// held for a quiet period rather than started immediately -- see
+// quietPeriodMultiplier -- so a straggler reply for the abandoned request can
+// never be mistaken for the answer to a new one.
 type Rig struct {
 	ch      io.ReadWriteCloser
 	timeout time.Duration
 
-	reqMu sync.Mutex // serializes whole request/response exchanges
+	// reqMu serializes whole request/response exchanges, including the
+	// post-timeout quiet period -- that's what makes the period actually
+	// block the next request rather than merely delaying its own return.
+	reqMu sync.Mutex
 
 	mu      sync.Mutex
 	waiting chan benshi.Message // non-nil while a request awaits its reply
 	waitCmd benshi.Command
-	// waitGen is the generation of the request currently occupying waiting.
-	waitGen uint64
-	// reqSeq counts requests issued so far; a new request's generation is
-	// reqSeq after incrementing.
-	reqSeq uint64
-	// replySeq counts non-notification replies consumed so far, in FIFO
-	// order. The link has no per-message correlation id, so this is the only
-	// way to tell a late reply to an abandoned (timed-out) request apart from
-	// the answer to whatever request is current: every reply retires the next
-	// outstanding generation in order, whether or not anyone is still
-	// waiting for it, so a straggler can never be mistaken for the answer to
-	// a later request that happens to share the same command code.
-	replySeq uint64
-	// abandoned holds generations whose request timed out without ever
-	// retiring, oldest first. A reply arriving inside its straggler window
-	// still retires it normally (dispatch's replySeq advance below);
-	// pruneExpiredLocked force-retires it once the window has elapsed, so a
-	// genuinely lost reply self-heals instead of wedging replySeq forever.
-	abandoned []abandonedGen
 
 	cachedHz  uint32
 	cachedOK  bool
 	closed    bool
 	closeErr  error
 	closeOnce sync.Once
-	closedCh  chan struct{} // closed by Close to unblock in-flight requests
+	closedCh  chan struct{} // closed by Close to unblock in-flight requests and the quiet period
 }
 
 // New starts a rig on ch. The reader goroutine runs until Close.
@@ -90,11 +84,12 @@ func New(ch io.ReadWriteCloser, timeout time.Duration) *Rig {
 // Close shuts the rig down and closes the underlying channel.
 //
 // closedCh is closed before the channel itself so any request blocked in its
-// select wakes immediately with ErrClosed instead of waiting out its full
-// timeout. closeErr is stored on the struct rather than a local var: sync.Once
-// blocks concurrent callers until the winning call to f returns, which is
-// exactly the happens-before guarantee needed to let every caller -- not just
-// the one that ran f -- read the real result instead of a zero-value nil.
+// select -- or waiting out a post-timeout quiet period -- wakes immediately
+// instead of waiting out its full duration. closeErr is stored on the struct
+// rather than a local var: sync.Once blocks concurrent callers until the
+// winning call to f returns, which is exactly the happens-before guarantee
+// needed to let every caller -- not just the one that ran f -- read the real
+// result instead of a zero-value nil.
 func (r *Rig) Close() error {
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
@@ -224,21 +219,14 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 		r.mu.Unlock()
 		return nil, ErrClosed
 	}
-	r.reqSeq++
-	gen := r.reqSeq
 	replyCh := make(chan benshi.Message, 1)
 	r.waiting = replyCh
 	r.waitCmd = cmd
-	r.waitGen = gen
 	r.mu.Unlock()
 
 	defer func() {
 		r.mu.Lock()
-		// Only clear waiting if it's still ours -- if we timed out, a later
-		// request may already have installed its own generation here.
-		if r.waitGen == gen {
-			r.waiting = nil
-		}
+		r.waiting = nil
 		r.mu.Unlock()
 	}()
 
@@ -272,9 +260,11 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 		}
 	case <-deadline.C:
 		// The write goroutine may still land on the wire after we give up on
-		// it, so this generation gets the same straggler grace as a reply
-		// timeout rather than being retired immediately.
-		r.abandon(gen)
+		// it, so a reply is still plausible -- wait it out the same as a
+		// reply-phase timeout below.
+		if r.waitOutQuietPeriod(replyCh) {
+			return nil, ErrClosed
+		}
 		return nil, ErrTimeout
 	case <-r.closedCh:
 		return nil, ErrClosed
@@ -284,39 +274,40 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 	case m := <-replyCh:
 		return m.Body, nil
 	case <-deadline.C:
-		r.abandon(gen)
+		if r.waitOutQuietPeriod(replyCh) {
+			return nil, ErrClosed
+		}
 		return nil, ErrTimeout
 	case <-r.closedCh:
 		return nil, ErrClosed
 	}
 }
 
-// abandon records that gen's request gave up without a reply. A reply for it
-// may still be genuinely in flight, so it isn't force-retired immediately --
-// see pruneExpiredLocked.
-func (r *Rig) abandon(gen uint64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.replySeq < gen {
-		r.abandoned = append(r.abandoned, abandonedGen{gen: gen, at: time.Now()})
+// waitOutQuietPeriod blocks -- still holding reqMu, so no other request can
+// start -- after this request's own timeout, giving a straggler reply room
+// to show up and be harmlessly discarded before the next request is allowed
+// to begin. See quietPeriodMultiplier for why this exists instead of trying
+// to match the straggler to whichever request happens to be waiting later.
+// It reports whether the rig was closed while waiting, so the caller can
+// surface ErrClosed instead of ErrTimeout.
+//
+// r.waiting still points at replyCh until request()'s deferred cleanup runs
+// (after this returns), so dispatch keeps routing a late reply here exactly
+// as it would for any other in-flight request -- this just reads and drops
+// it instead of answering a caller with it. If it arrives, the barrier lifts
+// immediately: once the straggler is accounted for there is nothing left to
+// be ambiguous about, so there's no reason to wait out the rest of the
+// window.
+func (r *Rig) waitOutQuietPeriod(replyCh chan benshi.Message) (closed bool) {
+	timer := time.NewTimer(r.timeout * quietPeriodMultiplier)
+	defer timer.Stop()
+	select {
+	case <-replyCh: // straggler arrived and is discarded; nothing left to wait for
+	case <-timer.C:
+	case <-r.closedCh:
+		closed = true
 	}
-}
-
-// pruneExpiredLocked force-retires any abandoned generation whose straggler
-// window has elapsed. Must be called with mu held, before dispatch's own
-// replySeq advance so an incoming reply is matched against a gap that's
-// already been caught up to reality.
-func (r *Rig) pruneExpiredLocked() {
-	for len(r.abandoned) > 0 {
-		oldest := r.abandoned[0]
-		if time.Since(oldest.at) < r.timeout*staleReplyExpiryMultiplier {
-			break // still within the window; a straggler for it is plausible
-		}
-		if r.replySeq < oldest.gen {
-			r.replySeq = oldest.gen
-		}
-		r.abandoned = r.abandoned[1:]
-	}
+	return
 }
 
 // readLoop decodes frames from the radio, routing replies to a waiting request
@@ -357,26 +348,15 @@ func (r *Rig) dispatch(f benshi.Frame) {
 		}
 		return
 	}
+	// At most one request is ever outstanding -- request() holds a quiet
+	// period after its own timeout before letting the next one start (see
+	// quietPeriodMultiplier) -- so matching purely by command type is safe:
+	// whatever is currently waiting is the only thing this reply could
+	// possibly be answering.
 	r.mu.Lock()
-	// Force-retire any abandoned generation whose straggler window has
-	// already elapsed before considering this reply, so a genuinely lost
-	// reply doesn't leave replySeq permanently behind reqSeq.
-	r.pruneExpiredLocked()
-	// Retire the next outstanding generation unconditionally -- see the
-	// replySeq field doc. This must happen even when nobody is currently
-	// waiting (w == nil, or a later request already owns the slot), so a
-	// straggler reply for an abandoned request is consumed here rather than
-	// left to be misread as the answer to whatever request comes next.
-	if r.replySeq < r.reqSeq {
-		r.replySeq++
-		if len(r.abandoned) > 0 && r.abandoned[0].gen == r.replySeq {
-			r.abandoned = r.abandoned[1:] // this reply retired it directly
-		}
-	}
-	gen := r.replySeq
-	w, waitGen, cmd := r.waiting, r.waitGen, r.waitCmd
+	w, cmd := r.waiting, r.waitCmd
 	r.mu.Unlock()
-	if w != nil && gen == waitGen && m.Command == cmd {
+	if w != nil && m.Command == cmd {
 		select {
 		case w <- m:
 		default:
