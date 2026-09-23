@@ -1801,7 +1801,7 @@ Record the results in the spec's "Spike results" section and commit.
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks
-- Produces: `config.RigCtl{Enabled bool, ListenHost string, ListenPort int, AllowedSubnets []*net.IPNet, AllowPTT bool, PTTTimeout int}`, `cfg.RigCtl []RigCtl` indexed by port, `config.Port.ControlChannel int`
+- Produces: `config.RigCtl{Enabled bool, ListenHost string, ListenPort int, AllowedSubnets netutil.Allowlist, AllowPTT bool, PTTTimeout int}`, `cfg.RigCtl []RigCtl` indexed by port, `config.Port.ControlChannel int`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1891,7 +1891,7 @@ type RigCtl struct {
 	Enabled        bool   // default false; the module is opt-in
 	ListenHost     string // default "127.0.0.1"
 	ListenPort     int    // default 4532 + N
-	AllowedSubnets []*net.IPNet
+	AllowedSubnets netutil.Allowlist
 	AllowPTT       bool // default false; see PTTTimeout
 	// PTTTimeout is the maximum time tncd will leave the transmitter keyed
 	// before force-releasing it, in seconds. Default 30. A remote key whose
