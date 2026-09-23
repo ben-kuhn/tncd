@@ -5,7 +5,6 @@ package config
 import (
 	"fmt"
 	"log"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,10 +111,11 @@ type Port struct {
 // One listener per port because hamlib's Net rigctl protocol has no way to
 // select among several rigs on one socket.
 type RigCtl struct {
-	Enabled        bool   // default false; the module is opt-in
-	ListenHost     string // default "127.0.0.1"
-	ListenPort     int    // default 4532 + N
-	AllowedSubnets []*net.IPNet
+	Enabled    bool   // default false; the module is opt-in
+	ListenHost string // default "127.0.0.1"
+	ListenPort int    // default 4532 + N
+	// AllowedSubnets restricts rigctl client source IPs. Empty = allow all.
+	AllowedSubnets netutil.Allowlist
 	AllowPTT       bool // default false; see PTTTimeout
 	// PTTTimeout is the maximum time tncd will leave the transmitter keyed
 	// before force-releasing it, in seconds. Default 30. A remote key whose
@@ -337,35 +337,6 @@ func parseAllowlistKey(s *ini.Section, key string) (netutil.Allowlist, error) {
 		return netutil.Allowlist{}, nil
 	}
 	return netutil.ParseAllowlist(s.Key(key).String())
-}
-
-// parseSubnetList parses a comma-separated CIDR list into []*net.IPNet.
-// Bare IPs are treated as single-host prefixes (/32 or /128), matching
-// netutil.ParseAllowlist's semantics for the other listener sections; this
-// section returns []*net.IPNet (rather than netutil.Allowlist) because the
-// rig-control listener consumes it directly.
-func parseSubnetList(s *ini.Section, key string) ([]*net.IPNet, error) {
-	var out []*net.IPNet
-	for _, part := range getList(s, key) {
-		if strings.Contains(part, "/") {
-			_, ipnet, err := net.ParseCIDR(part)
-			if err != nil {
-				return nil, fmt.Errorf("invalid CIDR %q: %w", part, err)
-			}
-			out = append(out, ipnet)
-			continue
-		}
-		ip := net.ParseIP(part)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid address %q (want CIDR or IP)", part)
-		}
-		bits := 32
-		if ip.To4() == nil {
-			bits = 128
-		}
-		out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
-	}
-	return out, nil
 }
 
 // getIntPtr returns a *int from a section key, or nil if absent.
@@ -714,7 +685,7 @@ func Load(path string) (*Config, error) {
 		s := f.Section(secName) // ini creates an empty section on demand
 		warnUnknownKeys(s, knownRigCtlKeys)
 
-		subnets, err := parseSubnetList(s, "allowed_subnets")
+		rigctlAllow, err := parseAllowlistKey(s, "allowed_subnets")
 		if err != nil {
 			return nil, fmt.Errorf("[%s] %w", secName, err)
 		}
@@ -733,7 +704,7 @@ func Load(path string) (*Config, error) {
 			Enabled:        getBool(s, "enabled", false),
 			ListenHost:     getString(s, "listen_host", "127.0.0.1"),
 			ListenPort:     getInt(s, "listen_port", 4532+i),
-			AllowedSubnets: subnets,
+			AllowedSubnets: rigctlAllow,
 			AllowPTT:       getBool(s, "allow_ptt", false),
 			PTTTimeout:     pttTimeout,
 		}
