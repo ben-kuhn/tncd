@@ -6,8 +6,6 @@
 //   - HTCommander — https://github.com/Ylianst/HTCommander
 package benshi
 
-import "errors"
-
 // Frame flags. Only CHECKSUM is known to be used.
 type Flags uint8
 
@@ -28,9 +26,6 @@ const (
 	// field can never exceed 255 + msgHeaderLen.
 	maxFrameData = 255 + msgHeaderLen
 )
-
-// ErrShortFrame reports a frame whose declared length is impossible.
-var ErrShortFrame = errors.New("benshi: frame data shorter than message header")
 
 // Frame is one GaiaFrame: FF 01 <flags> <n> <data> [checksum].
 //

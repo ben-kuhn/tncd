@@ -59,6 +59,29 @@ func TestDecoderReassemblesSplitFrame(t *testing.T) {
 	}
 }
 
+// Feed's drain loop must emit every complete frame present in one call, not
+// just the first -- a burst of buffered radio traffic can deliver several
+// frames in a single read.
+func TestDecoderMultipleFramesInOneFeed(t *testing.T) {
+	f1 := Frame{Flags: FlagNone, Data: []byte{0x00, 0x02, 0x00, 0x04}}
+	f2 := Frame{Flags: FlagNone, Data: []byte{0x00, 0x02, 0x00, 0x24, 0x01, 0x02}}
+	raw := append(f1.Bytes(), f2.Bytes()...)
+	d := NewDecoder()
+	frames, err := d.Feed(raw)
+	if err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("got %d frames, want 2", len(frames))
+	}
+	if !bytes.Equal(frames[0].Data, f1.Data) {
+		t.Errorf("frames[0].Data = % X, want % X", frames[0].Data, f1.Data)
+	}
+	if !bytes.Equal(frames[1].Data, f2.Data) {
+		t.Errorf("frames[1].Data = % X, want % X", frames[1].Data, f2.Data)
+	}
+}
+
 // A checksum-flagged frame carries one extra trailing byte.
 func TestDecoderChecksumFrame(t *testing.T) {
 	raw := []byte{0xFF, 0x01, 0x01, 0x00, 0x00, 0x02, 0x00, 0x04, 0x7F}
