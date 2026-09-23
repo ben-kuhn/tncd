@@ -1,6 +1,7 @@
 package rig
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"sync"
@@ -569,5 +570,131 @@ func TestWriteTimeoutPoisonsAllSubsequentCalls(t *testing.T) {
 	w := ch.writes()
 	if len(w) != 0 {
 		t.Errorf("wrote %d frames after poisoning, want 0 -- no call may write into a poisoned rig", len(w))
+	}
+}
+
+// Three bugs found driving an actual UV-PRO. Fixture bytes below are
+// captured live, not invented: the radio was parked on channel 252 at
+// 145.670 MHz (145670000 Hz = 0x08AEBF70).
+
+// Bug A: Probe() sent an empty GET_DEV_INFO body. The command requires a
+// one-byte body (benlink's GetDevInfoBody, value 3) -- without it the radio
+// answers nothing at all (confirmed live: 10s of silence). This test checks
+// the exact wire bytes against benlink's own frame for the same command.
+func TestProbeEmitsBenlinkMatchingFrame(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second)
+	defer r.Close()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		// Captured live GET_DEV_INFO reply body.
+		ch.reply(benshi.CmdGetDevInfo, []byte{
+			0x00, 0x06, 0x01, 0x04, 0x01, 0x00, 0x92, 0xD0, 0x68, 0x1E, 0x54,
+		})
+	}()
+
+	if err := r.Probe(); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	w := ch.writes()
+	if len(w) != 1 {
+		t.Fatalf("wrote %d frames, want 1", len(w))
+	}
+	// benlink's exact GET_DEV_INFO frame: FF 01 <flags> <len> <group> <cmd> <body>.
+	want := []byte{0xFF, 0x01, 0x00, 0x01, 0x00, 0x02, 0x00, 0x04, 0x03}
+	if !bytes.Equal(w[0], want) {
+		t.Errorf("Probe wrote % X, want % X (benlink's exact GET_DEV_INFO frame)", w[0], want)
+	}
+}
+
+// Bug B: currChannel read only the lower nibble of the channel id, which is
+// correct for the plain (3-byte) Status reply but wrong for the extended
+// (5-byte) StatusExt reply, whose trailing word carries the upper nibble.
+// Both shapes are tested so a future change can't silently favor one.
+
+// Plain Status (3 bytes): channel is the lower nibble alone. This is the
+// existing TestGetFreqFallsBackToChannelRead / TestGetPTTReadsTXBit shape;
+// this test isolates it against currChannel directly.
+func TestCurrChannelPlainStatusUsesLowerNibbleOnly(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second)
+	defer r.Close()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		ch.reply(benshi.CmdGetHTStatus, []byte{0x00, 0x80, 0x30}) // channel 3
+	}()
+
+	id, err := r.currChannel()
+	if err != nil {
+		t.Fatalf("currChannel: %v", err)
+	}
+	if id != 3 {
+		t.Errorf("currChannel = %d, want 3", id)
+	}
+}
+
+// StatusExt (5 bytes), live capture: body 00 80 C1 00 3C on a radio parked
+// on channel 252. Reading only the lower nibble (0xC1>>4=12) returns an
+// unprogrammed channel record instead of the true upper<<4|lower=252,
+// confirmed live by READ_RF_CH echoing channel_id=0xFC (252) back.
+func TestCurrChannelStatusExtUsesUpperAndLowerNibble(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second)
+	defer r.Close()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		ch.reply(benshi.CmdGetHTStatus, []byte{0x00, 0x80, 0xC1, 0x00, 0x3C})
+	}()
+
+	id, err := r.currChannel()
+	if err != nil {
+		t.Fatalf("currChannel: %v", err)
+	}
+	if id != 252 {
+		t.Errorf("currChannel = %d, want 252", id)
+	}
+}
+
+// Bug C: GetFreq did not fall back when the radio is in CHANNEL mode. In
+// that mode FREQ_MODE_GET_STATUS replies with status=0 and an all-zero body
+// -- DecodeFreqModeStatus only treats a non-zero status as an error, so the
+// old code returned 0 Hz as if it were a real frequency. This end-to-end
+// test drives GetFreq through all three requests it needs in that case,
+// using only captured live bytes, and checks the final result is the radio's
+// real frequency (145.670 MHz), not 0.
+func TestGetFreqFallsBackWhenFreqModeStatusIsAllZero(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second)
+	defer r.Close()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		// Captured live: FREQ_MODE_GET_STATUS reply while in channel mode --
+		// status=0 (success) but an all-zero body, meaning "no frequency".
+		ch.reply(benshi.CmdFreqModeGetStatus, []byte{
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		})
+		time.Sleep(10 * time.Millisecond)
+		// Captured live: GET_HT_STATUS (StatusExt) -> channel 252.
+		ch.reply(benshi.CmdGetHTStatus, []byte{0x00, 0x80, 0xC1, 0x00, 0x3C})
+		time.Sleep(10 * time.Millisecond)
+		// Captured live: READ_RF_CH(252) -> 145.670 MHz.
+		ch.reply(benshi.CmdReadRFCh, []byte{
+			0x00, 0xFC, 0x08, 0xAE, 0xBF, 0x70, 0x08, 0xAE, 0xBF, 0x70,
+			0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		})
+	}()
+
+	hz, err := r.GetFreq()
+	if err != nil {
+		t.Fatalf("GetFreq: %v", err)
+	}
+	if hz != 145670000 {
+		t.Errorf("GetFreq = %d, want 145670000 (fell back to the channel read, not 0 Hz)", hz)
 	}
 }

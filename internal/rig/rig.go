@@ -137,23 +137,33 @@ func (r *Rig) SetFreq(hz uint32) error {
 
 // GetFreq reads the current frequency from the radio.
 //
-// A radio sitting on a stored channel answers FREQ_MODE_GET_STATUS with a
-// failure status rather than a frequency, since it is not in VFO mode. In that
-// case fall back to reading the active channel directly instead of surfacing
-// the error -- QSY only ever writes frequency mode, but readback must work
-// whichever mode the radio happens to be in.
+// A radio not in frequency (VFO) mode -- e.g. sitting on a stored channel --
+// must fall back to reading the active channel directly instead of trusting
+// FREQ_MODE_GET_STATUS's answer. "Not in frequency mode" shows up two ways:
+// a non-zero (failure) status, which DecodeFreqModeStatus already turns into
+// an error, OR a *successful* status with an all-zero frequency --
+// HTCommander documents that leaving frequency mode clears the reported
+// frequency to zero, so a clean 0 Hz reply is not a real answer (145.030 MHz
+// on channel 0 is a valid station; a VFO genuinely tuned to 0 Hz is not) but
+// the same "go read the channel instead" signal as a failure status. Treating
+// only the error case as the trigger (the previous behavior) reported 0 Hz
+// as if it were a real frequency whenever the radio was on a channel -- live
+// UV-PRO captures show status=0 with an all-zero body in exactly that case.
 func (r *Rig) GetFreq() (uint32, error) {
 	body, err := r.request(benshi.CmdFreqModeGetStatus, nil)
 	if err != nil {
 		return 0, err
 	}
-	hz, err := benshi.DecodeFreqModeStatus(body)
-	if err == nil {
+	hz, ferr := benshi.DecodeFreqModeStatus(body)
+	if ferr == nil && hz != 0 {
 		return hz, nil
 	}
 	id, cerr := r.currChannel()
 	if cerr != nil {
-		return 0, err
+		if ferr != nil {
+			return 0, ferr
+		}
+		return 0, cerr
 	}
 	return r.channelFreq(id)
 }
@@ -181,8 +191,25 @@ func (r *Rig) GetPTT() (bool, error) {
 	return body[1]&htStatusTXBit != 0, nil
 }
 
+// htStatusExtLen is the reply body length that distinguishes the extended
+// GET_HT_STATUS reply (StatusExt: status + Status(2) + a trailing 16-bit
+// word) from the plain one (status + Status(2) only). Only StatusExt carries
+// the channel id's upper nibble -- see currChannel.
+const htStatusExtLen = 5
+
 // currChannel returns the radio's currently selected channel id from
-// GET_HT_STATUS. curr_ch_id_lower is the high nibble of the second Status byte.
+// GET_HT_STATUS.
+//
+// curr_ch_id_lower is the high nibble of the second Status byte, but that's
+// only half the id: on a StatusExt reply the trailing 16-bit word packs
+// rssi(4) region(6) curr_ch_id_upper(4) pad(2), and the true channel is
+// upper<<4|lower. Reading the lower nibble alone silently wraps any channel
+// >= 16 to the wrong one -- live proof: body 00 80 C1 00 3C on a radio
+// parked on channel 252 gives lower=12 (an unprogrammed record) instead of
+// upper<<4|lower=15<<4|12=252, confirmed by READ_RF_CH echoing
+// channel_id=0xFC for the latter. The plain (non-extended) Status reply has
+// no trailing word at all, so there's no upper nibble to read -- decide
+// which shape a given reply is from its length rather than guessing.
 func (r *Rig) currChannel() (byte, error) {
 	body, err := r.request(benshi.CmdGetHTStatus, nil)
 	if err != nil {
@@ -191,7 +218,13 @@ func (r *Rig) currChannel() (byte, error) {
 	if len(body) < 3 || body[0] != 0 {
 		return 0, benshi.ErrShortBody
 	}
-	return body[2] >> 4, nil
+	lower := body[2] >> 4
+	if len(body) < htStatusExtLen {
+		return lower, nil
+	}
+	tail := binary.BigEndian.Uint16(body[3:5])
+	upper := byte((tail >> 2) & 0x0F)
+	return upper<<4 | lower, nil
 }
 
 // channelFreq reads a stored channel's RX frequency. READ_RF_CH is read-only;
@@ -208,10 +241,18 @@ func (r *Rig) channelFreq(id byte) (uint32, error) {
 	return binary.BigEndian.Uint32(body[6:10]) & 0x3FFFFFFF, nil
 }
 
+// getDevInfoRequestByte is GET_DEV_INFO's one-byte request body. It's a
+// protocol-required literal, not a parameter we choose -- benlink's
+// GetDevInfoBody hardcodes the same value 3, and it isn't documented what it
+// means. Confirmed live: an empty body (what this package sent before this
+// fix) gets no reply at all -- 10s of silence -- while this exact byte gets
+// an immediate answer.
+const getDevInfoRequestByte = 0x03
+
 // Probe confirms the radio answers the protocol at all, so callers can fail
 // with a clear message rather than a timeout on every later command.
 func (r *Rig) Probe() error {
-	body, err := r.request(benshi.CmdGetDevInfo, nil)
+	body, err := r.request(benshi.CmdGetDevInfo, []byte{getDevInfoRequestByte})
 	if err != nil {
 		return err
 	}
