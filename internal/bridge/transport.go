@@ -9,6 +9,15 @@ import (
 	"github.com/ben-kuhn/tncd/v2/kiss"
 )
 
+// BuildTransport is buildTransport exported for cmd/tncd's one-shot "rig"
+// CLI, which needs to open a port's transport outside the running bridge.
+// It is a thin wrapper, not a reimplementation, so the bridge stays the
+// single source of truth for how a config.Port becomes a kiss.Transport --
+// the CLI and the running bridge must never disagree about that.
+func BuildTransport(pc config.Port) (kiss.Transport, error) {
+	return buildTransport(pc)
+}
+
 // buildTransport constructs a kiss.Transport from a Port config entry.
 // Mirrors the transport selection logic in tncd.py.
 func buildTransport(pc config.Port) (kiss.Transport, error) {
