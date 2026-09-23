@@ -4,6 +4,7 @@ package kiss
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -54,11 +55,10 @@ func callBlueZ(obj dbusCaller, timeout time.Duration, method string, args ...int
 // profilePath is the D-Bus object path at which we export our Profile1 object.
 const profilePath = dbus.ObjectPath("/org/tncd/spp")
 
-// controlProfileUUID is the Benshi rig-control service UUID
-// (00001100-d102-11e1-9b23-00025b00a5a5), captured live off the radio's
-// classic SDP records -- the same UUID it advertises for its BLE GATT
-// control service, just reachable here over RFCOMM instead of GATT.
-const controlProfileUUID = "00001100-d102-11e1-9b23-00025b00a5a5"
+// The control profile's UUID is benshiControlServiceUUID (bluetooth_sdp.go),
+// the single source of truth for that value on every platform -- see its
+// comment for why (a previous, wrong UUID value shipped independently
+// duplicated across this file and bluetooth_windows.go).
 
 // controlProfilePath is a sibling of profilePath, at its own object path so
 // BlueZ routes each service's NewConnection callback to the profile that
@@ -221,7 +221,7 @@ func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
 
 	deviceObj := conn.Object("org.bluez", devicePath)
 	go func() {
-		call := deviceObj.Call("org.bluez.Device1.ConnectProfile", 0, controlProfileUUID)
+		call := deviceObj.Call("org.bluez.Device1.ConnectProfile", 0, benshiControlServiceUUID)
 		if call.Err != nil && !isBenignConnectError(call.Err) {
 			errCh <- call.Err
 		}
@@ -250,12 +250,52 @@ func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
 // for the requested profile UUID -- i.e. there is no control channel to
 // find, which callers should treat as ErrNoControlChannel rather than a
 // transient connection failure worth logging loudly or retrying.
+//
+// Observed live on the bench trying the (wrong, since-corrected) BLE-only
+// control UUID over classic RFCOMM: body text "br-connection-not-supported"
+// -- hyphenated, not "not supported" with a space, which an earlier version
+// of this check required and therefore missed. godbus's dbus.Error.Error()
+// falls back to the bare error NAME (e.g. "org.bluez.Error.NotSupported")
+// when the body is empty, which has no separator at all between "not" and
+// "supported" -- so free-text substring matching alone cannot cover every
+// shape and the Name field is checked directly first.
 func isServiceNotFoundError(err error) bool {
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "not supported") ||
-		strings.Contains(s, "does not exist") ||
-		strings.Contains(s, "no such") ||
-		strings.Contains(s, "not found")
+	if name, ok := dbusErrorName(err); ok {
+		n := strings.ToLower(strings.ReplaceAll(name, ".", ""))
+		if containsAny(n, "notsupported", "doesnotexist", "nosuchservice", "notfound") {
+			return true
+		}
+	}
+	// Normalize hyphens to spaces so both "not-supported" (the observed
+	// bench text) and "not supported" match the same substring check.
+	s := strings.ToLower(strings.ReplaceAll(err.Error(), "-", " "))
+	return containsAny(s, "not supported", "does not exist", "no such", "not found")
+}
+
+// dbusErrorName extracts the D-Bus error Name (e.g.
+// "org.bluez.Error.NotSupported") from err, whether godbus delivered it as a
+// dbus.Error value or a *dbus.Error pointer -- both shapes occur depending on
+// which internal path produced the error.
+func dbusErrorName(err error) (string, bool) {
+	var e dbus.Error
+	if errors.As(err, &e) {
+		return e.Name, true
+	}
+	var ep *dbus.Error
+	if errors.As(err, &ep) {
+		return ep.Name, true
+	}
+	return "", false
+}
+
+// containsAny reports whether s contains any of subs.
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // bluetoothReconnectSettle is how long Open waits after disconnecting a stale
@@ -701,7 +741,7 @@ func registerControlProfileOnce() error {
 		}
 		if err := callBlueZ(manager, btCallTimeout,
 			"org.bluez.ProfileManager1.RegisterProfile",
-			controlProfilePath, controlProfileUUID, opts,
+			controlProfilePath, benshiControlServiceUUID, opts,
 		); err != nil {
 			conn.Close()
 			return fmt.Errorf("bluetooth: RegisterProfile (control): %w", err)

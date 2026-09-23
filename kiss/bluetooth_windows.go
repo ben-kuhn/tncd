@@ -3,6 +3,8 @@
 package kiss
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,17 +29,32 @@ var sppServiceClassID = windows.GUID{
 	Data4: [8]byte{0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB},
 }
 
-// benshiControlServiceClassID is the Benshi rig-control service UUID
-// (00001100-d102-11e1-9b23-00025b00a5a5), captured live off the radio's
-// classic SDP records -- the same UUID the device advertises for its BLE
-// GATT control service, just reachable over RFCOMM here instead of GATT.
-// Passing it as the connect ServiceClassId resolves the RFCOMM channel via
-// SDP exactly like sppServiceClassID does for the data link.
-var benshiControlServiceClassID = windows.GUID{
-	Data1: 0x00001100,
-	Data2: 0xd102,
-	Data3: 0x11e1,
-	Data4: [8]byte{0x9b, 0x23, 0x00, 0x02, 0x5b, 0x00, 0xa5, 0xa5},
+// benshiControlServiceClassID is benshiControlServiceUUID (bluetooth_sdp.go
+// -- the single source of truth for this value; see its comment for why)
+// rendered as a windows.GUID. Passing it as the connect ServiceClassId
+// resolves the RFCOMM channel via SDP exactly like sppServiceClassID does
+// for the data link. Derived at init from the canonical string rather than
+// hand-typed here, so this can never independently drift from what Linux
+// dials -- which is exactly how the previous (wrong, BLE-only) UUID shipped.
+var benshiControlServiceClassID = mustUUIDToGUID(benshiControlServiceUUID)
+
+// mustUUIDToGUID parses a standard dashed UUID string (the form used
+// everywhere else in this codebase) into a windows.GUID, panicking on
+// malformed input. That's acceptable only because every call site passes a
+// package-level constant, so a bad value is a build-time programming error
+// caught the first time this file runs -- not something that can occur at
+// runtime from user or radio input.
+func mustUUIDToGUID(s string) windows.GUID {
+	b, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
+	if err != nil || len(b) != 16 {
+		panic(fmt.Sprintf("bluetooth: invalid UUID %q", s))
+	}
+	return windows.GUID{
+		Data1: binary.BigEndian.Uint32(b[0:4]),
+		Data2: binary.BigEndian.Uint16(b[4:6]),
+		Data3: binary.BigEndian.Uint16(b[6:8]),
+		Data4: [8]byte{b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]},
+	}
 }
 
 // soSndTimeo is Winsock's SO_SNDTIMEO. x/sys/windows defines SO_RCVTIMEO and
@@ -325,12 +342,30 @@ func (bt *bluetoothTransport) ExitKISS()        {}
 // Linux -- where BlueZ resolves a Profile1 UUID to a channel on its own --
 // raw Winsock RFCOMM always connects to a channel number. cfg.ControlChannel
 // pins one directly, skipping a second SDP round trip to the radio;
-// otherwise the control service's 128-bit UUID drives discovery the same way
-// the SPP UUID does for the data link in Open.
+// otherwise the control service's UUID drives discovery the same way the SPP
+// UUID does for the data link in Open.
+//
+// WSAStartup/WSACleanup is a process-wide refcount, and this call has its own
+// paired WSAStartup here rather than relying on bt.started from Open. Two
+// bugs that shared state would cause: (1) bt.Close() unconditionally calls
+// WSACleanup once bt.started is true, so an ordinary data-link reconnect
+// cycle -- ControlChannel and Open/Close are entirely independent callers --
+// could drop the refcount to zero while this control socket is still live,
+// silently breaking it; that is exactly the isolation bluetoothControlConn's
+// own doc comment promises and would have violated. (2) calling
+// ControlChannel before Open has ever succeeded would fail with the opaque
+// WSANOTINITIALISED (10093) instead of a clean connect attempt. A dedicated
+// WSAStartup/WSACleanup pair, paired 1:1 with this returned conn's Close(),
+// avoids both.
 func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
 	addr, err := parseBTAddr(bt.cfg.BDAddr)
 	if err != nil {
 		return nil, fmt.Errorf("bluetooth: %w", err)
+	}
+
+	var wsad windows.WSAData
+	if err := windows.WSAStartup(0x202, &wsad); err != nil { // MAKEWORD(2,2)
+		return nil, fmt.Errorf("bluetooth: control channel WSAStartup: %w", err)
 	}
 
 	sa := &windows.SockaddrBth{BtAddr: addr}
@@ -344,6 +379,7 @@ func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
 
 	fd, err := bt.dialControl(sa, route)
 	if err != nil {
+		windows.WSACleanup()
 		// WSASERVICE_NOT_FOUND from an SDP-driven connect means the radio has
 		// no matching record -- i.e. no control channel exists to find, which
 		// is exactly what ErrNoControlChannel means to callers. Any other
@@ -360,7 +396,7 @@ func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
 		log.Printf("bluetooth: control channel SO_SNDTIMEO=%dms failed (%v); a stalled send may block indefinitely", timeoutMS, err)
 	}
 
-	return &bluetoothControlConn{fd: fd, bdaddr: bt.cfg.BDAddr}, nil
+	return &bluetoothControlConn{fd: fd, bdaddr: bt.cfg.BDAddr, started: true}, nil
 }
 
 // dialControl makes a single connect() attempt for the control channel.
@@ -387,13 +423,16 @@ func (bt *bluetoothTransport) dialControl(sa *windows.SockaddrBth, route string)
 	return fd, nil
 }
 
-// bluetoothControlConn is the rig-control RFCOMM socket. It has its own fd
-// and lifecycle, entirely independent of bluetoothTransport's KISS data
-// socket -- the two links are opened, read, written, and closed separately,
-// which is the point of a *second* channel.
+// bluetoothControlConn is the rig-control RFCOMM socket. It has its own fd,
+// its own WSAStartup/WSACleanup pairing (started), and its own lifecycle,
+// entirely independent of bluetoothTransport's KISS data socket -- the two
+// links are opened, read, written, and closed separately, which is the point
+// of a *second* channel. See ControlChannel's doc comment for why started
+// must not be folded into bt.started.
 type bluetoothControlConn struct {
-	fd     windows.Handle
-	bdaddr string
+	fd      windows.Handle
+	bdaddr  string
+	started bool
 }
 
 func (c *bluetoothControlConn) Read(p []byte) (int, error) {
@@ -440,6 +479,10 @@ func (c *bluetoothControlConn) Close() error {
 	if c.fd != windows.InvalidHandle {
 		windows.Closesocket(c.fd)
 		c.fd = windows.InvalidHandle
+	}
+	if c.started {
+		windows.WSACleanup()
+		c.started = false
 	}
 	return nil
 }
