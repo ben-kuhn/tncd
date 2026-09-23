@@ -39,11 +39,39 @@ func parseBTAddrLE(s string) ([6]byte, error) {
 	return a, nil
 }
 
-// buildSSAReq builds an SDP ServiceSearchAttributeRequest for the SPP service
-// class (0x1101), requesting the ProtocolDescriptorList attribute (0x0004).
-func buildSSAReq() []byte {
-	// ServiceSearchPattern: DES(one UUID16 = SPP)  ->  0x35 len | 0x19 uuid16
-	ssp := []byte{0x35, 0x03, 0x19, byte(uuidSPP16 >> 8), byte(uuidSPP16 & 0xFF)}
+// uuid16Bytes renders a 16-bit UUID as the 2-byte big-endian form buildSSAReq
+// expects, matching how a 128-bit UUID's byte slice is already ordered.
+func uuid16Bytes(u uint16) []byte {
+	return []byte{byte(u >> 8), byte(u & 0xFF)}
+}
+
+// benshiControlUUID128 is the Benshi rig-control service UUID
+// (00001100-d102-11e1-9b23-00025b00a5a5), captured live off the radio's
+// classic SDP records. It is advertised under the same UUID as the device's
+// BLE GATT control service, just over RFCOMM instead of GATT.
+var benshiControlUUID128 = []byte{
+	0x00, 0x00, 0x11, 0x00, 0xd1, 0x02, 0x11, 0xe1,
+	0x9b, 0x23, 0x00, 0x02, 0x5b, 0x00, 0xa5, 0xa5,
+}
+
+// buildSSAReq builds an SDP ServiceSearchAttributeRequest for one service
+// UUID, requesting the ProtocolDescriptorList attribute (0x0004). A 2-byte
+// uuid uses data element type 0x19 (UUID16); a 16-byte uuid uses 0x1C
+// (UUID128), which is what the Benshi control service needs since it has no
+// assigned 16-bit service class. Any other length is a programming error in
+// the caller and returns nil rather than emitting a malformed PDU.
+func buildSSAReq(uuid []byte) []byte {
+	var elemType byte
+	switch len(uuid) {
+	case 2:
+		elemType = 0x19
+	case 16:
+		elemType = 0x1C
+	default:
+		return nil
+	}
+	// ServiceSearchPattern: DES(one UUID)  ->  0x35 len | elemType uuid
+	ssp := append([]byte{0x35, byte(len(uuid) + 1), elemType}, uuid...)
 	// AttributeIDList: DES(one uint16 = ProtocolDescriptorList)  ->  0x35 len | 0x09 attr16
 	aidl := []byte{0x35, 0x03, 0x09, byte(attrProtoDescList >> 8), byte(attrProtoDescList & 0xFF)}
 

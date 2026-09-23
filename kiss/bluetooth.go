@@ -20,6 +20,13 @@ type BluetoothConfig struct {
 	Reconnect         bool
 	ReconnectDelay    time.Duration
 	ReconnectMaxDelay time.Duration
+
+	// ControlChannel pins the RFCOMM channel number for the rig-control
+	// sub-channel (e.g. a Benshi radio's control service); 0 means discover
+	// it via SDP. Only consulted on platforms that connect to RFCOMM by
+	// channel number (Windows) -- Linux resolves the control service the same
+	// way it resolves SPP, by asking BlueZ for the service UUID.
+	ControlChannel int
 }
 
 // parseSPPChannel interprets the optional `channel` config value.

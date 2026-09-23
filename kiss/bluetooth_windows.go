@@ -27,6 +27,19 @@ var sppServiceClassID = windows.GUID{
 	Data4: [8]byte{0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB},
 }
 
+// benshiControlServiceClassID is the Benshi rig-control service UUID
+// (00001100-d102-11e1-9b23-00025b00a5a5), captured live off the radio's
+// classic SDP records -- the same UUID the device advertises for its BLE
+// GATT control service, just reachable over RFCOMM here instead of GATT.
+// Passing it as the connect ServiceClassId resolves the RFCOMM channel via
+// SDP exactly like sppServiceClassID does for the data link.
+var benshiControlServiceClassID = windows.GUID{
+	Data1: 0x00001100,
+	Data2: 0xd102,
+	Data3: 0x11e1,
+	Data4: [8]byte{0x9b, 0x23, 0x00, 0x02, 0x5b, 0x00, 0xa5, 0xa5},
+}
+
 // soSndTimeo is Winsock's SO_SNDTIMEO. x/sys/windows defines SO_RCVTIMEO and
 // SO_SNDBUF but not this one.
 const soSndTimeo = 0x1005
@@ -306,6 +319,130 @@ func (bt *bluetoothTransport) Close() error {
 
 func (bt *bluetoothTransport) EnterKISS() error { return nil }
 func (bt *bluetoothTransport) ExitKISS()        {}
+
+// ControlChannel opens a second, independent RFCOMM connection to the Benshi
+// rig-control service, alongside (not replacing) the KISS data socket. Unlike
+// Linux -- where BlueZ resolves a Profile1 UUID to a channel on its own --
+// raw Winsock RFCOMM always connects to a channel number. cfg.ControlChannel
+// pins one directly, skipping a second SDP round trip to the radio;
+// otherwise the control service's 128-bit UUID drives discovery the same way
+// the SPP UUID does for the data link in Open.
+func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
+	addr, err := parseBTAddr(bt.cfg.BDAddr)
+	if err != nil {
+		return nil, fmt.Errorf("bluetooth: %w", err)
+	}
+
+	sa := &windows.SockaddrBth{BtAddr: addr}
+	route := "SDP lookup"
+	if bt.cfg.ControlChannel != 0 {
+		sa.Port = uint32(bt.cfg.ControlChannel)
+		route = fmt.Sprintf("pinned control channel %d", bt.cfg.ControlChannel)
+	} else {
+		sa.ServiceClassId = benshiControlServiceClassID
+	}
+
+	fd, err := bt.dialControl(sa, route)
+	if err != nil {
+		// WSASERVICE_NOT_FOUND from an SDP-driven connect means the radio has
+		// no matching record -- i.e. no control channel exists to find, which
+		// is exactly what ErrNoControlChannel means to callers. Any other
+		// failure (timeout, refused, ...) is a real error worth surfacing.
+		var errno syscall.Errno
+		if errors.As(err, &errno) && errno == wsaServiceNotFound {
+			return nil, ErrNoControlChannel
+		}
+		return nil, err
+	}
+
+	timeoutMS := int(btSendTimeout / time.Millisecond)
+	if err := windows.SetsockoptInt(fd, windows.SOL_SOCKET, soSndTimeo, timeoutMS); err != nil {
+		log.Printf("bluetooth: control channel SO_SNDTIMEO=%dms failed (%v); a stalled send may block indefinitely", timeoutMS, err)
+	}
+
+	return &bluetoothControlConn{fd: fd, bdaddr: bt.cfg.BDAddr}, nil
+}
+
+// dialControl makes a single connect() attempt for the control channel.
+//
+// Unlike dial (used for the KISS data link), this does not retry: the data
+// link's retry cushion exists because losing it costs a full bridge backoff
+// cycle with no packet traffic at all, while a control-channel connect
+// failure just means one rigctl request answers with an error and the next
+// one tries again. A single attempt also keeps the error unwrapped with %w
+// (dial's retry loop renders the last error as prose via describeWSAError,
+// which loses the underlying syscall.Errno that ControlChannel needs to
+// detect WSASERVICE_NOT_FOUND).
+func (bt *bluetoothTransport) dialControl(sa *windows.SockaddrBth, route string) (windows.Handle, error) {
+	fd, err := windows.Socket(windows.AF_BTH, windows.SOCK_STREAM, windows.BTHPROTO_RFCOMM)
+	if err != nil {
+		return windows.InvalidHandle, fmt.Errorf("bluetooth: control channel socket: %w", err)
+	}
+	if err := windows.Connect(fd, sa); err != nil {
+		windows.Closesocket(fd)
+		return windows.InvalidHandle, fmt.Errorf("bluetooth: control channel connect to %s via %s: %s: %w",
+			bt.cfg.BDAddr, route, describeWSAError(err), err)
+	}
+	log.Printf("bluetooth: control channel connected to %s via %s", bt.cfg.BDAddr, route)
+	return fd, nil
+}
+
+// bluetoothControlConn is the rig-control RFCOMM socket. It has its own fd
+// and lifecycle, entirely independent of bluetoothTransport's KISS data
+// socket -- the two links are opened, read, written, and closed separately,
+// which is the point of a *second* channel.
+type bluetoothControlConn struct {
+	fd     windows.Handle
+	bdaddr string
+}
+
+func (c *bluetoothControlConn) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	buf := windows.WSABuf{Len: uint32(len(p)), Buf: &p[0]}
+	var recvd, flags uint32
+	if err := windows.WSARecv(c.fd, &buf, 1, &recvd, &flags, nil, nil); err != nil {
+		return 0, err
+	}
+	if recvd == 0 {
+		return 0, io.EOF
+	}
+	return int(recvd), nil
+}
+
+// Write loops until the whole buffer is sent, for the same reason
+// bluetoothTransport.Write does: a short write reported as success would
+// silently truncate a command to the radio.
+func (c *bluetoothControlConn) Write(p []byte) (int, error) {
+	var total int
+	for total < len(p) {
+		chunk := p[total:]
+		buf := windows.WSABuf{Len: uint32(len(chunk)), Buf: &chunk[0]}
+		var sent uint32
+		if err := windows.WSASend(c.fd, &buf, 1, &sent, 0, nil, nil); err != nil {
+			if err == windows.WSAETIMEDOUT {
+				return total, fmt.Errorf("bluetooth: control channel TX stalled -- %s accepted %d of %d bytes within %s",
+					c.bdaddr, total, len(p), btSendTimeout)
+			}
+			return total, err
+		}
+		if sent == 0 {
+			return total, fmt.Errorf("bluetooth: control channel TX stalled -- %s accepted %d of %d bytes then stopped",
+				c.bdaddr, total, len(p))
+		}
+		total += int(sent)
+	}
+	return total, nil
+}
+
+func (c *bluetoothControlConn) Close() error {
+	if c.fd != windows.InvalidHandle {
+		windows.Closesocket(c.fd)
+		c.fd = windows.InvalidHandle
+	}
+	return nil
+}
 
 // parseBTAddr parses "AA:BB:CC:DD:EE:FF" (colons or dashes, any case, or no
 // separators) into a BTH_ADDR: the 48-bit address in the low 6 bytes of a

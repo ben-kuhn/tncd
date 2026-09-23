@@ -44,9 +44,26 @@ func TestBuildSSAReq(t *testing.T) {
 		0x35, 0x03, 0x09, 0x00, 0x04, // AttributeIDList: DES{ uint16 0x0004 }
 		0x00, // ContinuationState
 	}
-	got := buildSSAReq()
+	got := buildSSAReq(uuid16Bytes(uuidSPP16))
 	if !bytes.Equal(got, want) {
 		t.Errorf("buildSSAReq()\n got  = % x\n want = % x", got, want)
+	}
+}
+
+func TestBuildSSAReqUUID16(t *testing.T) {
+	got := buildSSAReq(uuid16Bytes(uuidSPP16))
+	// ServiceSearchPattern: DES len 3, then 0x19 (UUID16) and the two bytes.
+	if got[5] != 0x35 || got[6] != 0x03 || got[7] != 0x19 {
+		t.Errorf("search pattern = % X, want a UUID16 element", got[5:8])
+	}
+}
+
+func TestBuildSSAReqUUID128(t *testing.T) {
+	u := make([]byte, 16)
+	got := buildSSAReq(u)
+	// A 128-bit UUID uses element type 0x1C and a 17-byte sequence.
+	if got[5] != 0x35 || got[6] != 0x11 || got[7] != 0x1C {
+		t.Errorf("search pattern = % X, want a UUID128 element", got[5:8])
 	}
 }
 
