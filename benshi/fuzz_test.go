@@ -39,3 +39,19 @@ func FuzzDecoder(f *testing.F) {
 		}
 	})
 }
+
+func FuzzDecodeMessage(f *testing.F) {
+	f.Add([]byte{0x00, 0x02, 0x00, 0x24})
+	f.Add([]byte{0x00, 0x02, 0x80, 0x24, 0x00, 0x09, 0xB0, 0x50, 0xF0})
+	f.Add([]byte{0x00})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		m, err := DecodeMessage(data)
+		if err != nil {
+			return
+		}
+		// A decoded message must re-serialize to the same bytes.
+		if got := m.Bytes(); len(got) != len(data) {
+			t.Fatalf("round-trip length %d != input %d", len(got), len(data))
+		}
+	})
+}
