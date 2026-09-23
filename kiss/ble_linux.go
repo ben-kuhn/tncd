@@ -81,16 +81,19 @@ func (bt *bleTransport) Open() error {
 	}
 
 	dev := conn.Object("org.bluez", devPath)
-	connected, err := isDeviceConnected(dev)
-	if err != nil {
+	if _, err := isDeviceConnected(dev); err != nil {
 		conn.Close()
 		return fmt.Errorf("ble: %s is not known to BlueZ (pair it first): %w", bt.cfg.BDAddr, err)
 	}
-	if !connected {
-		if err := callBlueZ(dev, bleConnectTimeout, "org.bluez.Device1.Connect"); err != nil {
-			conn.Close()
-			return fmt.Errorf("ble: connect %s: %w", bt.cfg.BDAddr, err)
-		}
+
+	// Connect unconditionally. Device1.Connected is true for ANY transport, so
+	// skipping this when it was set left a dual-mode radio bonded for classic
+	// -- which auto-reconnects itself over BR/EDR -- with no LE link at all,
+	// while GATT characteristics still resolved out of BlueZ's cache. The port
+	// then came up "online" and every write failed with "Not connected".
+	if err := connectDevice(dev); err != nil {
+		conn.Close()
+		return fmt.Errorf("ble: connect %s: %w", bt.cfg.BDAddr, err)
 	}
 
 	// Poll for the characteristics themselves rather than trusting
@@ -98,6 +101,21 @@ func (bt *bleTransport) Open() error {
 	// BlueZ reports ServicesResolved=true for the SDP record while exposing no
 	// GATT objects at all, so that flag says nothing about GATT being usable.
 	txPath, rxPath, err := waitKISSChars(conn, devPath, bleConnectTimeout)
+
+	// Characteristics alone do not prove an LE link: BlueZ serves them from its
+	// cache after a previous LE session. The ATT MTU does prove it, because
+	// BlueZ publishes MTU only while an ATT connection exists. When either
+	// check fails, force the LE transport and try once more.
+	if err != nil || !hasLiveATT(conn, txPath) {
+		if lerr := forceLELink(conn, devPath, dev); lerr != nil {
+			conn.Close()
+			if err == nil {
+				err = lerr
+			}
+			return fmt.Errorf("ble: %s: %w", bt.cfg.BDAddr, err)
+		}
+		txPath, rxPath, err = waitKISSChars(conn, devPath, bleConnectTimeout)
+	}
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("ble: %s: %w", bt.cfg.BDAddr, err)
@@ -312,6 +330,96 @@ func readCharMTU(conn *dbus.Conn, path dbus.ObjectPath) int {
 		return int(mtu)
 	}
 	return bleDefaultMTU
+}
+
+// noProfilesMsg is BlueZ's reply to Device1.Connect() when it finds no profile
+// to connect. On a GATT-only peripheral -- a Mobilinkd TNC4, or any LE-only
+// TNC -- that is not a failure: there simply are no BR/EDR profiles, and the
+// LE link is established regardless. Treating it as fatal made type = ble
+// unusable with exactly the devices it exists to serve.
+const noProfilesMsg = "no more profiles to connect to"
+
+// isNoProfilesError reports BlueZ's benign "nothing to connect" reply.
+func isNoProfilesError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), noProfilesMsg)
+}
+
+// connectDevice calls Device1.Connect, tolerating the no-profiles reply.
+func connectDevice(dev dbus.BusObject) error {
+	if err := callBlueZ(dev, bleConnectTimeout, "org.bluez.Device1.Connect"); err != nil {
+		if !isNoProfilesError(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// adapterPathFor returns the adapter object path owning a device path, so a
+// second adapter is driven correctly rather than assuming hci0.
+func adapterPathFor(devPath dbus.ObjectPath) dbus.ObjectPath {
+	s := string(devPath)
+	if i := strings.LastIndex(s, "/"); i > 0 {
+		return dbus.ObjectPath(s[:i])
+	}
+	return dbus.ObjectPath("/org/bluez/hci0")
+}
+
+// hasLiveATT reports whether BlueZ currently exposes an ATT MTU for the
+// characteristic, which it does only while an LE connection exists. This is the
+// one signal that distinguishes a live LE link from cached GATT objects.
+//
+// Older BlueZ omits MTU entirely; there the answer is a conservative false,
+// which costs an extra LE-forcing pass rather than a wrong "link is up".
+func hasLiveATT(conn *dbus.Conn, charPath dbus.ObjectPath) bool {
+	if charPath == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), btCallTimeout)
+	defer cancel()
+	var v dbus.Variant
+	err := conn.Object("org.bluez", charPath).CallWithContext(ctx,
+		"org.freedesktop.DBus.Properties.Get", 0,
+		"org.bluez.GattCharacteristic1", "MTU").Store(&v)
+	if err != nil {
+		return false
+	}
+	mtu, ok := v.Value().(uint16)
+	return ok && int(mtu) > 0
+}
+
+// leDiscoveryWindow is how long to scan before retrying the connect. BlueZ
+// needs to observe the device over LE; a few seconds of advertising is enough.
+const leDiscoveryWindow = 5 * time.Second
+
+// adapterDiscoveryMu serializes the adapter-wide discovery below, so two BLE
+// ports opening at once cannot stop each other's scan.
+var adapterDiscoveryMu sync.Mutex
+
+// forceLELink makes BlueZ bring the device up over LE rather than BR/EDR.
+//
+// Device1.Connect() on a dual-mode radio already bonded for classic connects
+// BR/EDR again and reports success, leaving no ATT connection. Restricting
+// discovery to the LE transport and letting BlueZ observe the device
+// advertising makes the subsequent Connect() establish LE; the ATT MTU then
+// negotiates up from the 23-byte default, which is how to confirm it worked.
+func forceLELink(conn *dbus.Conn, devPath dbus.ObjectPath, dev dbus.BusObject) error {
+	adapterDiscoveryMu.Lock()
+	defer adapterDiscoveryMu.Unlock()
+
+	adapter := conn.Object("org.bluez", adapterPathFor(devPath))
+	filter := map[string]dbus.Variant{"Transport": dbus.MakeVariant("le")}
+	// A filter or scan already owned by another client is not fatal; the
+	// device may still be observed over LE by whoever is scanning.
+	_ = callBlueZ(adapter, btCallTimeout, "org.bluez.Adapter1.SetDiscoveryFilter", filter)
+	started := callBlueZ(adapter, btCallTimeout, "org.bluez.Adapter1.StartDiscovery") == nil
+	time.Sleep(leDiscoveryWindow)
+	if started {
+		_ = callBlueZ(adapter, btCallTimeout, "org.bluez.Adapter1.StopDiscovery")
+	}
+	return connectDevice(dev)
 }
 
 // watchNotifications forwards the RX characteristic's Value updates to rx.
