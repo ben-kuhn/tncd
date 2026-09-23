@@ -33,32 +33,55 @@ type Rig struct {
 
 	reqMu sync.Mutex // serializes whole request/response exchanges
 
-	mu        sync.Mutex
-	waiting   chan benshi.Message // non-nil while a request awaits its reply
-	waitCmd   benshi.Command
+	mu      sync.Mutex
+	waiting chan benshi.Message // non-nil while a request awaits its reply
+	waitCmd benshi.Command
+	// waitGen is the generation of the request currently occupying waiting.
+	waitGen uint64
+	// reqSeq counts requests issued so far; a new request's generation is
+	// reqSeq after incrementing.
+	reqSeq uint64
+	// replySeq counts non-notification replies consumed so far, in FIFO
+	// order. The link has no per-message correlation id, so this is the only
+	// way to tell a late reply to an abandoned (timed-out) request apart from
+	// the answer to whatever request is current: every reply retires the next
+	// outstanding generation in order, whether or not anyone is still
+	// waiting for it, so a straggler can never be mistaken for the answer to
+	// a later request that happens to share the same command code.
+	replySeq uint64
+
 	cachedHz  uint32
 	cachedOK  bool
 	closed    bool
+	closeErr  error
 	closeOnce sync.Once
+	closedCh  chan struct{} // closed by Close to unblock in-flight requests
 }
 
 // New starts a rig on ch. The reader goroutine runs until Close.
 func New(ch io.ReadWriteCloser, timeout time.Duration) *Rig {
-	r := &Rig{ch: ch, timeout: timeout}
+	r := &Rig{ch: ch, timeout: timeout, closedCh: make(chan struct{})}
 	go r.readLoop()
 	return r
 }
 
 // Close shuts the rig down and closes the underlying channel.
+//
+// closedCh is closed before the channel itself so any request blocked in its
+// select wakes immediately with ErrClosed instead of waiting out its full
+// timeout. closeErr is stored on the struct rather than a local var: sync.Once
+// blocks concurrent callers until the winning call to f returns, which is
+// exactly the happens-before guarantee needed to let every caller -- not just
+// the one that ran f -- read the real result instead of a zero-value nil.
 func (r *Rig) Close() error {
-	var err error
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		r.closed = true
 		r.mu.Unlock()
-		err = r.ch.Close()
+		close(r.closedCh)
+		r.closeErr = r.ch.Close()
 	})
-	return err
+	return r.closeErr
 }
 
 // CachedFreq returns the last frequency pushed by the radio, if any.
@@ -179,14 +202,21 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 		r.mu.Unlock()
 		return nil, ErrClosed
 	}
+	r.reqSeq++
+	gen := r.reqSeq
 	replyCh := make(chan benshi.Message, 1)
 	r.waiting = replyCh
 	r.waitCmd = cmd
+	r.waitGen = gen
 	r.mu.Unlock()
 
 	defer func() {
 		r.mu.Lock()
-		r.waiting = nil
+		// Only clear waiting if it's still ours -- if we timed out, a later
+		// request may already have installed its own generation here.
+		if r.waitGen == gen {
+			r.waiting = nil
+		}
 		r.mu.Unlock()
 	}()
 
@@ -196,15 +226,41 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 	if raw == nil {
 		return nil, fmt.Errorf("rig: command %d produced an unencodable frame", cmd)
 	}
-	if _, err := r.ch.Write(raw); err != nil {
-		return nil, fmt.Errorf("rig: write: %w", err)
+
+	deadline := time.NewTimer(r.timeout)
+	defer deadline.Stop()
+
+	// io.ReadWriteCloser has no deadline method, and a wedged Bluetooth SPP
+	// socket is a documented failure mode here (see CLAUDE.md) that accepts
+	// writes without ever delivering them -- so Write itself must be bounded,
+	// not just the wait for a reply. writeErr is buffered so this goroutine
+	// can never block trying to report a result nobody is listening for any
+	// more, whether the deadline fires first or the rig is closed underneath
+	// it.
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := r.ch.Write(raw)
+		writeErr <- err
+	}()
+
+	select {
+	case err := <-writeErr:
+		if err != nil {
+			return nil, fmt.Errorf("rig: write: %w", err)
+		}
+	case <-deadline.C:
+		return nil, ErrTimeout
+	case <-r.closedCh:
+		return nil, ErrClosed
 	}
 
 	select {
 	case m := <-replyCh:
 		return m.Body, nil
-	case <-time.After(r.timeout):
+	case <-deadline.C:
 		return nil, ErrTimeout
+	case <-r.closedCh:
+		return nil, ErrClosed
 	}
 }
 
@@ -247,9 +303,18 @@ func (r *Rig) dispatch(f benshi.Frame) {
 		return
 	}
 	r.mu.Lock()
-	w, cmd := r.waiting, r.waitCmd
+	// Retire the next outstanding generation unconditionally -- see the
+	// replySeq field doc. This must happen even when nobody is currently
+	// waiting (w == nil, or a later request already owns the slot), so a
+	// straggler reply for an abandoned request is consumed here rather than
+	// left to be misread as the answer to whatever request comes next.
+	if r.replySeq < r.reqSeq {
+		r.replySeq++
+	}
+	gen := r.replySeq
+	w, waitGen, cmd := r.waiting, r.waitGen, r.waitCmd
 	r.mu.Unlock()
-	if w != nil && m.Command == cmd {
+	if w != nil && gen == waitGen && m.Command == cmd {
 		select {
 		case w <- m:
 		default:

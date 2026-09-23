@@ -235,3 +235,139 @@ func TestProbeRejectsFailureStatus(t *testing.T) {
 		t.Error("Probe must fail when the radio reports a failure status")
 	}
 }
+
+// A late reply to a request that already timed out must not be delivered as
+// the answer to a LATER request of the same command -- see the replySeq
+// field doc in rig.go. Reproduces: request1 times out; the radio's slow
+// answer to request1 finally lands after request2 has already installed its
+// own waiting channel for the identical command; request2 must still get its
+// own (fresh) answer, not request1's stale one.
+func TestStaleReplyIsNotDeliveredToNextRequest(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, 100*time.Millisecond)
+	defer r.Close()
+
+	// request1: nobody answers within its deadline.
+	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("request1 err = %v, want ErrTimeout", err)
+	}
+
+	staleFreq := []byte{0x00, 0x08, 0x9E, 0x86, 0x00} // some frequency != 145030000
+	freshFreq := []byte{0x00, 0x08, 0xA4, 0xFB, 0x70} // 145030000 Hz
+
+	go func() {
+		// Both arrive comfortably inside request2's 100ms budget, but only
+		// after request2 (below) has had time to install its own waiting
+		// channel for CmdFreqModeGetStatus.
+		time.Sleep(20 * time.Millisecond)
+		ch.reply(benshi.CmdFreqModeGetStatus, staleFreq) // late answer to request1
+		time.Sleep(20 * time.Millisecond)
+		ch.reply(benshi.CmdFreqModeGetStatus, freshFreq) // genuine answer to request2
+	}()
+
+	hz, err := r.GetFreq()
+	if err != nil {
+		t.Fatalf("request2: %v", err)
+	}
+	if hz != 145030000 {
+		t.Errorf("GetFreq = %d, want 145030000 (the fresh reply, not request1's stale one)", hz)
+	}
+}
+
+// blockingChannel never returns from Write or Read until told to, so tests
+// can verify a request's timeout bounds the write itself, not just the wait
+// for a reply.
+type blockingChannel struct {
+	unblock chan struct{}
+}
+
+func newBlockingChannel() *blockingChannel {
+	return &blockingChannel{unblock: make(chan struct{})}
+}
+
+func (b *blockingChannel) Write(p []byte) (int, error) {
+	<-b.unblock
+	return len(p), nil
+}
+
+func (b *blockingChannel) Read(p []byte) (int, error) {
+	<-b.unblock
+	return 0, io.EOF
+}
+
+func (b *blockingChannel) Close() error { return nil }
+
+// A wedged transport that accepts a Write and never returns must not wedge
+// the caller either -- CLAUDE.md documents exactly this failure mode on a
+// stuck Bluetooth SPP socket.
+func TestRequestTimesOutEvenWhenWriteBlocks(t *testing.T) {
+	ch := newBlockingChannel()
+	defer close(ch.unblock) // release the leaked internal Write/Read goroutines
+	r := New(ch, 50*time.Millisecond)
+	defer r.Close()
+
+	start := time.Now()
+	err := r.SetFreq(145030000)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("took %v, want roughly the 50ms timeout", elapsed)
+	}
+}
+
+// errCloseChannel returns a fixed error from Close, to verify that error is
+// reported to every caller, not just the one that happened to run first.
+type errCloseChannel struct {
+	*fakeChannel
+	closeErr error
+}
+
+func (e *errCloseChannel) Close() error {
+	e.fakeChannel.Close()
+	return e.closeErr
+}
+
+func TestCloseReturnsErrorToAllCallers(t *testing.T) {
+	wantErr := errors.New("boom")
+	ch := &errCloseChannel{fakeChannel: newFakeChannel(), closeErr: wantErr}
+	r := New(ch, time.Second)
+
+	err1 := r.Close()
+	err2 := r.Close()
+	if !errors.Is(err1, wantErr) {
+		t.Errorf("first Close() = %v, want %v", err1, wantErr)
+	}
+	if !errors.Is(err2, wantErr) {
+		t.Errorf("second Close() = %v, want %v (repeat calls must return the stored error, not nil)", err2, wantErr)
+	}
+}
+
+// Close must wake a request that's blocked waiting on a reply, rather than
+// making it wait out its full timeout.
+func TestCloseUnblocksInFlightRequest(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, 5*time.Second) // long enough that only Close should unblock this
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.GetFreq()
+		done <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond) // let the request start waiting
+	start := time.Now()
+	r.Close()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("err = %v, want ErrClosed", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("Close took %v to unblock the request, want near-instant", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request did not unblock after Close")
+	}
+}
