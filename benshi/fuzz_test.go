@@ -1,6 +1,9 @@
 package benshi
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func FuzzDecoder(f *testing.F) {
 	f.Add([]byte{0xFF, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x04})
@@ -49,9 +52,45 @@ func FuzzDecodeMessage(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// A decoded message must re-serialize to the same bytes.
-		if got := m.Bytes(); len(got) != len(data) {
-			t.Fatalf("round-trip length %d != input %d", len(got), len(data))
+		// A decoded message must re-serialize to the same bytes -- exact
+		// equality, not just matching length, or a decoder that silently
+		// swaps/drops bytes within the body would slip through.
+		if got := m.Bytes(); !bytes.Equal(got, data) {
+			t.Fatalf("round-trip % X != input % X", got, data)
+		}
+	})
+}
+
+// FuzzDecodeFreqMode exercises both untrusted-bytes decoders added for VFO-mode
+// QSY. They parse radio-sourced bytes over BLE/RFCOMM, so per the project's
+// fuzz-every-untrusted-parser rule they need a target even though the plan that
+// added them didn't call one out.
+func FuzzDecodeFreqMode(f *testing.F) {
+	f.Add([]byte{0x00, 0x09, 0xB0, 0x50, 0xF0}) // valid FREQ_MODE_GET_STATUS reply
+	f.Add([]byte{ // valid notification 14
+		14,
+		0x08, 0xA4, 0xFB, 0x70,
+		0x08, 0xA4, 0xFB, 0x70,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x40,
+	})
+	f.Add(make([]byte, 15)) // notification type 0 -- wrong type, same length as valid
+	f.Add([]byte{0x00, 0x09})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Same bytes handed to both decoders: each interprets an unrelated
+		// wire shape, so garbage for one is a fine stress input for the
+		// other, and this keeps a single corpus covering both.
+		if freq, err := DecodeFreqModeStatus(data); err == nil && freq&^uint32(freqMask) != 0 {
+			t.Fatalf("DecodeFreqModeStatus: freq %#x has bits set above the 30-bit field mask", freq)
+		}
+		if status, err := DecodeFreqModeNotification(data); err == nil {
+			if status.RXFreqHz&^uint32(freqMask) != 0 {
+				t.Fatalf("DecodeFreqModeNotification: RXFreqHz %#x has bits set above the 30-bit field mask", status.RXFreqHz)
+			}
+			if status.TXFreqHz&^uint32(freqMask) != 0 {
+				t.Fatalf("DecodeFreqModeNotification: TXFreqHz %#x has bits set above the 30-bit field mask", status.TXFreqHz)
+			}
 		}
 	})
 }
