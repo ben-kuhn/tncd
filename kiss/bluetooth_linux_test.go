@@ -153,6 +153,63 @@ func TestCallBlueZPassesThrough(t *testing.T) {
 	}
 }
 
+// TestIsServiceNotFoundError covers the ConnectProfile failures that must
+// (and must not) be treated as ErrNoControlChannel.
+//
+// The "must match" strings were observed live against a UV-PRO on the bench
+// while chasing the wrong control UUID (see benshiControlServiceUUID's
+// comment in bluetooth_sdp.go for that history) -- they are field data, not
+// guesses. The pre-fix matcher looked only for "not supported" with a space
+// and missed the real, hyphenated BlueZ text; this test exists so that
+// regression cannot recur silently.
+func TestIsServiceNotFoundError(t *testing.T) {
+	notSupportedByName := dbus.Error{Name: "org.bluez.Error.NotSupported", Body: nil}
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "hyphenated bench text, no space",
+			err:  errors.New("br-connection-not-supported"),
+			want: true,
+		},
+		{
+			name: "dbus.Error value, empty body falls back to bare Name",
+			err:  notSupportedByName,
+			want: true,
+		},
+		{
+			name: "dbus.Error pointer, empty body falls back to bare Name",
+			err:  &notSupportedByName,
+			want: true,
+		},
+		{
+			name: "timeout / no-reply is a real failure, not ErrNoControlChannel",
+			err:  errors.New("did not receive a reply (timeout by message bus)"),
+			want: false,
+		},
+		{
+			name: "br-connection-busy is transient, must not disable the feature",
+			err:  errors.New("br-connection-busy"),
+			want: false,
+		},
+		{
+			name: "unrelated error",
+			err:  errors.New("boom"),
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isServiceNotFoundError(tc.err); got != tc.want {
+				t.Errorf("isServiceNotFoundError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestTXStallDetector covers the send-queue drain logic that distinguishes a
 // briefly-busy socket from one the kernel can no longer hand off to the radio.
 //
