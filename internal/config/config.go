@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,7 +99,29 @@ type Port struct {
 	// Seconds; 0 disables. Default 20 for bluetooth, 0 for serial/tcp.
 	RXWedgeTimeout int
 
+	// ControlChannel selects which rig-control command channel (e.g. a
+	// Benshi radio's sub-channel) this port's [rigctl.N] listener addresses.
+	// Meaningless for transports without a rig-control capability.
+	ControlChannel int
+
 	KISS kiss.Params // from [kiss.N]; nil fields = don't send
+}
+
+// RigCtl holds one [rigctl.N] section: a hamlib Net rigctl listener for port N.
+//
+// One listener per port because hamlib's Net rigctl protocol has no way to
+// select among several rigs on one socket.
+type RigCtl struct {
+	Enabled        bool   // default false; the module is opt-in
+	ListenHost     string // default "127.0.0.1"
+	ListenPort     int    // default 4532 + N
+	AllowedSubnets []*net.IPNet
+	AllowPTT       bool // default false; see PTTTimeout
+	// PTTTimeout is the maximum time tncd will leave the transmitter keyed
+	// before force-releasing it, in seconds. Default 30. A remote key whose
+	// un-key path can be swallowed by a wedged Bluetooth link is a stuck
+	// transmitter, so this is not optional when AllowPTT is set.
+	PTTTimeout int
 }
 
 // Config is the parsed configuration.
@@ -108,6 +131,9 @@ type Config struct {
 	KISSTCP KISSTCP
 	API     APIConfig
 	Ports   []Port
+	// RigCtl holds one entry per configured port (RigCtl[i] is [rigctl.i],
+	// defaulted even when the section is absent), matching Ports by index.
+	RigCtl []RigCtl
 }
 
 // knownServerKeys are the recognized keys in [server].
@@ -119,6 +145,12 @@ var knownServerKeys = []string{
 // knownAX25Keys are the recognized keys in [ax25].
 var knownAX25Keys = []string{
 	"max_window", "n2_retry", "t3_timeout",
+}
+
+// knownRigCtlKeys are the recognized keys in [rigctl.N].
+var knownRigCtlKeys = []string{
+	"enabled", "listen_host", "listen_port", "allowed_subnets",
+	"allow_ptt", "ptt_timeout",
 }
 
 // knownKISSTCPKeys are the recognized keys in [kisstcp].
@@ -141,7 +173,7 @@ var knownClientKeys = []string{
 	"bdaddr", "channel", "reconnect", "reconnect_delay", "reconnect_max_delay",
 	"ota_baudrate", "init_string", "init_delay", "send_kiss_exit",
 	"host_exit_string", "exit_delay",
-	"ax25_version", "srej", "rx_wedge_timeout",
+	"ax25_version", "srej", "rx_wedge_timeout", "control_channel",
 }
 
 // knownKISSKeys are the recognized keys in [kiss.N].
@@ -305,6 +337,35 @@ func parseAllowlistKey(s *ini.Section, key string) (netutil.Allowlist, error) {
 		return netutil.Allowlist{}, nil
 	}
 	return netutil.ParseAllowlist(s.Key(key).String())
+}
+
+// parseSubnetList parses a comma-separated CIDR list into []*net.IPNet.
+// Bare IPs are treated as single-host prefixes (/32 or /128), matching
+// netutil.ParseAllowlist's semantics for the other listener sections; this
+// section returns []*net.IPNet (rather than netutil.Allowlist) because the
+// rig-control listener consumes it directly.
+func parseSubnetList(s *ini.Section, key string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, part := range getList(s, key) {
+		if strings.Contains(part, "/") {
+			_, ipnet, err := net.ParseCIDR(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q: %w", part, err)
+			}
+			out = append(out, ipnet)
+			continue
+		}
+		ip := net.ParseIP(part)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid address %q (want CIDR or IP)", part)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return out, nil
 }
 
 // getIntPtr returns a *int from a section key, or nil if absent.
@@ -616,6 +677,7 @@ func Load(path string) (*Config, error) {
 			AX25Version:       ax25Version,
 			SREJ:              getBool(s, "srej", true),
 			RXWedgeTimeout:    getInt(s, "rx_wedge_timeout", rxWedgeDefault),
+			ControlChannel:    getInt(s, "control_channel", 0),
 		}
 
 		// Serial-only params validated at load: a typo in parity/stopbits must
@@ -643,6 +705,38 @@ func Load(path string) (*Config, error) {
 		}
 
 		cfg.Ports[i] = port
+	}
+
+	// --- Parse [rigctl.N], one per configured port (section optional) ---
+	cfg.RigCtl = make([]RigCtl, len(portEntries))
+	for i := range portEntries {
+		secName := fmt.Sprintf("rigctl.%d", i)
+		s := f.Section(secName) // ini creates an empty section on demand
+		warnUnknownKeys(s, knownRigCtlKeys)
+
+		subnets, err := parseSubnetList(s, "allowed_subnets")
+		if err != nil {
+			return nil, fmt.Errorf("[%s] %w", secName, err)
+		}
+
+		pttTimeout := getInt(s, "ptt_timeout", 30)
+		if pttTimeout <= 0 {
+			// A zero or negative timeout would defeat the stuck-transmitter
+			// guard (tncd could leave the rig keyed indefinitely), so treat
+			// it the same as n2_retry <= 0: clamp and warn, don't silently
+			// disable the safety bound.
+			log.Printf("warning: [%s] ptt_timeout = %d is invalid; using 30", secName, pttTimeout)
+			pttTimeout = 30
+		}
+
+		cfg.RigCtl[i] = RigCtl{
+			Enabled:        getBool(s, "enabled", false),
+			ListenHost:     getString(s, "listen_host", "127.0.0.1"),
+			ListenPort:     getInt(s, "listen_port", 4532+i),
+			AllowedSubnets: subnets,
+			AllowPTT:       getBool(s, "allow_ptt", false),
+			PTTTimeout:     pttTimeout,
+		}
 	}
 
 	warnDuplicatePorts(cfg.Ports)

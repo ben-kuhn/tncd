@@ -426,3 +426,69 @@ func TestAPIAllowedHosts(t *testing.T) {
 		t.Fatalf("AllowedHosts = %q, want %q", cfg.API.AllowedHosts, want)
 	}
 }
+
+func TestRigCtlDefaults(t *testing.T) {
+	cfg, err := Load(write(t, "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.RigCtl) != 1 {
+		t.Fatalf("len(RigCtl) = %d, want 1 (one per port)", len(cfg.RigCtl))
+	}
+	rc := cfg.RigCtl[0]
+	if rc.Enabled {
+		t.Error("RigCtl must be opt-in, got Enabled = true")
+	}
+	if rc.ListenPort != 4532 {
+		t.Errorf("ListenPort = %d, want 4532 for port 0", rc.ListenPort)
+	}
+	if rc.AllowPTT {
+		t.Error("AllowPTT must default to false")
+	}
+	if rc.PTTTimeout != 30 {
+		t.Errorf("PTTTimeout = %d, want 30", rc.PTTTimeout)
+	}
+}
+
+func TestRigCtlPortDefaultsIncrementWithIndex(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
+		"[client.1]\ntype=bluetooth\nbdaddr=00:11:22:33:44:66\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RigCtl[1].ListenPort != 4533 {
+		t.Errorf("port 1 ListenPort = %d, want 4533", cfg.RigCtl[1].ListenPort)
+	}
+}
+
+func TestRigCtlExplicitValues(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\ncontrol_channel=2\n" +
+		"[rigctl.0]\nenabled=true\nlisten_port=4600\nallow_ptt=true\nptt_timeout=10\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.RigCtl[0].Enabled || cfg.RigCtl[0].ListenPort != 4600 {
+		t.Errorf("RigCtl[0] = %+v", cfg.RigCtl[0])
+	}
+	if !cfg.RigCtl[0].AllowPTT || cfg.RigCtl[0].PTTTimeout != 10 {
+		t.Errorf("PTT config = %+v", cfg.RigCtl[0])
+	}
+	if cfg.Ports[0].ControlChannel != 2 {
+		t.Errorf("ControlChannel = %d, want 2", cfg.Ports[0].ControlChannel)
+	}
+}
+
+// A zero or negative key timeout would defeat the stuck-transmitter guard.
+func TestRigCtlRejectsNonPositivePTTTimeout(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
+		"[rigctl.0]\nenabled=true\nallow_ptt=true\nptt_timeout=0\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RigCtl[0].PTTTimeout != 30 {
+		t.Errorf("PTTTimeout = %d, want the 30s default to replace an invalid 0", cfg.RigCtl[0].PTTTimeout)
+	}
+}
