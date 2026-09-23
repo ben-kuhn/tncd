@@ -23,24 +23,32 @@ var ErrTimeout = errors.New("rig: radio did not reply in time")
 var ErrClosed = errors.New("rig: control channel closed")
 
 // quietPeriodMultiplier sets how long request() blocks -- still holding
-// reqMu, so no other request can start -- after its OWN timeout, before
-// letting the next request begin. See waitOutQuietPeriod.
+// reqMu, so no other request can start -- after its own REPLY timeout,
+// before letting the next request begin. See waitOutQuietPeriod. It does NOT
+// apply to a write timeout, which poisons the rig instead -- see the
+// write-timeout branch in request() for why that case is different.
 //
 // The Benshi protocol carries no per-message correlation id, so once a
-// request times out, a reply of that command type that shows up afterward
-// cannot be attributed to the request it answers. Three earlier designs here
-// tried to guess anyway -- matching by command type alone, then two
-// FIFO-generation schemes -- and each guess was wrong in some real scenario:
-// dropping the straggler loses a genuine answer when it was merely slow;
-// delivering it to whatever is waiting next misattributes it when the
-// straggler was for an earlier, abandoned request. The only way to make an
-// unlabeled reply unambiguous is to guarantee at most one request is ever
-// outstanding, so nothing else can possibly be waiting when a straggler
-// shows up -- hence holding off the NEXT request instead of trying to match
-// the stray reply.
+// request's write has landed but its reply times out, a reply of that
+// command type that shows up afterward cannot be attributed to the request
+// it answers. Three earlier designs here tried to guess anyway -- matching
+// by command type alone, then two FIFO-generation schemes -- and each guess
+// was wrong in some real scenario: dropping the straggler loses a genuine
+// answer when it was merely slow; delivering it to whatever is waiting next
+// misattributes it when the straggler was for an earlier, abandoned request.
+// The only way to make an unlabeled reply unambiguous is to guarantee at
+// most one request is ever outstanding, so nothing else can possibly be
+// waiting when a straggler shows up -- hence holding off the NEXT request
+// instead of trying to match the stray reply.
 //
-// The trade-off is added latency on the request immediately after a
-// timeout. That's acceptable here: timeouts are rare on a working link, and
+// This works because a reply timeout only ever follows a COMPLETED write: at
+// that point the byte stream's state is known, so a bounded wait for a
+// straggler is safe. A write timeout has no such guarantee (see
+// quietPeriodMultiplier's use in request()), which is why it isn't handled
+// the same way.
+//
+// The trade-off here is added latency on the request immediately after a
+// reply timeout. That's acceptable: timeouts are rare on a working link, and
 // rig control (QSY) happens before connecting to a station, not mid-QSO, so
 // a delayed poll costs nothing a user notices.
 const quietPeriodMultiplier = 3
@@ -49,10 +57,14 @@ const quietPeriodMultiplier = 3
 //
 // One request is in flight at a time: the radio is a single serial endpoint
 // and replies carry no correlation id, so concurrent requests could not be
-// matched to their commands. After a request times out, the NEXT request is
-// held for a quiet period rather than started immediately -- see
-// quietPeriodMultiplier -- so a straggler reply for the abandoned request can
-// never be mistaken for the answer to a new one.
+// matched to their commands. After a request's reply times out (its write
+// already landed), the NEXT request is held for a quiet period rather than
+// started immediately -- see quietPeriodMultiplier -- so a straggler reply
+// for the abandoned request can never be mistaken for the answer to a new
+// one. After a request's WRITE times out (unknown whether anything reached
+// the wire), the rig is poisoned instead: every later call fails with
+// ErrClosed rather than risking a second write interleaving with the
+// abandoned one, or a later request receiving its eventual stray reply.
 type Rig struct {
 	ch      io.ReadWriteCloser
 	timeout time.Duration
@@ -259,12 +271,22 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 			return nil, fmt.Errorf("rig: write: %w", err)
 		}
 	case <-deadline.C:
-		// The write goroutine may still land on the wire after we give up on
-		// it, so a reply is still plausible -- wait it out the same as a
-		// reply-phase timeout below.
-		if r.waitOutQuietPeriod(replyCh) {
-			return nil, ErrClosed
-		}
+		// A write timeout is fatal to the rig, not just to this request --
+		// see the doc comment on quietPeriodMultiplier for why the quiet
+		// period does not apply here. In short: we don't know whether any
+		// bytes reached the wire, and a wedged-then-unwedged transport can
+		// complete the abandoned write at any later, unbounded time, so
+		// there's no finite window after which a straggler stops being
+		// plausible (unlike a reply timeout, where the write is known to
+		// have already landed). Letting a later request write into the same
+		// stream risks interleaving bytes with whatever this write
+		// eventually sends; letting a later request wait for a reply risks
+		// receiving THIS write's answer instead of its own. Poisoning the
+		// rig closes both doors: Close() here means every later call fails
+		// fast with ErrClosed instead of touching the stream again, and any
+		// eventual late reply lands on a wait channel nothing is listening
+		// to (this request's own, already abandoned) rather than a live one.
+		r.Close()
 		return nil, ErrTimeout
 	case <-r.closedCh:
 		return nil, ErrClosed
@@ -284,12 +306,17 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 }
 
 // waitOutQuietPeriod blocks -- still holding reqMu, so no other request can
-// start -- after this request's own timeout, giving a straggler reply room
-// to show up and be harmlessly discarded before the next request is allowed
-// to begin. See quietPeriodMultiplier for why this exists instead of trying
-// to match the straggler to whichever request happens to be waiting later.
-// It reports whether the rig was closed while waiting, so the caller can
-// surface ErrClosed instead of ErrTimeout.
+// start -- after this request's own REPLY timeout, giving a straggler reply
+// room to show up and be harmlessly discarded before the next request is
+// allowed to begin. See quietPeriodMultiplier for why this exists instead of
+// trying to match the straggler to whichever request happens to be waiting
+// later. It reports whether the rig was closed while waiting, so the caller
+// can surface ErrClosed instead of ErrTimeout.
+//
+// Only used for a reply-phase timeout, where the write is known to have
+// already landed on the wire. A write-phase timeout is handled separately,
+// by poisoning the rig instead -- see the write-timeout branch in request()
+// for why the two cases aren't the same.
 //
 // r.waiting still points at replyCh until request()'s deferred cleanup runs
 // (after this returns), so dispatch keeps routing a late reply here exactly

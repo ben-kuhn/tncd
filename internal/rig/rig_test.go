@@ -261,9 +261,9 @@ func (b *blockingChannel) Close() error { return nil }
 
 // A wedged transport that accepts a Write and never returns must not wedge
 // the caller either -- CLAUDE.md documents exactly this failure mode on a
-// stuck Bluetooth SPP socket. The call includes the post-timeout quiet
-// period (see quietPeriodMultiplier), so the bound here is timeout +
-// quietPeriod, not the bare timeout.
+// stuck Bluetooth SPP socket. A write timeout poisons the rig immediately
+// (fix round 4) rather than entering the quiet period, so the bound here is
+// roughly the bare timeout, not timeout+quietPeriod.
 func TestRequestTimesOutEvenWhenWriteBlocks(t *testing.T) {
 	ch := newBlockingChannel()
 	defer close(ch.unblock) // release the leaked internal Write/Read goroutines
@@ -276,9 +276,8 @@ func TestRequestTimesOutEvenWhenWriteBlocks(t *testing.T) {
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
 	}
-	want := timeout * (1 + quietPeriodMultiplier)
-	if elapsed := time.Since(start); elapsed > want+time.Second {
-		t.Errorf("took %v, want roughly %v (timeout + quiet period)", elapsed, want)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("took %v, want roughly the %v timeout", elapsed, timeout)
 	}
 }
 
@@ -479,5 +478,96 @@ func TestCloseDuringQuietPeriodReturnsPromptly(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("request did not unblock after Close")
+	}
+}
+
+// Fix round 4: a write timeout is handled differently from a reply timeout
+// (see the write-timeout branch in request() and the quietPeriodMultiplier
+// doc comment). A reply timeout means the write is known to have landed, so
+// waiting out a quiet period for a straggler is safe. A write timeout means
+// the byte stream's state is UNKNOWN -- a wedged-then-unwedged transport can
+// complete the abandoned write at any later, unbounded time, and a second
+// write while that's still possible would interleave bytes on the wire. So a
+// write timeout poisons the rig (closes it) instead of entering the quiet
+// period: no bound would be safe, and there is nothing to wait for since the
+// problem isn't a missing reply, it's an unknown stream.
+
+// gatedWriteChannel wraps fakeChannel with a Write that blocks until the
+// test releases a gate, letting a test control exactly when an abandoned
+// write -- one whose deadline already fired -- finally lands on the wire.
+type gatedWriteChannel struct {
+	*fakeChannel
+	gate chan struct{}
+}
+
+func newGatedWriteChannel() *gatedWriteChannel {
+	return &gatedWriteChannel{fakeChannel: newFakeChannel(), gate: make(chan struct{})}
+}
+
+func (g *gatedWriteChannel) Write(p []byte) (int, error) {
+	<-g.gate
+	return g.fakeChannel.Write(p)
+}
+
+// (5) Write-timeout-then-late-landing: the reviewer's exact reproduction.
+// request1's write is gated so it can't complete in time; request1 times out
+// on the write side and the rig is poisoned. The gate is then released,
+// letting the abandoned write finally land -- well after request1 already
+// gave up -- and request2 must NOT be able to receive whatever that
+// produces: it must fail fast with ErrClosed, and it must never attempt a
+// second write into the same (possibly corrupted) stream.
+//
+// TestRequestTimesOutEvenWhenWriteBlocks (round 1) cannot observe this: its
+// blockingChannel blocks forever, so the abandoned write never lands and the
+// hole this test covers never had a chance to show up there.
+func TestWriteTimeoutPoisonsAgainstLateLandingWrite(t *testing.T) {
+	ch := newGatedWriteChannel()
+	r := New(ch, 20*time.Millisecond)
+	defer r.Close()
+
+	if err := r.SetFreq(145030000); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("request1 err = %v, want ErrTimeout", err)
+	}
+
+	// Release the gate: the abandoned write from request1 finally completes,
+	// well after request1 itself already returned.
+	close(ch.gate)
+	time.Sleep(20 * time.Millisecond) // let the abandoned write actually land
+
+	if _, err := r.GetFreq(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("request2 err = %v, want ErrClosed (the rig must be poisoned)", err)
+	}
+
+	w := ch.writes()
+	if len(w) != 1 {
+		t.Errorf("wrote %d frames, want 1 (request1's late write only -- request2 must never write into a poisoned rig)", len(w))
+	}
+}
+
+// (6) After a write timeout, every subsequent call must fail fast with the
+// poisoned error rather than attempting another write.
+func TestWriteTimeoutPoisonsAllSubsequentCalls(t *testing.T) {
+	ch := newGatedWriteChannel()
+	defer close(ch.gate) // release the leaked abandoned-write goroutine
+	r := New(ch, 20*time.Millisecond)
+	defer r.Close()
+
+	if err := r.SetFreq(145030000); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("request1 err = %v, want ErrTimeout", err)
+	}
+
+	if err := r.SetFreq(145030000); !errors.Is(err, ErrClosed) {
+		t.Errorf("SetFreq after write-timeout poisoning = %v, want ErrClosed", err)
+	}
+	if _, err := r.GetFreq(); !errors.Is(err, ErrClosed) {
+		t.Errorf("GetFreq after write-timeout poisoning = %v, want ErrClosed", err)
+	}
+	if err := r.Probe(); !errors.Is(err, ErrClosed) {
+		t.Errorf("Probe after write-timeout poisoning = %v, want ErrClosed", err)
+	}
+
+	w := ch.writes()
+	if len(w) != 0 {
+		t.Errorf("wrote %d frames after poisoning, want 0 -- no call may write into a poisoned rig", len(w))
 	}
 }
