@@ -26,6 +26,15 @@ Worth noting the fix is not simply "add a deadline": an abandoned mid-flight wri
 byte stream in an unknown state, so the honest response to a timeout is to fail the port and
 reconnect, as both `internal/rig` and the rig-control write path concluded independently.
 
+One useful data point for whoever takes this on: a reviewer tested whether an abandoned
+blocked write actually leaks forever, using an `os.Pipe` against a real `bluetoothTransport`
+(its `file` is an `os.NewFile`-wrapped socket fd, so the proxy is faithful). `Close()` DOES
+unblock the blocked `Write` promptly — Go's runtime poller interrupts in-flight I/O on close
+for pollable fds. Windows already bounds its writes with a 10s `SO_SNDTIMEO`, and FreeBSD
+does an explicit `shutdown(SHUT_RDWR)` before close for the same reason. So no transport in
+the tree leaves such a goroutine truly unkillable, and a fail-the-port response should
+actually reclaim it rather than accumulating leaks.
+
 ### 2. `bluetoothTransport`'s open/closed guards are lockless
 `Read`/`Write` check `bt.file == nil` (Linux) or `bt.fd == InvalidHandle` (Windows) with no
 synchronisation against a concurrent `Close()`. In practice the guards make the failure
