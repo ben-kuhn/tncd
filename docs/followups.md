@@ -71,9 +71,16 @@ Unexplained. Note HTCommander — purpose-built for these radios — contains no
 references at all and moves data via the Benshi protocol's `HT_SEND_DATA`. Whether that is
 the only working BLE data path on this radio is untested.
 
-Related: the separate LE-transport fix on branch `fix/ble-le-transport` (commit 30885b9) is
-committed but NOT merged. It makes tncd establish a real LE link instead of reporting a
-phantom one, and is worth landing regardless of the above.
+Related: the LE-transport fix (`30885b9`) is now MERGED to main (`e8c4b31`, pushed
+2026-09-24). It makes tncd establish a real LE link instead of reporting a phantom one.
+
+**That fix is a prerequisite for any BLE rig-control work.** The deferred BLE control
+channel (Task 4b of the rig-control plan) cannot be validated without it: before the fix,
+tncd reported a healthy online port with no LE link at all, so a BLE control channel would
+have appeared to open and then silently failed every write. Whoever picks up BLE rig control
+must branch from a main that contains `e8c4b31` — the rig-control feature branch was cut
+from the older main and does NOT have it. Merge main in first rather than cherry-picking,
+to keep the history clean.
 
 ### 6. The Mobilinkd TNC4's pairing was removed and did not re-pair
 Its bond was deleted host-side during BLE investigation; re-pairing reports success but
