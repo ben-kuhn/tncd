@@ -262,6 +262,50 @@ func TestGetPTTReadsTXBit(t *testing.T) {
 	}
 }
 
+// SetPTT has no press/release parameter to assert on (see its doc comment)
+// -- the only thing this package can prove is that it sends DO_PROG_FUNC
+// with the MAIN_PTT effect byte, both for on and for off, since the wire
+// message is identical either way.
+func TestSetPTTSendsDoProgFuncMainPTT(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		ch := newFakeChannel()
+		r := New(ch, time.Second)
+
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			ch.reply(benshi.CmdDoProgFunc, []byte{0x00})
+		}()
+
+		if err := r.SetPTT(on); err != nil {
+			t.Fatalf("SetPTT(%v): %v", on, err)
+		}
+		r.Close()
+
+		writes := ch.writes()
+		if len(writes) != 1 {
+			t.Fatalf("SetPTT(%v) wrote %d frames, want 1", on, len(writes))
+		}
+		dec := benshi.NewDecoder()
+		frames, err := dec.Feed(writes[0])
+		if err != nil {
+			t.Fatalf("Feed: %v", err)
+		}
+		if len(frames) != 1 {
+			t.Fatalf("Feed decoded %d frames, want 1", len(frames))
+		}
+		msg, err := benshi.DecodeMessage(frames[0].Data)
+		if err != nil {
+			t.Fatalf("DecodeMessage: %v", err)
+		}
+		if msg.Command != benshi.CmdDoProgFunc {
+			t.Errorf("SetPTT(%v) command = %v, want CmdDoProgFunc", on, msg.Command)
+		}
+		if len(msg.Body) != 1 || msg.Body[0] != byte(benshi.PFEffectMainPTT) {
+			t.Errorf("SetPTT(%v) body = %v, want [%d] (PFEffectMainPTT)", on, msg.Body, benshi.PFEffectMainPTT)
+		}
+	}
+}
+
 func TestProbeRejectsFailureStatus(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second)

@@ -57,9 +57,10 @@ type Rig interface {
 	GetPTT() (bool, error)
 }
 
-// pttState tracks an active key so a later task can force-release it on
-// PTTTimeout. Unused by handleSetPTT until that task lands, but the type
-// lives here now so handleLine's signature doesn't change under it.
+// pttState tracks an active key -- one per Server, shared across every
+// connection to that port's listener -- so it can be force-released on
+// PTTTimeout, on client disconnect, or on server Close. See handleSetPTT,
+// releaseLocked, and forceReleasePTT.
 type pttState struct {
 	mu    sync.Mutex
 	timer *time.Timer
@@ -172,13 +173,107 @@ func rigIsNil(r Rig) bool {
 	}
 }
 
-// handleSetPTT is a stub: PTT keying (gated behind AllowPTT, with a hard
-// maximum key time so a swallowed un-key over a wedged Bluetooth link can't
-// leave the transmitter stuck on) is a later task. Answering ENIMPL here is
-// truthful -- this build does not implement it yet -- and safe, since a
-// client that gets ENIMPL will not believe it keyed anything.
+// handleSetPTT keys or unkeys the transmitter, subject to allow_ptt and a
+// hard maximum key time (cfg.PTTTimeout).
+//
+// The guard is not optional. A remote key whose un-key write can be
+// silently swallowed by a wedged Bluetooth link (see CLAUDE.md) is a stuck
+// transmitter, and that failure mode is known to occur on these radios.
+// PTTTimeout's timer, wired here, is the backstop for that -- it does not
+// depend on the client ever sending another command.
 func handleSetPTT(args []string, r Rig, cfg config.RigCtl, st *pttState) string {
-	return rprtENIMPL
+	if !cfg.AllowPTT {
+		return rprtENIMPL
+	}
+	if len(args) < 1 {
+		return rprtEINVAL
+	}
+	var on bool
+	switch args[0] {
+	case "0":
+		on = false
+	case "1", "3": // hamlib RIG_PTT_ON, RIG_PTT_ON_DATA -- both mean "key"
+		on = true
+	default:
+		return rprtEINVAL
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	if !on {
+		return errToRPRT(releaseLocked(r, st))
+	}
+
+	if err := r.SetPTT(true); err != nil {
+		return errToRPRT(err)
+	}
+	st.keyed = true
+	if st.timer != nil {
+		st.timer.Stop()
+	}
+	timeout := time.Duration(cfg.PTTTimeout) * time.Second
+	st.timer = time.AfterFunc(timeout, func() { forceReleasePTT(r, st) })
+	return rprtOK
+}
+
+// releaseLocked sends the un-key command and clears the keyed/timer state.
+// Must be called with st.mu held.
+//
+// It is a deliberate no-op on the radio when nothing is currently keyed,
+// rather than resending the un-key command "just to be sure": DO_PROG_FUNC
+// carries no press/release parameter (see (*rig.Rig).SetPTT's doc comment),
+// so if PFEffectMainPTT turns out to be a toggle rather than a level,
+// resending the identical wire bytes for a redundant release risks flipping
+// the transmitter back ON -- exactly backwards from what a second "release"
+// must do. A second/idempotent unkey -- whether it's the client calling
+// set_ptt 0 twice, or a force-release landing after the client already
+// released -- therefore short-circuits before touching the radio at all.
+func releaseLocked(r Rig, st *pttState) error {
+	if !st.keyed {
+		return nil
+	}
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	st.keyed = false
+	if rigIsNil(r) {
+		return rig.ErrClosed
+	}
+	return r.SetPTT(false)
+}
+
+// forceReleasePTT is releaseLocked for the three callers that don't already
+// hold st.mu and have no RPRT reply to give anyone: the PTTTimeout timer
+// firing, a client disconnecting while keyed, and the server closing while
+// keyed. Wiring all three is the point of this task -- a keyed transmitter
+// must not survive any of them.
+//
+// This is best-effort, not a guarantee. CLAUDE.md documents a bench-confirmed
+// failure mode where a wedged Bluetooth link accepts a write and never
+// delivers it to the TNC, so nothing here can prove the transmitter actually
+// went quiet just because this function returned. There is deliberately no
+// retry loop: retrying into a wedged transport is not meaningfully more
+// likely to land than the first attempt, and (*rig.Rig).request's own
+// timeout already bounds how long a single attempt can take -- looping would
+// only multiply that latency without multiplying the odds of success. What
+// this function DOES guarantee is that tncd's own bookkeeping (st.keyed, the
+// timer) is cleared regardless of whether the radio ever heard about it, so
+// tncd itself never believes a key is still down and never leaves a second
+// timer running to fire later and confuse things further. A rig that is nil
+// at release time (port offline, mid-relink) is the worst case -- there is
+// no channel to send the un-key on at all -- and is logged loudly rather
+// than silently swallowed, since that is the one situation where only a
+// human (power off, or wait for the physical key timeout on the radio side)
+// can guarantee the transmitter actually goes quiet.
+func forceReleasePTT(r Rig, st *pttState) {
+	st.mu.Lock()
+	err := releaseLocked(r, st)
+	st.mu.Unlock()
+	if err != nil {
+		log.Printf("rigctl: PTT force-release failed -- transmitter may still be keyed: %v", err)
+	}
 }
 
 // Server owns one rigctl listener for one tncd port.
@@ -301,6 +396,12 @@ func (s *Server) rig() Rig {
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.untrackConn(conn)
 	defer conn.Close()
+	// A dropped TCP connection, a killed client, or a network partition must
+	// not leave the transmitter keyed just because nobody is left to send
+	// set_ptt 0. This is a no-op (see releaseLocked) unless this connection
+	// -- or another one sharing the same server-wide pttState -- actually
+	// left it keyed.
+	defer forceReleasePTT(s.rig(), s.ptt)
 
 	scanner := bufio.NewScanner(conn)
 	for {
@@ -328,6 +429,13 @@ func (s *Server) Close() error {
 	conns := s.conns
 	s.conns = nil
 	s.mu.Unlock()
+
+	// tncd shutting down must not leave a transmitter keyed behind it. Do
+	// this before tearing down the listener/conns below: those don't touch
+	// the radio, so ordering relative to them doesn't matter, but doing it
+	// first means a Close() that's interrupted or panics partway through
+	// still attempted the release before anything else.
+	forceReleasePTT(s.rig(), s.ptt)
 
 	var err error
 	if ln != nil {

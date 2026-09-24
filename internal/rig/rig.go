@@ -210,6 +210,24 @@ func (r *Rig) Teardown() error {
 // is_radio -- so is_in_tx is bit 6.
 const htStatusTXBit = 0x40
 
+// SetPTT keys or unkeys the transmitter via DO_PROG_FUNC(MAIN_PTT).
+//
+// DO_PROG_FUNC's body is a single effect byte -- the protocol defines no
+// press/release parameter for it, so this sends the exact same wire bytes
+// (PFEffectMainPTT) regardless of on. HTCommander, the reference
+// implementation this protocol was reverse-engineered against, SPECULATES
+// that some effects have distinct LOW_TO_HIGH/HIGH_TO_LOW edge actions that
+// amount to a press and a release, but its own source does not establish
+// that for MAIN_PTT, and nothing here has been bench-verified to hold a key
+// open on real hardware. A nil return means only "the radio accepted the
+// command" -- it is NOT proof the transmitter is now in the requested
+// state. Callers must not assume a remote key can be held, and must enforce
+// their own maximum key time (see internal/frontend/rigctl's PTTTimeout).
+func (r *Rig) SetPTT(on bool) error {
+	_, err := r.request(benshi.CmdDoProgFunc, []byte{byte(benshi.PFEffectMainPTT)})
+	return err
+}
+
 // GetPTT reports whether the radio is currently transmitting.
 func (r *Rig) GetPTT() (bool, error) {
 	body, err := r.request(benshi.CmdGetHTStatus, nil)
