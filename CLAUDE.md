@@ -20,6 +20,13 @@ Always run `go test ./...` and ensure all tests pass before committing or deploy
 
 Never commit secrets (API keys, tokens, passwords, private keys) to git.
 
+## Working style
+
+Don't tell the user when to stop, pause, or take a break, and don't editorialise about
+session length or how much has been accomplished. Report what happened, state what is
+blocked and why, name the options, and keep working. The user decides when to stop; they
+have the context to make that call and you do not.
+
 ## Debugging: prove it's external before blaming (or clearing) the app
 
 tncd sits between an AGWPE client and a long external chain: the KISS transport
