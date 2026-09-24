@@ -2,6 +2,7 @@ package kiss
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,23 @@ type Port struct {
 	closed atomic.Bool
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	// demux is the reader loop's sole byte-stream decoder. It replaces a
+	// bare kiss.Decoder so that an attached rig-control consumer (see
+	// ControlChannel) can share the transport's RX stream safely -- see
+	// demux.go.
+	demux demux
+
+	// txMu serializes every write to tr: ordinary KISS TX (writerLoop, via
+	// txCh) and rig-control TX (ControlChannel's Write). Both share one
+	// physical link; without this, two goroutines could interleave bytes
+	// from two concurrent writes on the wire, corrupting whichever frame
+	// lost the race. See ControlChannel's doc comment for the accepted
+	// tradeoff this creates (a stuck control write can delay a pending KISS
+	// TX frame by as long as that write takes) -- symmetric with the
+	// pre-existing risk of one KISS write delaying another, not a new class
+	// of risk.
+	txMu sync.Mutex
 }
 
 // NewPort creates a Port that is not yet started.
@@ -94,15 +112,20 @@ func (p *Port) sendParams() {
 // data frames (cmd low nibble == 0) to onFrame. Non-data frames are dropped.
 func (p *Port) readerLoop() {
 	defer p.wg.Done()
-	var dec Decoder
 	var lastDropped uint64
 	buf := make([]byte, 4096)
 	for {
 		n, err := p.tr.Read(buf)
 		if n > 0 {
-			frames := dec.Feed(buf[:n])
-			if dec.DroppedOversize != lastDropped {
-				lastDropped = dec.DroppedOversize
+			// p.demux.Feed replaces a bare Decoder.Feed here so that bytes
+			// recognised as a Gaia/Benshi frame (leading 0xFF 0x01) are
+			// routed to any attached rig-control consumer instead of being
+			// handed to the KISS decoder. When no consumer is attached this
+			// is behaviourally identical to the old dec.Feed call -- see
+			// TestDemuxKISSOnlyPassthroughByteIdentical in demux_test.go.
+			frames := p.demux.Feed(buf[:n])
+			if p.demux.kissDec.DroppedOversize != lastDropped {
+				lastDropped = p.demux.kissDec.DroppedOversize
 				log.Printf("kiss: port %d dropped oversize (> %d bytes) frame from transport (total %d)",
 					p.num, MaxFrameSize, lastDropped)
 			}
@@ -155,7 +178,10 @@ func (p *Port) writerLoop() {
 	for {
 		select {
 		case frame := <-p.txCh:
-			if err := writeAll(p.tr, frame); err != nil {
+			p.txMu.Lock()
+			err := writeAll(p.tr, frame)
+			p.txMu.Unlock()
+			if err != nil {
 				log.Printf("kiss: port %d TX write failed (%v) -- taking port offline", p.num, err)
 				p.failTX()
 				return
@@ -252,4 +278,104 @@ func (p *Port) Close() {
 		// Just join the goroutines.
 	}
 	p.wg.Wait()
+}
+
+// ctrlRXQueue bounds how many Gaia frames may sit unread before the demux
+// starts dropping them (demux.deliverGaia's non-blocking send). Rig traffic
+// is request/response, one frame in flight at a time in normal use; this
+// only absorbs a consumer that briefly falls behind, not sustained load.
+const ctrlRXQueue = 16
+
+// ControlChannel returns a byte-duplex for rig control that shares this
+// Port's transport with the live KISS data path, safely: Read is fed by the
+// demultiplexer running inside the Port's own reader goroutine (demux.go),
+// so there is never a second reader racing the KISS decoder for bytes; Write
+// is serialized against KISS TX writes by txMu, so the two can never
+// interleave bytes on the wire.
+//
+// Only one control consumer may be attached at a time -- ErrControlChannelInUse
+// otherwise. This is deliberate, not a limitation to be lifted later: a
+// second concurrent consumer would have to share demux's single ctrl slot
+// somehow, and doing that safely is exactly the problem this type solves for
+// the KISS side, so it is enforced here rather than trusted to callers.
+func (p *Port) ControlChannel() (io.ReadWriteCloser, error) {
+	rx := make(chan []byte, ctrlRXQueue)
+	if !p.demux.attach(rx) {
+		return nil, ErrControlChannelInUse
+	}
+	return &portControlChannel{p: p, rx: rx, closed: make(chan struct{})}, nil
+}
+
+// portControlChannel is the io.ReadWriteCloser Port.ControlChannel hands
+// out. Read never touches the transport directly -- it only drains frames
+// the demux has already routed to rx. Write does touch the transport, under
+// txMu (see ControlChannel's doc comment).
+type portControlChannel struct {
+	p *Port
+
+	rx       chan []byte
+	leftover []byte // tail of a frame that did not fit the caller's buffer
+
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *portControlChannel) Read(b []byte) (int, error) {
+	if len(c.leftover) > 0 {
+		n := copy(b, c.leftover)
+		c.leftover = c.leftover[n:]
+		return n, nil
+	}
+	select {
+	case frame := <-c.rx:
+		n := copy(b, frame)
+		if n < len(frame) {
+			c.leftover = append([]byte(nil), frame[n:]...)
+		}
+		return n, nil
+	case <-c.closed:
+		return 0, io.EOF
+	case <-c.p.stopCh:
+		// The Port itself is tearing down (reader error, or Port.Close):
+		// nothing will ever feed rx again, so a Read blocked here must not
+		// hang forever waiting for a consumer-driven Close that may never
+		// come. This is what "the control channel closes with the port"
+		// (the design doc's link-ownership rule) means at this layer --
+		// without it, a caller like internal/rig's readLoop would leak a
+		// goroutine blocked on a dead port every time it goes offline.
+		return 0, io.EOF
+	}
+}
+
+// Write sends b (a caller-encoded Gaia frame) straight to the transport,
+// holding txMu for the duration so it cannot interleave with a concurrent
+// KISS TX write. It is synchronous -- it blocks until the underlying write
+// actually returns -- which internal/rig's request layer depends on for its
+// own write-phase timeout to mean anything.
+func (c *portControlChannel) Write(b []byte) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, fmt.Errorf("kiss: control channel closed")
+	case <-c.p.stopCh:
+		return 0, fmt.Errorf("kiss: port closed")
+	default:
+	}
+	c.p.txMu.Lock()
+	err := writeAll(c.p.tr, b)
+	c.p.txMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
+// Close detaches this channel from the demux and unblocks any pending Read.
+// It deliberately does not close rx or touch the transport: the Port, not
+// whoever asked for the control channel, owns the transport's lifetime.
+func (c *portControlChannel) Close() error {
+	c.closeOnce.Do(func() {
+		c.p.demux.detach(c.rx)
+		close(c.closed)
+	})
+	return nil
 }
