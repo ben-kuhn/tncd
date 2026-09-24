@@ -1,7 +1,11 @@
 package rigctl
 
 import (
+	"bufio"
+	"net"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/rig"
@@ -90,3 +94,102 @@ var errOpaque = errOpaqueType("boom")
 type errOpaqueType string
 
 func (e errOpaqueType) Error() string { return string(e) }
+
+// A typed nil (*fakeRig)(nil) satisfies Rig with a non-nil interface value --
+// the classic Go footgun. A plain "r == nil" check misses this, and the first
+// method call panics on a nil receiver. handleLine must catch it and answer
+// RPRT -6, the same as an untyped nil, not panic.
+func TestTypedNilRigAnswersIOInsteadOfPanicking(t *testing.T) {
+	var f *fakeRig // nil concrete pointer, non-nil Rig interface value
+	got := handleLine(`\get_freq`, f, config.RigCtl{PTTTimeout: 30}, &pttState{})
+	if got != "RPRT -6" {
+		t.Errorf("handleLine with typed-nil rig = %q, want RPRT -6", got)
+	}
+}
+
+// newTestServer builds a Server wired to a fake Rig, with idleTimeout
+// shrunk from the 30-minute default so idle tests don't take 30 real
+// minutes.
+func newTestServer(idleTimeout time.Duration) *Server {
+	s := New(config.RigCtl{PTTTimeout: 30}, func() (Rig, error) { return &fakeRig{}, nil })
+	s.idleTimeout = idleTimeout
+	return s
+}
+
+// A connection that sends nothing must be reaped, not parked forever --
+// that's the whole point of the idle timeout (leaked goroutines/fds in a
+// process that runs for the life of the service).
+func TestIdleConnectionIsClosed(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	s := newTestServer(20 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		s.handleConn(server)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// handleConn returned on its own -- the deadline fired.
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleConn did not return after the idle timeout")
+	}
+
+	client.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := client.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected a read error on the client side once the idle server closed its end")
+	}
+}
+
+// The idle timeout must not punish a client that is actually using the
+// connection -- PAT holds a rigctl session open between QSYs and issues
+// commands far less often than the real 30-minute default, but any client
+// polling faster than the (shrunk, for this test) idle timeout must survive.
+// This matters more than the reap case: a timeout that kills working
+// sessions is worse than the leak it's meant to fix.
+func TestActiveConnectionSurvivesIdleTimeout(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	s := newTestServer(30 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		s.handleConn(server)
+		close(done)
+	}()
+
+	reader := bufio.NewReader(client)
+	for i := 0; i < 5; i++ {
+		client.SetWriteDeadline(time.Now().Add(time.Second))
+		if _, err := client.Write([]byte("dump_caps\n")); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		client.SetReadDeadline(time.Now().Add(time.Second))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if got := strings.TrimSpace(line); got != "RPRT 0" {
+			t.Fatalf("reply %d = %q, want RPRT 0", i, got)
+		}
+		time.Sleep(15 * time.Millisecond) // less than idleTimeout, keeps the deadline refreshed
+	}
+
+	select {
+	case <-done:
+		t.Fatal("handleConn returned even though the client was actively issuing commands")
+	default:
+	}
+
+	client.SetWriteDeadline(time.Now().Add(time.Second))
+	if _, err := client.Write([]byte("q\n")); err != nil {
+		t.Fatalf("write q: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleConn did not return after q")
+	}
+}

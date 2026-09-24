@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,17 @@ import (
 	"github.com/ben-kuhn/tncd/v2/internal/netutil"
 	"github.com/ben-kuhn/tncd/v2/internal/rig"
 )
+
+// defaultIdleTimeout closes a rigctl connection that has sent no command in
+// this long. It exists only to reap abandoned connections -- a NAT that
+// silently dropped the FIN, a monitoring probe that connects and never
+// disconnects -- not to punish a legitimately idle client: a rigctl client
+// (PAT in particular) is idle most of the time by nature, holding the
+// connection open between QSYs for the life of a session. 30 minutes is far
+// longer than any realistic gap between hamlib polls (get_freq/get_ptt happen
+// on the order of seconds when they happen at all) while still bounding the
+// goroutine/fd leak from a connection nobody is using.
+const defaultIdleTimeout = 30 * time.Minute
 
 // hamlib rig_errcode_e values, negated on the wire as "RPRT -n". Pinned
 // against hamlib's include/hamlib/rig.h so PAT's rigctld client parses them
@@ -96,7 +108,7 @@ func handleLine(line string, r Rig, cfg config.RigCtl, st *pttState) string {
 		return rprtOK
 	}
 
-	if r == nil {
+	if rigIsNil(r) {
 		return rprtEIO
 	}
 
@@ -138,6 +150,28 @@ func handleLine(line string, r Rig, cfg config.RigCtl, st *pttState) string {
 	}
 }
 
+// rigIsNil reports whether r is nil, including the classic Go footgun where a
+// typed nil pointer (e.g. (*rig.Rig)(nil)) is wrapped in a non-nil Rig
+// interface value. A plain "r == nil" misses that case -- the interface
+// value itself is non-nil even though the concrete pointer it holds is --
+// and the first method call on it panics on a nil receiver. A future
+// provider that ever returns a typed nil instead of an untyped one (an easy
+// mistake: "return r, nil" when r is a *rig.Rig local variable that's still
+// nil) must not turn into a panic in the one listener that can retune, and
+// soon key, a transmitter.
+func rigIsNil(r Rig) bool {
+	if r == nil {
+		return true
+	}
+	v := reflect.ValueOf(r)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.Interface:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
 // handleSetPTT is a stub: PTT keying (gated behind AllowPTT, with a hard
 // maximum key time so a swallowed un-key over a wedged Bluetooth link can't
 // leave the transmitter stuck on) is a later task. Answering ENIMPL here is
@@ -158,6 +192,11 @@ type Server struct {
 	provider func() (Rig, error)
 	ptt      *pttState
 
+	// idleTimeout bounds how long a connection may go without sending a
+	// command; see defaultIdleTimeout. A field (not just the constant) so
+	// tests can shrink it instead of waiting 30 real minutes.
+	idleTimeout time.Duration
+
 	mu    sync.Mutex
 	ln    net.Listener
 	conns map[net.Conn]struct{}
@@ -166,7 +205,7 @@ type Server struct {
 // New creates a Server for one [rigctl.N] section. provider is called once
 // per request to resolve the live Rig for that port; it must not block.
 func New(cfg config.RigCtl, provider func() (Rig, error)) *Server {
-	return &Server{cfg: cfg, provider: provider, ptt: &pttState{}}
+	return &Server{cfg: cfg, provider: provider, ptt: &pttState{}, idleTimeout: defaultIdleTimeout}
 }
 
 // Start binds the listener, wraps it in the shared allowlist filter, and
@@ -250,12 +289,27 @@ func (s *Server) rig() Rig {
 // state), so a slow or wedged rigctl client can never stall packet on any
 // port. A rig request is resolved fresh via s.rig() and answered
 // synchronously by handleLine -- no work here ever touches the engine.
+//
+// The read deadline is refreshed before every line, not set once: that is
+// what makes it an IDLE timeout rather than a session-length cap. A client
+// issuing commands more often than idleTimeout (PAT's normal usage) never
+// trips it; a connection that goes silent -- abandoned, or a NAT that ate the
+// FIN -- gets reaped instead of parking its goroutine and fd for the life of
+// the process. This package deliberately has no dependency on
+// internal/engine, so a per-connection deadline stands in for the sibling
+// kisstcp frontend's engine-driven idle sweep.
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.untrackConn(conn)
 	defer conn.Close()
 
 	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(s.idleTimeout)); err != nil {
+			return
+		}
+		if !scanner.Scan() {
+			return
+		}
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "q" {
 			return // hamlib's Net rigctl "quit": close, no reply expected
