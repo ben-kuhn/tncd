@@ -17,6 +17,18 @@ import (
 // defer, both fire on their own goroutine) while the test goroutine polls
 // it, so it needs its own lock -- unlike the other fields here, which are
 // only ever written and read synchronously within a single test goroutine.
+//
+// SetPTT models TOGGLE semantics, not level semantics: it flips f.ptt on
+// every call and ignores the on argument entirely, exactly like the real
+// DO_PROG_FUNC(MAIN_PTT) command, which carries no press/release parameter
+// of its own (see (*rig.Rig).SetPTT's doc comment). An earlier version of
+// this fake stored the argument it was given ("f.ptt = on"), which let a
+// real bug -- handleSetPTT resending the same wire command while already
+// keyed, flipping the physical bit back off while st.keyed kept reading
+// true -- pass the entire suite: the fake reported whatever the code
+// claimed to have set, never what a toggle-based radio would actually do.
+// Assertions here must read the physical bit via keyed()/GetPTT, never
+// infer state from a request's argument or return value.
 type fakeRig struct {
 	hz      uint32
 	setErr  error
@@ -26,7 +38,7 @@ type fakeRig struct {
 
 	mu       sync.Mutex
 	ptt      bool
-	pttCalls int // counts actual SetPTT invocations, to prove a redundant release didn't re-send
+	pttCalls int // counts actual SetPTT invocations, to prove a redundant key/release didn't re-send
 }
 
 func (f *fakeRig) SetFreq(hz uint32) error  { f.setFreq = hz; return f.setErr }
@@ -34,7 +46,7 @@ func (f *fakeRig) GetFreq() (uint32, error) { return f.hz, f.getErr }
 
 func (f *fakeRig) SetPTT(on bool) error {
 	f.mu.Lock()
-	f.ptt = on
+	f.ptt = !f.ptt // toggle, ignoring on -- see the type doc comment
 	f.pttCalls++
 	f.mu.Unlock()
 	return f.pttErr
@@ -437,5 +449,140 @@ func TestServerCloseWithNothingKeyedDoesNotTouchRig(t *testing.T) {
 	}
 	if got := f.calls(); got != 0 {
 		t.Errorf("SetPTT called %d times, want 0 -- Close with nothing keyed must not touch the radio", got)
+	}
+}
+
+// --- Fix-round-1 regressions: double-key must never desync st.keyed from
+// the physical toggle bit, on any of the four ways a key can end. ---
+//
+// Root cause (reviewer-reproduced): handleSetPTT's "on" branch used to call
+// r.SetPTT(true) unconditionally, with no "already keyed" guard --
+// asymmetric with releaseLocked, which has always had the mirror-image
+// guard on the release side. Against a REAL toggle-semantics radio (see
+// fakeRig's doc comment) that meant: key (physical ON, st.keyed=true), key
+// again (physical toggles back OFF, st.keyed STAYS true because nothing
+// checked it), release (st.keyed true, so releaseLocked sends a THIRD
+// toggle -- physical back ON). Worse: every force-release backstop
+// (timeout, disconnect, Close) also trusts st.keyed and would have skipped
+// the radio entirely once it read false, so the safety net built to catch
+// a stuck key was itself disarmed by the same bug. keyLocked's
+// already-keyed guard (added in this fix round) closes this by never
+// re-sending the toggle for a second "on", so st.keyed and the physical bit
+// can no longer diverge in the first place.
+
+// (a) The exact reported sequence: key, key again, release. Ends unkeyed.
+func TestDoubleKeyThenReleaseEndsUnkeyed(t *testing.T) {
+	cfg := config.RigCtl{AllowPTT: true, PTTTimeout: 30}
+	f := &fakeRig{}
+	st := &pttState{}
+
+	if got := handleLine(`\set_ptt 1`, f, cfg, st); got != "RPRT 0" {
+		t.Fatalf("first key = %q, want RPRT 0", got)
+	}
+	if !f.keyed() {
+		t.Fatal("radio not keyed after the first set_ptt 1")
+	}
+	if got := handleLine(`\set_ptt 1`, f, cfg, st); got != "RPRT 0" {
+		t.Fatalf("second key = %q, want RPRT 0", got)
+	}
+	if !f.keyed() {
+		t.Fatal("radio physically unkeyed after a redundant set_ptt 1 -- the already-keyed guard did not suppress the resend")
+	}
+	if got := handleLine(`\set_ptt 0`, f, cfg, st); got != "RPRT 0" {
+		t.Fatalf("release = %q, want RPRT 0", got)
+	}
+	if f.keyed() {
+		t.Error("radio still physically keyed after release following a double-key")
+	}
+}
+
+// (b) Double-key, then let the PTTTimeout timer fire instead of an explicit
+// release. This is a backstop path: it must end unkeyed even though nobody
+// sent set_ptt 0.
+func TestDoubleKeyThenTimeoutEndsUnkeyed(t *testing.T) {
+	cfg := config.RigCtl{AllowPTT: true, PTTTimeout: 1}
+	f := &fakeRig{}
+	st := &pttState{}
+
+	handleLine(`\set_ptt 1`, f, cfg, st)
+	handleLine(`\set_ptt 1`, f, cfg, st)
+	if !f.keyed() {
+		t.Fatal("radio not keyed after double-key")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !f.keyed() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("transmitter still keyed after ptt_timeout elapsed following a double-key")
+}
+
+// (c) Double-key, then the client disconnects instead of releasing. Another
+// backstop path: must end unkeyed.
+func TestDoubleKeyThenDisconnectEndsUnkeyed(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	f := &fakeRig{}
+	s := New(config.RigCtl{AllowPTT: true, PTTTimeout: 30}, func() (Rig, error) { return f, nil })
+
+	done := make(chan struct{})
+	go func() {
+		s.handleConn(server)
+		close(done)
+	}()
+
+	reader := bufio.NewReader(client)
+	for i := 0; i < 2; i++ {
+		client.SetWriteDeadline(time.Now().Add(time.Second))
+		if _, err := client.Write([]byte("\\set_ptt 1\n")); err != nil {
+			t.Fatalf("write set_ptt 1 (%d): %v", i, err)
+		}
+		client.SetReadDeadline(time.Now().Add(time.Second))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read set_ptt reply (%d): %v", i, err)
+		}
+		if got := strings.TrimSpace(line); got != "RPRT 0" {
+			t.Fatalf("set_ptt 1 reply (%d) = %q, want RPRT 0", i, got)
+		}
+	}
+	if !f.keyed() {
+		t.Fatal("radio not keyed after double-key")
+	}
+
+	client.Close() // simulate a dropped connection: no set_ptt 0, no "q"
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleConn did not return after the client disconnected")
+	}
+
+	if f.keyed() {
+		t.Error("transmitter still keyed after a disconnect following a double-key")
+	}
+}
+
+// (d) Double-key, then the server is Closed (tncd shutting down) instead of
+// the client releasing. The last backstop path: must end unkeyed.
+func TestDoubleKeyThenServerCloseEndsUnkeyed(t *testing.T) {
+	f := &fakeRig{}
+	s := New(config.RigCtl{AllowPTT: true, PTTTimeout: 30}, func() (Rig, error) { return f, nil })
+
+	handleLine(`\set_ptt 1`, f, s.cfg, s.ptt)
+	handleLine(`\set_ptt 1`, f, s.cfg, s.ptt)
+	if !f.keyed() {
+		t.Fatal("radio not keyed after double-key")
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if f.keyed() {
+		t.Error("transmitter still keyed after Close following a double-key")
 	}
 }

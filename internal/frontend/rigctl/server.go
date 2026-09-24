@@ -65,6 +65,19 @@ type pttState struct {
 	mu    sync.Mutex
 	timer *time.Timer
 	keyed bool
+	// gen is bumped every time the safety timer is (re)armed. A timer
+	// callback captures the gen it was armed with and checks it against the
+	// current value before acting -- see armTimerLocked and timeoutFire.
+	// This is what makes "refresh the timer without resending the key"
+	// safe: Stop-then-Reset (or Stop-then-new-AfterFunc without a
+	// generation check) cannot distinguish "I successfully cancelled the
+	// old timer" from "the old timer already fired and its goroutine is
+	// merely blocked behind me on st.mu" -- in the second case a naive
+	// refresh would still let the stale callback run afterward and release
+	// a key that a newer refresh just extended. The generation check closes
+	// that window without needing to drain a channel or otherwise reason
+	// about time.Timer's notoriously fiddly Stop/Reset semantics.
+	gen uint64
 }
 
 // errToRPRT maps a rig error onto the hamlib code a client expects.
@@ -181,6 +194,29 @@ func rigIsNil(r Rig) bool {
 // transmitter, and that failure mode is known to occur on these radios.
 // PTTTimeout's timer, wired here, is the backstop for that -- it does not
 // depend on the client ever sending another command.
+//
+// RESIDUAL DRIFT RISK, for an operator deciding whether to set allow_ptt:
+// this code does NOT read GetPTT() back after a key or unkey to confirm the
+// physical bit actually followed. That was considered and rejected, not
+// overlooked. A verification read is (*rig.Rig).GetPTT, which is just
+// another round trip over request() on the SAME transport as the SetPTT it
+// would be checking -- so the one failure mode this whole design exists to
+// guard against (a wedged Bluetooth link that silently eats a write) is
+// exactly as capable of silently eating, delaying, or stale-answering the
+// verification read. A mismatch wouldn't be actionable either: since
+// DO_PROG_FUNC toggles rather than sets (see (*rig.Rig).SetPTT), the only
+// automatic response to "GetPTT disagrees with what I expected" would be to
+// send another toggle -- which is just as likely to compound the drift as
+// fix it, given no bench evidence pins down the timing or reliability of
+// GET_HT_STATUS's is_in_tx bit relative to a DO_PROG_FUNC that was just
+// sent. And PTTTimeout already bounds the worst case: whatever the physical
+// state actually is, it is force-released within cfg.PTTTimeout regardless
+// of what st.keyed believes, so an added round trip would buy confidence at
+// the cost of latency on every key, without changing the outer bound on how
+// long a stuck key can last. Net: st.keyed is tncd's best BELIEF about
+// physical state, kept internally consistent by the keyLocked/releaseLocked
+// guards, but it is never a bench-verified GUARANTEE, and nothing in this
+// package closes that gap synchronously. The timer is the actual guarantee.
 func handleSetPTT(args []string, r Rig, cfg config.RigCtl, st *pttState) string {
 	if !cfg.AllowPTT {
 		return rprtENIMPL
@@ -204,17 +240,74 @@ func handleSetPTT(args []string, r Rig, cfg config.RigCtl, st *pttState) string 
 	if !on {
 		return errToRPRT(releaseLocked(r, st))
 	}
+	return errToRPRT(keyLocked(r, st, time.Duration(cfg.PTTTimeout)*time.Second))
+}
 
-	if err := r.SetPTT(true); err != nil {
-		return errToRPRT(err)
+// keyLocked sends the key command -- but only if not already keyed -- and
+// (re)arms the safety timer. Must be called with st.mu held.
+//
+// The already-keyed guard mirrors releaseLocked's guard in the opposite
+// direction, and for the identical underlying reason: st.keyed only means
+// anything if it actually tracks the radio's physical state, and that
+// invariant has to be maintained on BOTH the key and release paths, not
+// just the release side -- an invariant enforced on only one of two paths
+// that mutate it is not an invariant at all. DO_PROG_FUNC carries no
+// press/release parameter (see (*rig.Rig).SetPTT), so PFEffectMainPTT
+// toggles a single physical bit on every call regardless of the argument:
+// resending it while already keyed flips the transmitter back OFF on the
+// wire while st.keyed keeps reading true. That divergence alone would just
+// be a spurious unkey -- except every force-release path (the PTTTimeout
+// timer, a client disconnect, Server.Close) trusts st.keyed and skips the
+// radio once it reads false, so a diverged st.keyed doesn't just misreport
+// state, it disarms the safety net that exists specifically to catch a
+// stuck key. Confirmed by reproduction: key, key again (toggles OFF on the
+// wire; st.keyed stays true because the old code never checked it), release
+// (st.keyed still true, so the old releaseLocked sent ANOTHER toggle, which
+// flipped the radio back ON) -- left the radio transmitting with every
+// piece of tncd's own bookkeeping insisting it was not. This guard is what
+// keeps a second "key" from ever creating that divergence in the first
+// place: it is a no-op on the radio, and only refreshes the timer.
+func keyLocked(r Rig, st *pttState, timeout time.Duration) error {
+	if !st.keyed {
+		if err := r.SetPTT(true); err != nil {
+			return err
+		}
+		st.keyed = true
 	}
-	st.keyed = true
+	armTimerLocked(r, st, timeout)
+	return nil
+}
+
+// armTimerLocked stops any existing timer and starts a fresh one, bumping
+// st.gen so a callback from the timer it just replaced can recognize itself
+// as stale (see pttState.gen) instead of firing a release that belongs to a
+// generation that no longer exists. Must be called with st.mu held.
+func armTimerLocked(r Rig, st *pttState, timeout time.Duration) {
 	if st.timer != nil {
 		st.timer.Stop()
 	}
-	timeout := time.Duration(cfg.PTTTimeout) * time.Second
-	st.timer = time.AfterFunc(timeout, func() { forceReleasePTT(r, st) })
-	return rprtOK
+	st.gen++
+	gen := st.gen
+	st.timer = time.AfterFunc(timeout, func() { timeoutFire(r, st, gen) })
+}
+
+// timeoutFire is the PTTTimeout timer's callback. It first confirms -- under
+// st.mu, atomically with the release itself, so there is no gap for a
+// concurrent re-arm to slip through -- that no newer key/refresh has
+// superseded it (see pttState.gen) before releasing. A stale generation
+// means a later keyLocked call already re-armed a new timer that owns the
+// next release; this one has nothing left to do.
+func timeoutFire(r Rig, st *pttState, gen uint64) {
+	st.mu.Lock()
+	if st.gen != gen {
+		st.mu.Unlock()
+		return
+	}
+	err := releaseLocked(r, st)
+	st.mu.Unlock()
+	if err != nil {
+		log.Printf("rigctl: PTT timeout force-release failed -- transmitter may still be keyed: %v", err)
+	}
 }
 
 // releaseLocked sends the un-key command and clears the keyed/timer state.
@@ -244,11 +337,14 @@ func releaseLocked(r Rig, st *pttState) error {
 	return r.SetPTT(false)
 }
 
-// forceReleasePTT is releaseLocked for the three callers that don't already
-// hold st.mu and have no RPRT reply to give anyone: the PTTTimeout timer
-// firing, a client disconnecting while keyed, and the server closing while
-// keyed. Wiring all three is the point of this task -- a keyed transmitter
-// must not survive any of them.
+// forceReleasePTT is releaseLocked for the two callers that don't already
+// hold st.mu, aren't tied to a specific timer generation, and have no RPRT
+// reply to give anyone: a client disconnecting while keyed, and the server
+// closing while keyed. (The third force-release path, the PTTTimeout timer
+// itself, goes through timeoutFire instead, which additionally checks
+// pttState.gen before calling releaseLocked -- see its doc comment for
+// why.) Wiring all three paths is the point of this task -- a keyed
+// transmitter must not survive any of them.
 //
 // This is best-effort, not a guarantee. CLAUDE.md documents a bench-confirmed
 // failure mode where a wedged Bluetooth link accepts a write and never
