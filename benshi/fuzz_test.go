@@ -67,7 +67,7 @@ func FuzzDecodeMessage(f *testing.F) {
 // added them didn't call one out.
 func FuzzDecodeFreqMode(f *testing.F) {
 	f.Add([]byte{0x00, 0x09, 0xB0, 0x50, 0xF0}) // valid FREQ_MODE_GET_STATUS reply
-	f.Add([]byte{ // valid notification 14
+	f.Add([]byte{                               // valid notification 14
 		14,
 		0x08, 0xA4, 0xFB, 0x70,
 		0x08, 0xA4, 0xFB, 0x70,
