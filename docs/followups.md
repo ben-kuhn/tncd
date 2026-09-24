@@ -74,9 +74,20 @@ the two apart and only fail on an actual crasher, or move fuzzing to a scheduled
 than per-push, keeping the seed-corpus regression tests (which are deterministic and fast) in
 the per-push job.
 
+### 5. `kiss.Port.ControlChannel()` does not validate the radio speaks Benshi
+Enabling `[rigctl.N]` on a port whose radio is not a Benshi device binds a listener that
+accepts clients and answers `RPRT -5` (timeout) to every command, rather than failing at
+startup with a clear message. The operator sees a working-looking listener and a rig that
+never responds.
+
+A startup probe (`GET_DEV_INFO`, which we know the radio answers) would let tncd refuse or
+warn at config time. Deferred because it needs a decision about whether a non-answering
+radio should be a hard config error — which would break startup for anyone who enables the
+key optimistically — or a logged warning.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
-### 5. The UV-PRO's TNC wedges after heavy connect/disconnect churn
+### 6. The UV-PRO's TNC wedges after heavy connect/disconnect churn
 Reproducible: after dozens of Bluetooth connect/disconnect cycles, KISS frames stop reaching
 the air while everything still reports healthy — port online, writes succeed, `tx` counter
 climbing. A power-cycle clears it. Independent of tncd; confirmed by reproducing the failure
@@ -85,7 +96,7 @@ with tncd's own unmodified AGWPE path after it had worked minutes earlier.
 Belongs in the OTA checklist: **if KISS goes silent after repeated reconnects, power-cycle
 the radio before debugging tncd.**
 
-### 6. BLE KISS does not pass traffic on the UV-PRO
+### 7. BLE KISS does not pass traffic on the UV-PRO
 With a genuine LE link (MTU negotiated 155, GATT resolved, notifications subscribed), writes
 to the BLE KISS characteristic either time out (write-with-response) or succeed and vanish
 (write-without-response), and nothing is ever received. The service is advertised and
@@ -106,13 +117,13 @@ must branch from a main that contains `e8c4b31` — the rig-control feature bran
 from the older main and does NOT have it. Merge main in first rather than cherry-picking,
 to keep the history clean.
 
-### 7. The Mobilinkd TNC4's pairing was removed and did not re-pair
+### 8. The Mobilinkd TNC4's pairing was removed and did not re-pair
 Its bond was deleted host-side during BLE investigation; re-pairing reports success but
 stores no key (`Paired: yes, Bonded: no`), so it works over neither classic nor LE. The
 device still holds its half of the old bond. Try a power-cycle first, then whatever reset
 Mobilinkd provides.
 
-### 8. PipeWire's ALSA plugin will not negotiate
+### 9. PipeWire's ALSA plugin will not negotiate
 `arecord -D pipewire` and `-D default` both fail at every rate and channel count, so Dire
 Wolf cannot use PipeWire and must grab the Digirig directly via `plughw`, which prevents any
 other application from sharing that audio interface. The running daemon reports libpipewire
