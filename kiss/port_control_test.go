@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,6 +91,123 @@ func TestPortControlChannelWriteReachesTransport(t *testing.T) {
 	}
 	if err := <-writeErr; err != nil {
 		t.Fatalf("Write returned error: %v", err)
+	}
+}
+
+// blockingWriteTransport's Write blocks forever until unblock is closed,
+// simulating a wedged Bluetooth socket with no write deadline -- the exact
+// failure mode ctrlWriteTimeout exists to bound (kiss/bluetooth_linux.go has
+// no SetWriteDeadline call at all).
+type blockingWriteTransport struct {
+	idleTransport
+	unblock    chan struct{}
+	writeCount atomic.Int32
+}
+
+func newBlockingWriteTransport() *blockingWriteTransport {
+	return &blockingWriteTransport{
+		idleTransport: *newIdleTransport(0),
+		unblock:       make(chan struct{}),
+	}
+}
+
+func (w *blockingWriteTransport) Write(b []byte) (int, error) {
+	w.writeCount.Add(1)
+	<-w.unblock
+	return len(b), nil
+}
+
+// TestPortControlChannelWriteTimeoutFailsPortCleanly is the regression test
+// for the Critical finding: a control write on a transport with no write
+// deadline must not be able to freeze the shared KISS TX path indefinitely.
+//
+// It proves the whole chain the fix relies on: Write itself returns (does
+// not hang past ctrlWriteTimeout even though the underlying transport never
+// returns), the port is failed as a consequence (onOffline fires, Online()
+// goes false), a KISS Send afterward does not block, and -- the sharpest
+// edge -- Port.Close() returns promptly even though the abandoned write
+// goroutine is, and remains, permanently blocked inside Write for the rest
+// of the test. That last property is the one a plain sync.Mutex could not
+// have given: it is what proves writerLoop gave up on the tx slot instead
+// of piling up behind it.
+func TestPortControlChannelWriteTimeoutFailsPortCleanly(t *testing.T) {
+	orig := ctrlWriteTimeout
+	ctrlWriteTimeout = 50 * time.Millisecond
+	defer func() { ctrlWriteTimeout = orig }()
+
+	tr := newBlockingWriteTransport()
+	defer close(tr.unblock) // let the permanently-blocked goroutine finish so it doesn't leak past the test
+
+	off := make(chan int, 1)
+	p := NewPort(0, tr, Params{}, func(RXFrame) {}, func(n int) { off <- n })
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cc, err := p.ControlChannel()
+	if err != nil {
+		t.Fatalf("ControlChannel: %v", err)
+	}
+
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := cc.Write([]byte{0xFF, 0x01, 0x00, 0x00})
+		writeErr <- err
+	}()
+
+	select {
+	case err := <-writeErr:
+		if err == nil {
+			t.Fatal("control Write returned nil error against a permanently blocked transport")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("control Write did not return within the timeout budget -- it must not hang on a wedged transport")
+	}
+
+	// A consequence of the timeout: the port must have failed, not just this
+	// one call.
+	select {
+	case n := <-off:
+		if n != 0 {
+			t.Fatalf("offline port = %d, want 0", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("control write timeout never triggered failTX (port did not go offline)")
+	}
+	if p.Online() {
+		t.Fatal("port still reports Online after a control write timeout")
+	}
+
+	// A KISS Send after the port has failed must not block -- Send's own
+	// select is already non-blocking, but this also exercises writerLoop
+	// having already exited (via acquireTxSem observing the now-closed
+	// stopCh) rather than being stuck behind the permanently-held tx slot.
+	sendDone := make(chan struct{})
+	go func() {
+		p.Send([]byte("after timeout"))
+		close(sendDone)
+	}()
+	select {
+	case <-sendDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send blocked after the port failed")
+	}
+
+	// The sharpest check: Close() must return promptly even though the
+	// abandoned write goroutine above is STILL blocked (tr.unblock has not
+	// been closed yet -- that only happens in this test's own deferred
+	// cleanup, after this assertion). A plain sync.Mutex held by that
+	// goroutine forever would make writerLoop's next Lock() -- and thus
+	// wg.Wait() inside Close() -- hang forever too.
+	closeDone := make(chan struct{})
+	go func() {
+		p.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Port.Close() hung after a control write timeout -- txSem was not correctly abandoned")
 	}
 }
 

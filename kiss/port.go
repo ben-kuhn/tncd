@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const txQueueSize = 64
@@ -31,16 +32,23 @@ type Port struct {
 	// demux.go.
 	demux demux
 
-	// txMu serializes every write to tr: ordinary KISS TX (writerLoop, via
+	// txSem serializes every write to tr: ordinary KISS TX (writerLoop, via
 	// txCh) and rig-control TX (ControlChannel's Write). Both share one
 	// physical link; without this, two goroutines could interleave bytes
 	// from two concurrent writes on the wire, corrupting whichever frame
-	// lost the race. See ControlChannel's doc comment for the accepted
-	// tradeoff this creates (a stuck control write can delay a pending KISS
-	// TX frame by as long as that write takes) -- symmetric with the
-	// pre-existing risk of one KISS write delaying another, not a new class
-	// of risk.
-	txMu sync.Mutex
+	// lost the race.
+	//
+	// A buffered channel, not a sync.Mutex: acquiring it must be abortable
+	// via stopCh (see acquireTxSem). A control write has no way to bound the
+	// underlying transport's blocking Write call on every platform (Linux
+	// Bluetooth has no write deadline -- see ctrlWriteTimeout), so a wedged
+	// control write can end up holding this slot forever. With a plain
+	// Mutex, writerLoop's next Lock() would then hang forever too, and
+	// Port.Close's wg.Wait() would hang waiting for writerLoop -- a total
+	// port brick reachable just by querying rig status, with no packet in
+	// flight. acquireTxSem lets writerLoop (and any later control write)
+	// give up cleanly once the port is torn down instead.
+	txSem chan struct{}
 }
 
 // NewPort creates a Port that is not yet started.
@@ -54,7 +62,28 @@ func NewPort(num int, tr Transport, params Params,
 		onOffline: onOffline,
 		txCh:      make(chan []byte, txQueueSize),
 		stopCh:    make(chan struct{}),
+		txSem:     make(chan struct{}, 1),
 	}
+}
+
+// acquireTxSem blocks until the transport write slot is free, or the port
+// tears down (stopCh closes) -- whichever comes first. Returns false in the
+// latter case, meaning "give up, do not touch the transport": the slot may
+// be held forever by an abandoned, wedged control write (see
+// portControlChannel.Write), and a caller that kept blocking on it would
+// itself hang forever, defeating the whole point of tearing the port down.
+func (p *Port) acquireTxSem() bool {
+	select {
+	case p.txSem <- struct{}{}:
+		return true
+	case <-p.stopCh:
+		return false
+	}
+}
+
+// releaseTxSem frees the transport write slot.
+func (p *Port) releaseTxSem() {
+	<-p.txSem
 }
 
 // Start opens the transport, enters KISS mode, sends params, and spawns
@@ -178,9 +207,14 @@ func (p *Port) writerLoop() {
 	for {
 		select {
 		case frame := <-p.txCh:
-			p.txMu.Lock()
+			if !p.acquireTxSem() {
+				// Port is tearing down -- e.g. a wedged control write already
+				// poisoned it via failTX (see portControlChannel.Write). Give
+				// up without blocking on a slot that may never free.
+				return
+			}
 			err := writeAll(p.tr, frame)
-			p.txMu.Unlock()
+			p.releaseTxSem()
 			if err != nil {
 				log.Printf("kiss: port %d TX write failed (%v) -- taking port offline", p.num, err)
 				p.failTX()
@@ -290,8 +324,10 @@ const ctrlRXQueue = 16
 // Port's transport with the live KISS data path, safely: Read is fed by the
 // demultiplexer running inside the Port's own reader goroutine (demux.go),
 // so there is never a second reader racing the KISS decoder for bytes; Write
-// is serialized against KISS TX writes by txMu, so the two can never
-// interleave bytes on the wire.
+// is serialized against KISS TX writes by txSem, so the two can never
+// interleave bytes on the wire, and is bounded by ctrlWriteTimeout so a
+// wedged transport cannot freeze KISS TX indefinitely -- see Write's doc
+// comment for why a timeout alone is not enough and what happens instead.
 //
 // Only one control consumer may be attached at a time -- ErrControlChannelInUse
 // otherwise. This is deliberate, not a limitation to be lifted later: a
@@ -347,11 +383,45 @@ func (c *portControlChannel) Read(b []byte) (int, error) {
 	}
 }
 
+// ctrlWriteTimeout bounds how long a control write may occupy the transport
+// before the port gives up on it and fails. Not every transport this
+// package supports has a write deadline: kiss/bluetooth_linux.go writes to a
+// raw *os.File with no SetWriteDeadline anywhere in that file, and
+// checkTXDrain's queue-depth stall detector only samples BEFORE a write, so
+// it cannot abort one already blocked inside the syscall. Without a bound
+// here, a wedged radio turns "query rig status" into an indefinite freeze of
+// the shared KISS TX path -- worse, one with no packet in flight to make it
+// obviously symptomatic. 10s matches btSendTimeout, the equivalent bound
+// bluetooth_windows.go already places on a single SPP send via SO_SNDTIMEO.
+//
+// A var, not a const, solely so tests can shorten it rather than waiting out
+// the real 10s -- see TestPortControlChannelWriteTimeoutFailsPortCleanly.
+var ctrlWriteTimeout = 10 * time.Second
+
 // Write sends b (a caller-encoded Gaia frame) straight to the transport,
-// holding txMu for the duration so it cannot interleave with a concurrent
-// KISS TX write. It is synchronous -- it blocks until the underlying write
-// actually returns -- which internal/rig's request layer depends on for its
-// own write-phase timeout to mean anything.
+// holding the tx slot for the duration so it cannot interleave with a
+// concurrent KISS TX write. It is synchronous -- it blocks until the
+// underlying write actually returns or ctrlWriteTimeout elapses -- which
+// internal/rig's request layer depends on for its own write-phase timeout to
+// mean anything.
+//
+// The write itself runs in a separate goroutine so this call can give up at
+// the deadline without waiting for a transport that may never return. That
+// goroutine is deliberately NOT abandoned to run and vanish, the way a
+// simple "release the lock either way" scheme would: if Write released the
+// tx slot on timeout, a subsequent KISS write could start immediately, and
+// the abandoned write could then land on the wire at any later, unbounded
+// time -- interleaving its bytes with that KISS frame, exactly the
+// corruption the tx slot exists to prevent. So on timeout the slot is left
+// held (releaseTxSem is only ever called by the goroutine that did the
+// write, whenever -- if ever -- it returns) and the port is poisoned via
+// failTX instead of retried: the byte stream's state is now unknown, so
+// discarding it and reconnecting is the only safe recovery, mirroring the
+// same conclusion internal/rig's own write-phase timeout already reached one
+// layer up (see internal/rig's request doc comment). failTX unblocks
+// writerLoop (acquireTxSem observes stopCh and gives up rather than piling
+// up behind the held slot) and hands off to the bridge's existing reconnect
+// path -- recovery this change reuses rather than invents.
 func (c *portControlChannel) Write(b []byte) (int, error) {
 	select {
 	case <-c.closed:
@@ -360,13 +430,32 @@ func (c *portControlChannel) Write(b []byte) (int, error) {
 		return 0, fmt.Errorf("kiss: port closed")
 	default:
 	}
-	c.p.txMu.Lock()
-	err := writeAll(c.p.tr, b)
-	c.p.txMu.Unlock()
-	if err != nil {
-		return 0, err
+	if !c.p.acquireTxSem() {
+		return 0, fmt.Errorf("kiss: port closed")
 	}
-	return len(b), nil
+
+	result := make(chan error, 1) // buffered: the goroutine must never block trying to report to an abandoned caller
+	go func() {
+		result <- writeAll(c.p.tr, b)
+		c.p.releaseTxSem()
+	}()
+
+	timer := time.NewTimer(ctrlWriteTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		if err != nil {
+			return 0, err
+		}
+		return len(b), nil
+	case <-timer.C:
+		log.Printf("kiss: port %d control write did not complete within %s -- failing port (transport state unknown)",
+			c.p.num, ctrlWriteTimeout)
+		c.p.failTX()
+		return 0, fmt.Errorf("kiss: control write timed out after %s -- port failed", ctrlWriteTimeout)
+	case <-c.p.stopCh:
+		return 0, fmt.Errorf("kiss: port closed")
+	}
 }
 
 // Close detaches this channel from the demux and unblocks any pending Read.
