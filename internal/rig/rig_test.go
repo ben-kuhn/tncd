@@ -2,6 +2,7 @@ package rig
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"sync"
@@ -128,13 +129,30 @@ func TestRequestTimesOut(t *testing.T) {
 	}
 }
 
-// Teardown must send the documented all-zero payload.
-func TestTeardownSendsAllZeroPayload(t *testing.T) {
+// Teardown must restore the frequency read from the current channel's
+// stored record, NOT send the documented all-zero FREQ_MODE_SET_PAR payload.
+// Live UV-PRO testing showed that payload does not exit frequency mode as
+// benshi.TeardownPayload's old doc comment (and the upstream spec) claimed --
+// the radio takes it literally as "tune to 0 Hz" and clamps to 136.000 MHz,
+// the bottom of its VHF range, silently relocating the operator's radio to
+// the band edge. A test asserting the all-zero payload would be asserting
+// that broken behavior, so there is deliberately no such test here any more.
+func TestTeardownRestoresChannelFrequency(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second)
 	defer r.Close()
 
 	go func() {
+		time.Sleep(10 * time.Millisecond)
+		// Captured live: GET_HT_STATUS (StatusExt) -> channel 252.
+		ch.reply(benshi.CmdGetHTStatus, []byte{0x00, 0x80, 0xC1, 0x00, 0x3C})
+		time.Sleep(10 * time.Millisecond)
+		// Captured live: READ_RF_CH(252) -> 145.670 MHz.
+		ch.reply(benshi.CmdReadRFCh, []byte{
+			0x00, 0xFC, 0x08, 0xAE, 0xBF, 0x70, 0x08, 0xAE, 0xBF, 0x70,
+			0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		})
 		time.Sleep(10 * time.Millisecond)
 		ch.reply(benshi.CmdFreqModeSetPar, []byte{0x00})
 	}()
@@ -142,12 +160,34 @@ func TestTeardownSendsAllZeroPayload(t *testing.T) {
 	if err := r.Teardown(); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
+
 	w := ch.writes()
-	m, _ := benshi.DecodeMessage(w[0][4:])
-	for i, b := range m.Body {
+	if len(w) != 3 {
+		t.Fatalf("wrote %d frames, want 3 (GET_HT_STATUS, READ_RF_CH, FREQ_MODE_SET_PAR)", len(w))
+	}
+	m, err := benshi.DecodeMessage(w[2][4:])
+	if err != nil {
+		t.Fatalf("DecodeMessage: %v", err)
+	}
+	if m.Command != benshi.CmdFreqModeSetPar {
+		t.Fatalf("final command = %d, want CmdFreqModeSetPar", m.Command)
+	}
+	if len(m.Body) != 16 {
+		t.Fatalf("body length = %d, want 16", len(m.Body))
+	}
+	allZero := true
+	for _, b := range m.Body {
 		if b != 0 {
-			t.Fatalf("teardown body byte %d = %#x, want 0", i, b)
+			allZero = false
+			break
 		}
+	}
+	if allZero {
+		t.Fatal("Teardown sent an all-zero payload -- on real firmware this clamps the radio to 136.000 MHz instead of restoring the channel frequency")
+	}
+	gotHz := binary.BigEndian.Uint32(m.Body[0:4]) & 0x3FFFFFFF
+	if gotHz != 145670000 {
+		t.Errorf("Teardown set frequency = %d, want 145670000 (the channel's stored frequency)", gotHz)
 	}
 }
 

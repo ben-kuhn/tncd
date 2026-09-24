@@ -3,6 +3,12 @@
 // Everything here runs OFF the engine goroutine. A Benshi command is a
 // round-trip to the radio with a timeout, and the engine owns all L2 state, so
 // blocking it would stall AX.25 on every port for the duration.
+//
+// This package does not restore the radio's original frequency when a
+// session ends unless a caller explicitly asks it to (see (*Rig).Teardown).
+// hamlib sets no precedent for doing so automatically either: rigctld leaves
+// a radio wherever it was last tuned on disconnect, so "restore on exit" was
+// never a requirement here, and this package does not fake one.
 package rig
 
 import (
@@ -168,10 +174,35 @@ func (r *Rig) GetFreq() (uint32, error) {
 	return r.channelFreq(id)
 }
 
-// Teardown drops the radio out of frequency mode, restoring its channel state.
+// Teardown restores the radio to the frequency its currently selected
+// channel would have tuned, undoing this session's QSY(s).
+//
+// This is NOT what the name might suggest from the Benshi spec: the
+// documented all-zero FREQ_MODE_SET_PAR payload (benshi.TeardownPayload)
+// claims to drop the radio out of frequency mode, but live UV-PRO testing
+// showed that claim is false for real firmware -- the radio takes the
+// all-zero payload literally as "tune to 0 Hz" and clamps to 136.000 MHz,
+// the bottom of its VHF range, silently relocating the operator's radio to
+// the band edge instead of exiting frequency mode. This package never sends
+// that payload.
+//
+// Instead, Teardown reads the frequency the radio's own channel record
+// reports (via currChannel + channelFreq) and sets the VFO to match. That
+// record is proven stable across a full QSY-and-Teardown cycle on
+// hardware -- this package never writes it -- so this is an honest "put the
+// VFO back where the channel says it belongs", not the spec's fictional
+// "exit the mode". The radio is left in frequency mode, tuned to that
+// value, since a genuine exit does not appear to be available.
 func (r *Rig) Teardown() error {
-	_, err := r.request(benshi.CmdFreqModeSetPar, benshi.TeardownPayload())
-	return err
+	id, err := r.currChannel()
+	if err != nil {
+		return err
+	}
+	hz, err := r.channelFreq(id)
+	if err != nil {
+		return err
+	}
+	return r.SetFreq(hz)
 }
 
 // htStatusTXBit is is_in_tx within the first Status byte. Status packs, MSB

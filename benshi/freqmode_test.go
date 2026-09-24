@@ -37,7 +37,10 @@ func TestFreqModeParamsModulationBits(t *testing.T) {
 	}
 }
 
-// The documented teardown is an all-zero payload, step included.
+// This only tests the byte encoding, which is correct for what
+// TeardownPayload claims to be (the documented all-zero payload). See its
+// doc comment: on real hardware this payload does not do what the name
+// implies, which is why internal/rig no longer sends it.
 func TestTeardownPayloadIsAllZero(t *testing.T) {
 	got := TeardownPayload()
 	if len(got) != 16 {

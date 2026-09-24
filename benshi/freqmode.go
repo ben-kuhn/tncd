@@ -67,8 +67,18 @@ func (p FreqModeParams) Payload() []byte {
 	return out
 }
 
-// TeardownPayload is the documented all-zero FREQ_MODE_SET_PAR body: it drops
-// the radio out of frequency mode and restores its normal channel state.
+// TeardownPayload is the documented all-zero FREQ_MODE_SET_PAR body.
+//
+// WARNING: on real UV-PRO firmware this does NOT drop the radio out of
+// frequency mode as documented (the claim traces to HTCommander, which sends
+// exactly this and nothing more -- so the documentation is wrong, not this
+// encoding). Live capture: sending this payload took a radio parked at
+// 145.670 MHz and clamped it to 0x081B3200 = 136000000 Hz, the bottom of its
+// VHF tuning range, while remaining in frequency mode the whole time. Do not
+// send this expecting to exit frequency mode or restore channel state --
+// nothing in this package does that. internal/rig's Rig.Teardown restores by
+// reading the current channel's stored frequency and setting the VFO to
+// match instead of sending this payload.
 func TeardownPayload() []byte { return make([]byte, freqModePayloadLen) }
 
 // DecodeFreqModeStatus parses a FREQ_MODE_GET_STATUS reply body:
