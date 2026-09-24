@@ -4,6 +4,48 @@
 **Branch**: `feature/benshi-rig-control`
 **Status**: design approved, implementation not started
 
+## Corrections (2026-09-24, post-hardware-validation)
+
+This spec was written before any of it touched a real radio. Hardware
+testing against a real BTech UV-PRO disproved three parts of the design
+below. They are left in place, unedited, because the reasoning that led to
+them is informative — but they are **wrong as shipped**, and the corrected
+behavior is what actually shipped. Do not implement or document against the
+sections these point at without reading this first.
+
+1. **There is no second RFCOMM channel / BS AOC control channel.** The
+   "Contention worry dissolves" section and Component A below describe a
+   `ControlChannel` reached over a *separate* connection — a second GATT
+   service on BLE, a second RFCOMM socket pinned by a `control_channel = N`
+   port key on classic Bluetooth. That design was built, then disproven on
+   hardware: the Benshi command protocol (Gaia framing, `0xFF 0x01` leading
+   bytes) is served on the **same** RFCOMM/BLE link as KISS (`0xC0` leading
+   bytes), demultiplexed by those leading bytes, not by a second connection.
+   Verified live: KISS → Gaia → KISS interleaved cleanly on one link, with
+   both KISS frames confirmed on the air. `config.Port.ControlChannel` /
+   `control_channel` as an INI key **do not exist** in the shipped code —
+   `kiss.ControlChannel()` shares the transport tncd already has open (see
+   `kiss/control.go`, `kiss/port.go`). Ignore the "Classic RFCOMM (all
+   platforms)" paragraph and the `control_channel = 2` example under
+   Configuration below; they describe the abandoned design.
+2. **The all-zero `FREQ_MODE_SET_PAR` teardown does not work as documented.**
+   Component C claims an all-zero payload "drops the radio out of VFO mode
+   and restores its normal channel state." On real firmware it does not: the
+   radio clamps to 136.000 MHz (the bottom of its tuning range) and **stays**
+   in frequency mode. `(*rig.Rig).Teardown` was reimplemented to read the
+   active channel's stored frequency (via `READ_SETTINGS` + `READ_RF_CH`) and
+   set that back explicitly, rather than relying on any documented "exit VFO
+   mode" behavior — there isn't one. See `internal/rig/rig.go`.
+3. **QSY never touches a memory channel, confirmed, not just intended.** The
+   "never writes a stored memory channel" goal held up: the channel record
+   read identically before, during, and after a full QSY-and-teardown cycle
+   on real hardware. This one was validated as designed — noted here only so
+   it isn't mistaken for another casualty of the corrections above.
+
+Everything else below — the codec, `FREQ_MODE_GET_STATUS`/notification 14
+semantics, the rigctl command surface and error codes, and the PTT toggle
+risk analysis — held up on the bench and is accurate as written.
+
 ## Purpose
 
 Give tncd an optional, user-facing rig-control module for Benshi-protocol
@@ -100,6 +142,13 @@ an additive change rather than a rework.
 
 ## Component A: the control channel
 
+> **Corrected (see "Corrections" above, item 1).** The two-connection design
+> below (a second BLE GATT service, a second RFCOMM socket pinned by
+> `control_channel`) was built and disproven on hardware. The shipped
+> `kiss.ControlChannel()` demultiplexes Gaia frames off the *same* link as
+> KISS by leading byte, with no second connection and no `control_channel`
+> config key. Read this section for the reasoning trail only.
+
 The Bluetooth transports gain one optional capability, and nothing else
 changes:
 
@@ -189,6 +238,12 @@ save-and-restore scheme.
 
 An all-zero payload is the documented teardown: it drops the radio out of VFO
 mode and restores its normal channel state.
+
+> **Corrected (see "Corrections" above, item 2): this is false on real
+> firmware.** An all-zero payload clamps the radio to 136.000 MHz and leaves
+> it in VFO mode. The shipped `Teardown()` reads the active channel's stored
+> frequency and writes that back explicitly instead of relying on this
+> behavior.
 
 **`FREQ_MODE_GET_STATUS` reply:** `data[4]` is reply status (0 = success),
 `data[5..8]` is the frequency in Hz big-endian with the top 2 bits carrying
@@ -296,6 +351,12 @@ ptt_timeout = 30
 ```
 
 Plus one new key on the port itself, for the classic-Bluetooth case:
+
+> **Corrected (see "Corrections" above, item 1): this key does not exist.**
+> There is no `control_channel` port key in the shipped config —
+> `config.Port` has no such field. The Benshi command channel shares the
+> port's existing transport; nothing needs pinning. This block is left as
+> written for the reasoning trail only.
 
 ```ini
 [client.0]

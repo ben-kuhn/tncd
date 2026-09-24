@@ -323,6 +323,16 @@ ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
 # enabled = true
 # listen_host = 127.0.0.1
 # listen_port = 8002
+
+# Rig control (Benshi radios only — BTech UV-PRO, RadioOddity GA-5WB, Vero
+# VR-N76/VR-N7500). Opt-in hamlib Net rigctl server for the matching [client.N]
+# port, so PAT and other rigctl clients can QSY the radio. See "Rig Control"
+# below.
+# [rigctl.0]
+# enabled = true
+# listen_host = 127.0.0.1
+# listen_port = 4532
+# allow_ptt = false
 ```
 
 ### Monitoring API (2.0 Go line)
@@ -356,6 +366,67 @@ Cloudflare/SSH tunnel domain), list those names in `allowed_hosts`, e.g.
 curl http://127.0.0.1:8002/api/status
 curl -N http://127.0.0.1:8002/api/events   # live event stream
 ```
+
+### Rig Control (2.0 Go line, Benshi radios only)
+
+tncd can expose frequency (and optional PTT) control for **Benshi-protocol
+radios only** — BTech UV-Pro, RadioOddity GA-5WB, Vero VR-N76/VR-N7500 — as a
+hamlib-compatible Net `rigctld` TCP server, so PAT and other rigctl clients
+can QSY the radio before connecting. It is **disabled by default** and rides
+the same Bluetooth link tncd already holds open for KISS: the radio's Benshi
+command protocol and KISS frames share one RFCOMM/BLE connection, told apart
+by their leading bytes (`0xC0` for KISS, `0xFF 0x01` for the Benshi/Gaia
+framing). There is no separate control-channel connection or config key.
+
+**`[rigctl.N]` keys** (one section per `[client.N]` port, e.g. `[rigctl.0]`
+controls `[client.0]`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Opt-in; the listener does not start otherwise |
+| `listen_host` | `127.0.0.1` | Bind address for the rigctl TCP listener |
+| `listen_port` | `4532 + N` | So a single-radio setup (`[rigctl.0]`) gets hamlib's conventional 4532 with no configuration |
+| `allowed_subnets` | empty (allow all on the bound host) | CIDR allowlist for client source IPs, same syntax as `[server] allowed_subnets` |
+| `allow_ptt` | `false` | See PTT warning below |
+| `ptt_timeout` | `30` | Seconds; maximum time tncd will leave the transmitter keyed before force-releasing it, only relevant when `allow_ptt = true` |
+
+**What it never does**: rig control only tunes the radio's frequency (VFO)
+mode via `FREQ_MODE_SET_PAR`. It **never writes a stored memory channel and
+never persists anything to the radio's NVRAM** — confirmed on real hardware
+by reading the active channel record before, during, and after a QSY and
+finding it unchanged. `teardown` (see below) restores the frequency the radio
+was on before rig control touched it, by reading the channel record back —
+not by any special "exit VFO mode" command, because on real firmware that
+does not restore state (see the design spec's corrections section).
+
+**PTT is off by default and experimental.** The radio has no separate
+key/unkey command — a single "PTT" effect byte **toggles** the transmitter on
+every call, so tncd tracks the intended state itself and bounds every key
+with `ptt_timeout`, force-releasing on timeout, client disconnect, or tncd
+shutdown. If a toggle command is ever lost in transit (a Bluetooth write that
+silently fails to reach a wedged link, for example), tncd's belief about
+whether the radio is keyed can drift from the physical state — `ptt_timeout`
+bounds how long that can last, but does not prevent it. Enable `allow_ptt`
+only if you understand and accept that residual risk, and always test into a
+dummy load first.
+
+Frequencies are always **Hz**, never MHz, on the wire and in `tncd rig` —
+there is no unit ambiguity to resolve.
+
+**`tncd rig` CLI** — a one-shot command for scripting and bench testing
+without a rigctl client:
+
+```bash
+tncd rig -c tncd.ini --port 0 probe          # identify the radio
+tncd rig -c tncd.ini --port 0 get-freq       # current frequency, Hz
+tncd rig -c tncd.ini --port 0 set-freq 145030000
+tncd rig -c tncd.ini --port 0 teardown       # restore the pre-QSY frequency
+```
+
+`--port` is the index into `[client.N]` (default 0). See
+`docs/superpowers/specs/rig-control-ota-checklist.md` for the full hardware
+validation procedure, including a documented Bluetooth-link wedging failure
+mode worth reading before you debug tncd itself.
 
 ### Bluetooth TNC (Linux)
 

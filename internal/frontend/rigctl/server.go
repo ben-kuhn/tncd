@@ -394,7 +394,13 @@ type Server struct {
 }
 
 // New creates a Server for one [rigctl.N] section. provider is called once
-// per request to resolve the live Rig for that port; it must not block.
+// per request to resolve the live Rig for that port, from a rigctl
+// connection goroutine, never the engine goroutine. It may block briefly --
+// the real wiring (internal/bridge's rigForPort) deliberately does a bounded
+// round trip through the engine loop to look up which *rig.Rig, if any, is
+// currently attached to the port -- but it must not perform radio I/O itself,
+// and must never be called from the engine goroutine, which would deadlock
+// against the very round trip it's waiting on.
 func New(cfg config.RigCtl, provider func() (Rig, error)) *Server {
 	return &Server{cfg: cfg, provider: provider, ptt: &pttState{}, idleTimeout: defaultIdleTimeout}
 }
