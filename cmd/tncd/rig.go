@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -49,15 +48,15 @@ func buildRigTransport(pc config.Port) (kiss.Transport, error) {
 	return bridge.BuildTransport(pc)
 }
 
-// runRig opens port n's transport, borrows its control channel, and runs one
-// command. It is a one-shot tool: it does not start the engine or any
+// runRig opens port n's transport and runs one Benshi rig command directly
+// over it. It is a one-shot tool: it does not start the engine or any
 // frontend, and it tears everything back down before returning.
 //
 // Every error names the port and the link that failed -- config, transport
-// open, control-channel support, or the radio's own reply -- because this
-// command's whole reason to exist is diagnosing hardware run against real,
-// possibly-misbehaving radios. A bare "rig: timeout" tells the operator
-// nothing about which of five links died.
+// open, or the radio's own reply -- because this command's whole reason to
+// exist is diagnosing hardware run against real, possibly-misbehaving
+// radios. A bare "rig: timeout" tells the operator nothing about which of
+// several links died.
 func runRig(cfgPath string, port int, args []string) error {
 	cmd, hz, err := parseRigArgs(args)
 	if err != nil {
@@ -81,12 +80,29 @@ func runRig(cfgPath string, port int, args []string) error {
 	}
 	defer tr.Close()
 
-	ch, err := kiss.ControlChannelFor(tr)
-	if err != nil {
-		return fmt.Errorf("rig: port %d: no rig control channel on this transport: %w", port, err)
-	}
-
-	r := rig.New(ch, 5*time.Second)
+	// The Benshi (Gaia) command protocol does NOT get a channel of its own on
+	// this hardware -- confirmed on a real UV-PRO 2026-09-23. It is served on
+	// the SAME RFCOMM connection as KISS traffic ("SPP Dev"); a separate
+	// "BS AOC" channel exists, accepts the connection, and answers nothing.
+	// A Gaia request written straight to the KISS transport gets a real
+	// reply (GET_DEV_INFO round-tripped on the bench), and KISS/Gaia frames
+	// were shown to interleave cleanly on the wire (two independent KISS
+	// frames plus a Gaia reply, all confirmed on-air by a separate Dire Wolf
+	// receiver) -- the two protocols are told apart by their leading bytes
+	// (KISS: 0xC0, Gaia: 0xFF 0x01), not by which socket they arrived on.
+	// So: no kiss.ControlChannelFor here -- that dials the silent "BS AOC"
+	// channel and just times out. tr itself (already an io.ReadWriteCloser)
+	// IS the control channel.
+	//
+	// This CLI is safe as-is because it is one-shot: nothing else is reading
+	// this stream while rig.New's reader loop runs, so there is no framing
+	// ambiguity to resolve. A future server-side integration that runs rig
+	// control ALONGSIDE a live KISS port on the same transport is a
+	// different problem -- it will need a demultiplexer (one reader owning
+	// the byte stream, dispatching each frame to the KISS decoder or the
+	// rig layer by its leading byte) in front of both consumers. Recorded
+	// here rather than left to be rediscovered.
+	r := rig.New(tr, 5*time.Second)
 	defer r.Close()
 
 	switch cmd {
@@ -139,12 +155,6 @@ func runRigCommand(args []string) int {
 
 	if err := runRig(*cfgFile, *port, fs.Args()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		if errors.Is(err, kiss.ErrNoControlChannel) {
-			// Give the operator the single most common cause up front: this
-			// verb only works on the Benshi control channel, which today is
-			// classic Bluetooth SPP.
-			fmt.Fprintln(os.Stderr, "rig: this port's transport does not carry rig control (only Bluetooth SPP to a Benshi radio does today)")
-		}
 		return 1
 	}
 	return 0

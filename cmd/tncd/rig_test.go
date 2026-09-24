@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ben-kuhn/tncd/v2/benshi"
 )
 
 func TestParseRigArgs(t *testing.T) {
@@ -67,22 +69,38 @@ port = 8001
 	}
 }
 
-func TestRunRigNoControlChannel(t *testing.T) {
-	// A real listener so Open() succeeds and the failure under test is
-	// specifically "no control channel", not "connection refused".
+// TestRunRigTalksGaiaOverThePlainTransport is the regression test for the
+// fix that replaced kiss.ControlChannelFor with the transport itself: on a
+// Benshi radio the Gaia command protocol is NOT on a separate control
+// channel (confirmed on a real UV-PRO -- see the comment in runRig), so
+// runRig must speak Gaia directly over whatever io.ReadWriteCloser the
+// transport already is. A fake "radio" here is just a TCP listener that
+// reads one Gaia request and writes back a canned GET_DEV_INFO success
+// reply; if runRig still tried to dial a separate control channel (which a
+// TCP transport doesn't implement), or read/wrote on the wrong stream, this
+// would time out instead of returning nil.
+func TestRunRigTalksGaiaOverThePlainTransport(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
 	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			c.Close()
+		conn, err := ln.Accept()
+		if err != nil {
+			return
 		}
+		defer conn.Close()
+		// Block until the probe request actually lands -- replying before
+		// that would race rig.New's reader loop registering as "waiting"
+		// and the reply would be silently dropped (see Rig.dispatch).
+		buf := make([]byte, 64)
+		if _, err := conn.Read(buf); err != nil {
+			return
+		}
+		m := benshi.Message{Group: benshi.GroupBasic, IsReply: true, Command: benshi.CmdGetDevInfo, Body: []byte{0x00}}
+		reply := benshi.Frame{Flags: benshi.FlagNone, Data: m.Bytes()}.Bytes()
+		conn.Write(reply)
 	}()
 
 	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
@@ -98,11 +116,8 @@ host = 127.0.0.1
 port = `+portStr+`
 `)
 
-	// A TCP transport never implements kiss.ControlCapable, so this must fail
-	// with ErrNoControlChannel once Open() succeeds.
-	err = runRig(cfgPath, 0, []string{"get-freq"})
-	if err == nil {
-		t.Fatal("runRig on a TCP port: err = nil, want error (no control channel)")
+	if err := runRig(cfgPath, 0, []string{"probe"}); err != nil {
+		t.Fatalf("runRig probe over plain TCP transport: %v", err)
 	}
 }
 
