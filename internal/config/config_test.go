@@ -464,7 +464,7 @@ func TestRigCtlPortDefaultsIncrementWithIndex(t *testing.T) {
 }
 
 func TestRigCtlExplicitValues(t *testing.T) {
-	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\ncontrol_channel=2\n" +
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
 		"[rigctl.0]\nenabled=true\nlisten_port=4600\nallow_ptt=true\nptt_timeout=10\n"
 	cfg, err := Load(write(t, ini))
 	if err != nil {
@@ -475,9 +475,6 @@ func TestRigCtlExplicitValues(t *testing.T) {
 	}
 	if !cfg.RigCtl[0].AllowPTT || cfg.RigCtl[0].PTTTimeout != 10 {
 		t.Errorf("PTT config = %+v", cfg.RigCtl[0])
-	}
-	if cfg.Ports[0].ControlChannel != 2 {
-		t.Errorf("ControlChannel = %d, want 2", cfg.Ports[0].ControlChannel)
 	}
 }
 

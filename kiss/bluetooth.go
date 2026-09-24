@@ -2,6 +2,7 @@ package kiss
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -20,13 +21,6 @@ type BluetoothConfig struct {
 	Reconnect         bool
 	ReconnectDelay    time.Duration
 	ReconnectMaxDelay time.Duration
-
-	// ControlChannel pins the RFCOMM channel number for the rig-control
-	// sub-channel (e.g. a Benshi radio's control service); 0 means discover
-	// it via SDP. Only consulted on platforms that connect to RFCOMM by
-	// channel number (Windows) -- Linux resolves the control service the same
-	// way it resolves SPP, by asking BlueZ for the service UUID.
-	ControlChannel int
 }
 
 // parseSPPChannel interprets the optional `channel` config value.
@@ -50,3 +44,20 @@ func parseSPPChannel(s string) (channel int, pinned bool, err error) {
 	}
 	return ch, true, nil
 }
+
+// selfControlChannel is a rig-control channel backed by the transport's own
+// Read/Write, for radios (confirmed live on a Benshi UV-PRO) that serve their
+// command protocol on the identical RFCOMM link that carries KISS data rather
+// than a separate one. Shared by every platform's bluetoothTransport.
+//
+// Close is deliberately a no-op on the wrapped stream: the port, not whoever
+// asked for the control channel, owns the underlying transport's lifetime.
+// Closing this view of the link must never take the KISS data path down with
+// it -- see ControlChannel's doc comment on each platform's bluetoothTransport
+// for the framing hazard this same-stream design creates once something reads
+// the port's KISS data concurrently.
+type selfControlChannel struct {
+	io.ReadWriteCloser
+}
+
+func (c *selfControlChannel) Close() error { return nil }

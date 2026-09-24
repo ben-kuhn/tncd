@@ -45,7 +45,6 @@ func buildTransport(pc config.Port) (kiss.Transport, error) {
 			Reconnect:         pc.Reconnect,
 			ReconnectDelay:    time.Duration(pc.ReconnectDelay * float64(time.Second)),
 			ReconnectMaxDelay: time.Duration(pc.ReconnectMaxDelay * float64(time.Second)),
-			ControlChannel:    pc.ControlChannel,
 		}), nil
 	case "ble":
 		return kiss.NewBLETransport(kiss.BLEConfig{BDAddr: pc.BDAddr}), nil

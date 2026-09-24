@@ -45,25 +45,6 @@ func uuid16Bytes(u uint16) []byte {
 	return []byte{byte(u >> 8), byte(u & 0xFF)}
 }
 
-// benshiControlServiceUUID is the Benshi rig-control service's classic
-// RFCOMM UUID -- confirmed live against a UV-PRO, where SDP advertises it as
-// "BS AOC" on RFCOMM channel 2 (the device's other two classic records are
-// "Voice Gateway" and "SPP Dev", the latter being the existing KISS data
-// channel).
-//
-// This is NOT the UUID the radio uses for its BLE GATT control service
-// (00001100-d102-11e1-9b23-00025b00a5a5). That value was tried first and
-// FAILED on the bench with br-connection-not-supported: BlueZ's merged
-// device-UUID list conflates LE and BR/EDR advertisements, so a UUID showing
-// up there is not proof it is reachable over classic RFCOMM.
-//
-// Defined once here as the single source of truth -- bluetooth_linux.go
-// passes this string directly to BlueZ's D-Bus API, and
-// bluetooth_windows.go derives its windows.GUID from it -- specifically so a
-// future correction like this one is a one-line change instead of a hunt
-// across three hand-duplicated encodings in three files.
-const benshiControlServiceUUID = "39144315-32fa-40db-85ed-fbfeba2d86e6"
-
 // buildSSAReq builds an SDP ServiceSearchAttributeRequest for one service
 // UUID, requesting the ProtocolDescriptorList attribute (0x0004). A 2-byte
 // uuid uses data element type 0x19 (UUID16); a 16-byte uuid uses 0x1C

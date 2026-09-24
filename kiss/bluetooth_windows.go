@@ -3,8 +3,6 @@
 package kiss
 
 import (
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,34 +25,6 @@ var sppServiceClassID = windows.GUID{
 	Data2: 0x0000,
 	Data3: 0x1000,
 	Data4: [8]byte{0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB},
-}
-
-// benshiControlServiceClassID is benshiControlServiceUUID (bluetooth_sdp.go
-// -- the single source of truth for this value; see its comment for why)
-// rendered as a windows.GUID. Passing it as the connect ServiceClassId
-// resolves the RFCOMM channel via SDP exactly like sppServiceClassID does
-// for the data link. Derived at init from the canonical string rather than
-// hand-typed here, so this can never independently drift from what Linux
-// dials -- which is exactly how the previous (wrong, BLE-only) UUID shipped.
-var benshiControlServiceClassID = mustUUIDToGUID(benshiControlServiceUUID)
-
-// mustUUIDToGUID parses a standard dashed UUID string (the form used
-// everywhere else in this codebase) into a windows.GUID, panicking on
-// malformed input. That's acceptable only because every call site passes a
-// package-level constant, so a bad value is a build-time programming error
-// caught the first time this file runs -- not something that can occur at
-// runtime from user or radio input.
-func mustUUIDToGUID(s string) windows.GUID {
-	b, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
-	if err != nil || len(b) != 16 {
-		panic(fmt.Sprintf("bluetooth: invalid UUID %q", s))
-	}
-	return windows.GUID{
-		Data1: binary.BigEndian.Uint32(b[0:4]),
-		Data2: binary.BigEndian.Uint16(b[4:6]),
-		Data3: binary.BigEndian.Uint16(b[6:8]),
-		Data4: [8]byte{b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]},
-	}
 }
 
 // soSndTimeo is Winsock's SO_SNDTIMEO. x/sys/windows defines SO_RCVTIMEO and
@@ -337,154 +307,37 @@ func (bt *bluetoothTransport) Close() error {
 func (bt *bluetoothTransport) EnterKISS() error { return nil }
 func (bt *bluetoothTransport) ExitKISS()        {}
 
-// ControlChannel opens a second, independent RFCOMM connection to the Benshi
-// rig-control service, alongside (not replacing) the KISS data socket. Unlike
-// Linux -- where BlueZ resolves a Profile1 UUID to a channel on its own --
-// raw Winsock RFCOMM always connects to a channel number. cfg.ControlChannel
-// pins one directly, skipping a second SDP round trip to the radio;
-// otherwise the control service's UUID drives discovery the same way the SPP
-// UUID does for the data link in Open.
+// ControlChannel returns the Benshi rig-control channel for this transport.
 //
-// WSAStartup/WSACleanup is a process-wide refcount, and this call has its own
-// paired WSAStartup here rather than relying on bt.started from Open. Two
-// bugs that shared state would cause: (1) bt.Close() unconditionally calls
-// WSACleanup once bt.started is true, so an ordinary data-link reconnect
-// cycle -- ControlChannel and Open/Close are entirely independent callers --
-// could drop the refcount to zero while this control socket is still live,
-// silently breaking it; that is exactly the isolation bluetoothControlConn's
-// own doc comment promises and would have violated. (2) calling
-// ControlChannel before Open has ever succeeded would fail with the opaque
-// WSANOTINITIALISED (10093) instead of a clean connect attempt. A dedicated
-// WSAStartup/WSACleanup pair, paired 1:1 with this returned conn's Close(),
-// avoids both.
+// There is no second RFCOMM link to dial: confirmed live against a UV-PRO
+// (2026-09-23), the radio's Gaia command protocol is served on the SAME
+// RFCOMM connection as KISS traffic ("SPP Dev"). A separate "BS AOC" service
+// exists on the radio's SDP record, accepts a connection, and then answers
+// nothing, ever -- an earlier version of this method dialled that service as
+// a second Winsock RFCOMM socket (pinned by config.Port.ControlChannel or
+// resolved via its own SDP lookup); that path is gone. A Gaia request
+// written straight to the already-open KISS socket gets a real reply, and
+// KISS/Gaia frames were shown to interleave cleanly on the wire (two
+// independent KISS frames plus a Gaia reply, confirmed on-air by a separate
+// Dire Wolf receiver), distinguished only by their leading bytes (KISS:
+// 0xC0, Gaia: 0xFF 0x01) -- never by which socket they arrived on, because
+// there is only one.
+//
+// Sharp edge: the returned channel and bt's own KISS reader both read from
+// this one byte stream. Today that is safe because the only consumer is the
+// one-shot `tncd rig` CLI, which opens the transport and runs no KISS reader
+// of its own. It will NOT be safe for rig control running alongside a live
+// KISS port -- that needs a demultiplexer (one reader owning the stream,
+// routing 0xC0 to the KISS decoder and 0xFF 0x01 to the rig layer) in front
+// of both consumers. Not built here; that is the next task.
 func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
-	addr, err := parseBTAddr(bt.cfg.BDAddr)
-	if err != nil {
-		return nil, fmt.Errorf("bluetooth: %w", err)
+	bt.mu.Lock()
+	open := bt.open
+	bt.mu.Unlock()
+	if !open {
+		return nil, fmt.Errorf("bluetooth: not open")
 	}
-
-	var wsad windows.WSAData
-	if err := windows.WSAStartup(0x202, &wsad); err != nil { // MAKEWORD(2,2)
-		return nil, fmt.Errorf("bluetooth: control channel WSAStartup: %w", err)
-	}
-
-	sa := &windows.SockaddrBth{BtAddr: addr}
-	route := "SDP lookup"
-	if bt.cfg.ControlChannel != 0 {
-		sa.Port = uint32(bt.cfg.ControlChannel)
-		route = fmt.Sprintf("pinned control channel %d", bt.cfg.ControlChannel)
-	} else {
-		sa.ServiceClassId = benshiControlServiceClassID
-	}
-
-	fd, err := bt.dialControl(sa, route)
-	if err != nil {
-		windows.WSACleanup()
-		// WSASERVICE_NOT_FOUND from an SDP-driven connect means the radio has
-		// no matching record -- i.e. no control channel exists to find, which
-		// is exactly what ErrNoControlChannel means to callers. Any other
-		// failure (timeout, refused, ...) is a real error worth surfacing.
-		var errno syscall.Errno
-		if errors.As(err, &errno) && errno == wsaServiceNotFound {
-			return nil, ErrNoControlChannel
-		}
-		return nil, err
-	}
-
-	timeoutMS := int(btSendTimeout / time.Millisecond)
-	if err := windows.SetsockoptInt(fd, windows.SOL_SOCKET, soSndTimeo, timeoutMS); err != nil {
-		log.Printf("bluetooth: control channel SO_SNDTIMEO=%dms failed (%v); a stalled send may block indefinitely", timeoutMS, err)
-	}
-
-	return &bluetoothControlConn{fd: fd, bdaddr: bt.cfg.BDAddr, started: true}, nil
-}
-
-// dialControl makes a single connect() attempt for the control channel.
-//
-// Unlike dial (used for the KISS data link), this does not retry: the data
-// link's retry cushion exists because losing it costs a full bridge backoff
-// cycle with no packet traffic at all, while a control-channel connect
-// failure just means one rigctl request answers with an error and the next
-// one tries again. A single attempt also keeps the error unwrapped with %w
-// (dial's retry loop renders the last error as prose via describeWSAError,
-// which loses the underlying syscall.Errno that ControlChannel needs to
-// detect WSASERVICE_NOT_FOUND).
-func (bt *bluetoothTransport) dialControl(sa *windows.SockaddrBth, route string) (windows.Handle, error) {
-	fd, err := windows.Socket(windows.AF_BTH, windows.SOCK_STREAM, windows.BTHPROTO_RFCOMM)
-	if err != nil {
-		return windows.InvalidHandle, fmt.Errorf("bluetooth: control channel socket: %w", err)
-	}
-	if err := windows.Connect(fd, sa); err != nil {
-		windows.Closesocket(fd)
-		return windows.InvalidHandle, fmt.Errorf("bluetooth: control channel connect to %s via %s: %s: %w",
-			bt.cfg.BDAddr, route, describeWSAError(err), err)
-	}
-	log.Printf("bluetooth: control channel connected to %s via %s", bt.cfg.BDAddr, route)
-	return fd, nil
-}
-
-// bluetoothControlConn is the rig-control RFCOMM socket. It has its own fd,
-// its own WSAStartup/WSACleanup pairing (started), and its own lifecycle,
-// entirely independent of bluetoothTransport's KISS data socket -- the two
-// links are opened, read, written, and closed separately, which is the point
-// of a *second* channel. See ControlChannel's doc comment for why started
-// must not be folded into bt.started.
-type bluetoothControlConn struct {
-	fd      windows.Handle
-	bdaddr  string
-	started bool
-}
-
-func (c *bluetoothControlConn) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	buf := windows.WSABuf{Len: uint32(len(p)), Buf: &p[0]}
-	var recvd, flags uint32
-	if err := windows.WSARecv(c.fd, &buf, 1, &recvd, &flags, nil, nil); err != nil {
-		return 0, err
-	}
-	if recvd == 0 {
-		return 0, io.EOF
-	}
-	return int(recvd), nil
-}
-
-// Write loops until the whole buffer is sent, for the same reason
-// bluetoothTransport.Write does: a short write reported as success would
-// silently truncate a command to the radio.
-func (c *bluetoothControlConn) Write(p []byte) (int, error) {
-	var total int
-	for total < len(p) {
-		chunk := p[total:]
-		buf := windows.WSABuf{Len: uint32(len(chunk)), Buf: &chunk[0]}
-		var sent uint32
-		if err := windows.WSASend(c.fd, &buf, 1, &sent, 0, nil, nil); err != nil {
-			if err == windows.WSAETIMEDOUT {
-				return total, fmt.Errorf("bluetooth: control channel TX stalled -- %s accepted %d of %d bytes within %s",
-					c.bdaddr, total, len(p), btSendTimeout)
-			}
-			return total, err
-		}
-		if sent == 0 {
-			return total, fmt.Errorf("bluetooth: control channel TX stalled -- %s accepted %d of %d bytes then stopped",
-				c.bdaddr, total, len(p))
-		}
-		total += int(sent)
-	}
-	return total, nil
-}
-
-func (c *bluetoothControlConn) Close() error {
-	if c.fd != windows.InvalidHandle {
-		windows.Closesocket(c.fd)
-		c.fd = windows.InvalidHandle
-	}
-	if c.started {
-		windows.WSACleanup()
-		c.started = false
-	}
-	return nil
+	return &selfControlChannel{ReadWriteCloser: bt}, nil
 }
 
 // parseBTAddr parses "AA:BB:CC:DD:EE:FF" (colons or dashes, any case, or no

@@ -98,11 +98,6 @@ type Port struct {
 	// Seconds; 0 disables. Default 20 for bluetooth, 0 for serial/tcp.
 	RXWedgeTimeout int
 
-	// ControlChannel selects which rig-control command channel (e.g. a
-	// Benshi radio's sub-channel) this port's [rigctl.N] listener addresses.
-	// Meaningless for transports without a rig-control capability.
-	ControlChannel int
-
 	KISS kiss.Params // from [kiss.N]; nil fields = don't send
 }
 
@@ -173,7 +168,7 @@ var knownClientKeys = []string{
 	"bdaddr", "channel", "reconnect", "reconnect_delay", "reconnect_max_delay",
 	"ota_baudrate", "init_string", "init_delay", "send_kiss_exit",
 	"host_exit_string", "exit_delay",
-	"ax25_version", "srej", "rx_wedge_timeout", "control_channel",
+	"ax25_version", "srej", "rx_wedge_timeout",
 }
 
 // knownKISSKeys are the recognized keys in [kiss.N].
@@ -648,7 +643,6 @@ func Load(path string) (*Config, error) {
 			AX25Version:       ax25Version,
 			SREJ:              getBool(s, "srej", true),
 			RXWedgeTimeout:    getInt(s, "rx_wedge_timeout", rxWedgeDefault),
-			ControlChannel:    getInt(s, "control_channel", 0),
 		}
 
 		// Serial-only params validated at load: a typo in parity/stopbits must

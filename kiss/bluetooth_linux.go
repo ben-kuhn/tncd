@@ -4,7 +4,6 @@ package kiss
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -54,17 +53,6 @@ func callBlueZ(obj dbusCaller, timeout time.Duration, method string, args ...int
 
 // profilePath is the D-Bus object path at which we export our Profile1 object.
 const profilePath = dbus.ObjectPath("/org/tncd/spp")
-
-// The control profile's UUID is benshiControlServiceUUID (bluetooth_sdp.go),
-// the single source of truth for that value on every platform -- see its
-// comment for why (a previous, wrong UUID value shipped independently
-// duplicated across this file and bluetooth_windows.go).
-
-// controlProfilePath is a sibling of profilePath, at its own object path so
-// BlueZ routes each service's NewConnection callback to the profile that
-// actually registered it and the SPP and control links cannot be confused
-// with each other.
-const controlProfilePath = dbus.ObjectPath("/org/tncd/control")
 
 // bluetoothTransport implements Transport for a Bluetooth SPP KISS TNC via
 // BlueZ D-Bus on Linux.
@@ -183,119 +171,33 @@ func (bt *bluetoothTransport) Open() error {
 	}
 }
 
-// controlConnectTimeout bounds how long ControlChannel waits for BlueZ to
-// deliver the connected fd via NewConnection. Shorter than Open's 30s: a
-// caller asking for the control channel (rigctl) is a synchronous
-// request/response flow, not a port coming online, so it should fail fast on
-// a radio that has no control service rather than hold the caller for half a
-// minute.
-const controlConnectTimeout = 15 * time.Second
-
-// ControlChannel opens the Benshi rig-control RFCOMM link over BlueZ.
+// ControlChannel returns the Benshi rig-control channel for this transport.
 //
-// It registers a second Profile1 for the control service UUID and connects
-// it exactly the way Open registers and connects the SPP profile -- BlueZ
-// resolves the RFCOMM channel from the device's SDP record on its own, so
-// there is no channel number to manage here (unlike Windows/FreeBSD). The
-// control link is independent of, and additional to, the KISS data socket:
-// this can be called whether or not the data socket is currently open.
+// There is no second RFCOMM link to dial: confirmed live against a UV-PRO
+// (2026-09-23), the radio's Gaia command protocol is served on the SAME
+// RFCOMM connection as KISS traffic ("SPP Dev"). A separate "BS AOC" service
+// (channel 2) exists on the radio's SDP record, accepts a connection, and
+// then answers nothing, ever -- an earlier version of this method dialled
+// that service via its own Profile1 registration at /org/tncd/control; it is
+// gone. A Gaia request written straight to the already-open KISS socket gets
+// a real reply, and KISS/Gaia frames were shown to interleave cleanly on the
+// wire (two independent KISS frames plus a Gaia reply, confirmed on-air by a
+// separate Dire Wolf receiver), distinguished only by their leading bytes
+// (KISS: 0xC0, Gaia: 0xFF 0x01) -- never by which socket they arrived on,
+// because there is only one.
+//
+// Sharp edge: the returned channel and bt's own KISS reader both read from
+// this one byte stream. Today that is safe because the only consumer is the
+// one-shot `tncd rig` CLI, which opens the transport and runs no KISS reader
+// of its own. It will NOT be safe for rig control running alongside a live
+// KISS port -- that needs a demultiplexer (one reader owning the stream,
+// routing 0xC0 to the KISS decoder and 0xFF 0x01 to the rig layer) in front
+// of both consumers. Not built here; that is the next task.
 func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
-	conn, err := dbus.ConnectSystemBus()
-	if err != nil {
-		return nil, fmt.Errorf("bluetooth: connect to D-Bus system bus: %w", err)
+	if bt.file == nil {
+		return nil, fmt.Errorf("bluetooth: not open")
 	}
-	defer conn.Close()
-
-	devicePath, err := bdaddrToPath(bt.cfg.BDAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := registerControlProfileOnce(); err != nil {
-		return nil, err
-	}
-
-	fdCh := make(chan int, 1)
-	errCh := make(chan error, 1)
-	controlRegisterPending(string(devicePath), fdCh)
-
-	deviceObj := conn.Object("org.bluez", devicePath)
-	go func() {
-		call := deviceObj.Call("org.bluez.Device1.ConnectProfile", 0, benshiControlServiceUUID)
-		if call.Err != nil && !isBenignConnectError(call.Err) {
-			errCh <- call.Err
-		}
-	}()
-
-	select {
-	case fd := <-fdCh:
-		f := os.NewFile(uintptr(fd), fmt.Sprintf("bt-control-%s", bt.cfg.BDAddr))
-		log.Printf("bluetooth: control channel ready (fd=%d) for %s", fd, bt.cfg.BDAddr)
-		return f, nil
-	case callErr := <-errCh:
-		controlRemovePending(string(devicePath))
-		if isServiceNotFoundError(callErr) {
-			return nil, ErrNoControlChannel
-		}
-		return nil, fmt.Errorf("bluetooth: control channel ConnectProfile: %w", callErr)
-	case <-time.After(controlConnectTimeout):
-		controlRemovePending(string(devicePath))
-		return nil, fmt.Errorf("bluetooth: control channel connection to %s timed out (%s)",
-			bt.cfg.BDAddr, controlConnectTimeout)
-	}
-}
-
-// isServiceNotFoundError reports whether err is what BlueZ returns from
-// Device1.ConnectProfile when the remote device's SDP record has no entry
-// for the requested profile UUID -- i.e. there is no control channel to
-// find, which callers should treat as ErrNoControlChannel rather than a
-// transient connection failure worth logging loudly or retrying.
-//
-// Observed live on the bench trying the (wrong, since-corrected) BLE-only
-// control UUID over classic RFCOMM: body text "br-connection-not-supported"
-// -- hyphenated, not "not supported" with a space, which an earlier version
-// of this check required and therefore missed. godbus's dbus.Error.Error()
-// falls back to the bare error NAME (e.g. "org.bluez.Error.NotSupported")
-// when the body is empty, which has no separator at all between "not" and
-// "supported" -- so free-text substring matching alone cannot cover every
-// shape and the Name field is checked directly first.
-func isServiceNotFoundError(err error) bool {
-	if name, ok := dbusErrorName(err); ok {
-		n := strings.ToLower(strings.ReplaceAll(name, ".", ""))
-		if containsAny(n, "notsupported", "doesnotexist", "nosuchservice", "notfound") {
-			return true
-		}
-	}
-	// Normalize hyphens to spaces so both "not-supported" (the observed
-	// bench text) and "not supported" match the same substring check.
-	s := strings.ToLower(strings.ReplaceAll(err.Error(), "-", " "))
-	return containsAny(s, "not supported", "does not exist", "no such", "not found")
-}
-
-// dbusErrorName extracts the D-Bus error Name (e.g.
-// "org.bluez.Error.NotSupported") from err, whether godbus delivered it as a
-// dbus.Error value or a *dbus.Error pointer -- both shapes occur depending on
-// which internal path produced the error.
-func dbusErrorName(err error) (string, bool) {
-	var e dbus.Error
-	if errors.As(err, &e) {
-		return e.Name, true
-	}
-	var ep *dbus.Error
-	if errors.As(err, &ep) {
-		return ep.Name, true
-	}
-	return "", false
-}
-
-// containsAny reports whether s contains any of subs.
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
+	return &selfControlChannel{ReadWriteCloser: bt}, nil
 }
 
 // bluetoothReconnectSettle is how long Open waits after disconnecting a stale
@@ -645,158 +547,6 @@ func lookupPending(devicePath string) chan int {
 		delete(pendingMap, devicePath)
 	}
 	pendingMu.Unlock()
-	return ch
-}
-
-// ---- Control profile (rig control) ----
-//
-// Structurally identical to the SPP profile above -- same registration
-// pattern, same NewConnection handoff -- but kept as its own type with its
-// own state (own pending map, own registration flag) rather than
-// parameterizing sppProfile, so a bug in one profile's bookkeeping can't
-// leak into the other's fd delivery.
-
-// controlProfile is the exported D-Bus object BlueZ calls back on for the
-// rig-control service.
-type controlProfile struct{}
-
-// NewConnection hands the connected fd to the waiting ControlChannel call,
-// exactly like sppProfile.NewConnection does for Open.
-func (p *controlProfile) NewConnection(devicePath dbus.ObjectPath, fd dbus.UnixFD, properties map[string]dbus.Variant) *dbus.Error {
-	rawFD := int(fd)
-	log.Printf("bluetooth: control NewConnection: path=%s fd=%d", devicePath, rawFD)
-
-	fdCh := controlLookupPending(string(devicePath))
-	if fdCh == nil {
-		log.Printf("bluetooth: unexpected control NewConnection from %s, closing fd", devicePath)
-		_ = closeFD(rawFD)
-		return nil
-	}
-	select {
-	case fdCh <- rawFD:
-	default:
-		log.Printf("bluetooth: control fd channel full for %s, closing fd", devicePath)
-		_ = closeFD(rawFD)
-	}
-	return nil
-}
-
-// RequestDisconnection is called by BlueZ when the control link disconnects.
-func (p *controlProfile) RequestDisconnection(devicePath dbus.ObjectPath) *dbus.Error {
-	log.Printf("bluetooth: control RequestDisconnection: %s", devicePath)
-	return nil
-}
-
-// Release is called by BlueZ when the control profile is unregistered.
-func (p *controlProfile) Release() *dbus.Error {
-	log.Printf("bluetooth: control profile released by BlueZ")
-	return nil
-}
-
-// controlProfileConn owns the D-Bus connection the control Profile1 object is
-// exported on. BlueZ calls back into that object for the life of the
-// process, so the connection must stay open; this package-level reference is
-// what keeps it from being collected. Write-only by design.
-//
-//lint:ignore U1000 keep-alive reference; see above
-var controlProfileConn *dbus.Conn
-
-// controlProfileMu guards controlProfileRegistered and controlProfileConn.
-var controlProfileMu sync.Mutex
-
-// controlProfileRegistered is true once a successful RegisterProfile call has
-// been made for the control profile. A failed attempt leaves it false so the
-// next ControlChannel call can retry from scratch.
-var controlProfileRegistered bool
-
-// registerControlProfileOnce connects to the system D-Bus, exports the
-// control Profile1 object, and calls ProfileManager1.RegisterProfile.
-// Mirrors registerProfileOnce for the SPP profile; see there for the
-// concurrency rationale.
-func registerControlProfileOnce() error {
-	return ensureControlProfile(func() error {
-		conn, err := dbus.ConnectSystemBus()
-		if err != nil {
-			return fmt.Errorf("bluetooth: system bus for control profile: %w", err)
-		}
-
-		prof := &controlProfile{}
-		err = conn.ExportMethodTable(
-			map[string]interface{}{
-				"NewConnection":        prof.NewConnection,
-				"RequestDisconnection": prof.RequestDisconnection,
-				"Release":              prof.Release,
-			},
-			controlProfilePath,
-			"org.bluez.Profile1",
-		)
-		if err != nil {
-			conn.Close()
-			return fmt.Errorf("bluetooth: export control Profile1: %w", err)
-		}
-
-		manager := conn.Object("org.bluez", "/org/bluez")
-		opts := map[string]dbus.Variant{
-			"Role": dbus.MakeVariant("client"),
-		}
-		if err := callBlueZ(manager, btCallTimeout,
-			"org.bluez.ProfileManager1.RegisterProfile",
-			controlProfilePath, benshiControlServiceUUID, opts,
-		); err != nil {
-			conn.Close()
-			return fmt.Errorf("bluetooth: RegisterProfile (control): %w", err)
-		}
-
-		controlProfileConn = conn
-		log.Printf("bluetooth: control profile registered at %s", controlProfilePath)
-		return nil
-	})
-}
-
-// ensureControlProfile is the testable seam for control profile
-// registration, mirroring ensureProfile.
-func ensureControlProfile(register func() error) error {
-	controlProfileMu.Lock()
-	defer controlProfileMu.Unlock()
-	if controlProfileRegistered {
-		return nil
-	}
-	if err := register(); err != nil {
-		return err
-	}
-	controlProfileRegistered = true
-	return nil
-}
-
-// ---- Control profile pending-connection map ----
-//
-// A separate map from pendingMap (SPP): both profiles key on devicePath
-// alone, and a device can have an SPP connect and a control connect
-// in flight at the same time, so sharing one map would let one profile's
-// NewConnection steal the other's waiting fd channel.
-
-var controlPendingMu sync.Mutex
-var controlPendingMap = map[string]chan int{}
-
-func controlRegisterPending(devicePath string, ch chan int) {
-	controlPendingMu.Lock()
-	controlPendingMap[devicePath] = ch
-	controlPendingMu.Unlock()
-}
-
-func controlRemovePending(devicePath string) {
-	controlPendingMu.Lock()
-	delete(controlPendingMap, devicePath)
-	controlPendingMu.Unlock()
-}
-
-func controlLookupPending(devicePath string) chan int {
-	controlPendingMu.Lock()
-	ch := controlPendingMap[devicePath]
-	if ch != nil {
-		delete(controlPendingMap, devicePath)
-	}
-	controlPendingMu.Unlock()
 	return ch
 }
 

@@ -90,9 +90,10 @@ func runRig(cfgPath string, port int, args []string) error {
 	// frames plus a Gaia reply, all confirmed on-air by a separate Dire Wolf
 	// receiver) -- the two protocols are told apart by their leading bytes
 	// (KISS: 0xC0, Gaia: 0xFF 0x01), not by which socket they arrived on.
-	// So: no kiss.ControlChannelFor here -- that dials the silent "BS AOC"
-	// channel and just times out. tr itself (already an io.ReadWriteCloser)
-	// IS the control channel.
+	// kiss.ControlChannelFor now reflects that: for a Bluetooth transport it
+	// hands back a view of tr itself rather than dialling the silent "BS AOC"
+	// channel, so this goes through the one real path instead of bypassing
+	// it and calling rig.New(tr, ...) directly.
 	//
 	// This CLI is safe as-is because it is one-shot: nothing else is reading
 	// this stream while rig.New's reader loop runs, so there is no framing
@@ -102,7 +103,13 @@ func runRig(cfgPath string, port int, args []string) error {
 	// the byte stream, dispatching each frame to the KISS decoder or the
 	// rig layer by its leading byte) in front of both consumers. Recorded
 	// here rather than left to be rediscovered.
-	r := rig.New(tr, 5*time.Second)
+	cc, err := kiss.ControlChannelFor(tr)
+	if err != nil {
+		return fmt.Errorf("rig: port %d: no rig-control channel: %w", port, err)
+	}
+	defer cc.Close()
+
+	r := rig.New(cc, 5*time.Second)
 	defer r.Close()
 
 	switch cmd {

@@ -1,12 +1,13 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/ben-kuhn/tncd/v2/benshi"
+	"github.com/ben-kuhn/tncd/v2/kiss"
 )
 
 func TestParseRigArgs(t *testing.T) {
@@ -69,39 +70,22 @@ port = 8001
 	}
 }
 
-// TestRunRigTalksGaiaOverThePlainTransport is the regression test for the
-// fix that replaced kiss.ControlChannelFor with the transport itself: on a
-// Benshi radio the Gaia command protocol is NOT on a separate control
-// channel (confirmed on a real UV-PRO -- see the comment in runRig), so
-// runRig must speak Gaia directly over whatever io.ReadWriteCloser the
-// transport already is. A fake "radio" here is just a TCP listener that
-// reads one Gaia request and writes back a canned GET_DEV_INFO success
-// reply; if runRig still tried to dial a separate control channel (which a
-// TCP transport doesn't implement), or read/wrote on the wrong stream, this
-// would time out instead of returning nil.
-func TestRunRigTalksGaiaOverThePlainTransport(t *testing.T) {
+// TestRunRigOverNonControlCapableTransportFails is the regression test for
+// the switch from handing rig.New the transport directly to routing through
+// kiss.ControlChannelFor: on a Benshi radio the Gaia command protocol lives
+// on the SAME RFCOMM link as KISS (confirmed on a real UV-PRO -- see the
+// comment in runRig), so the only real caller of ControlChannelFor is the
+// Bluetooth transport, which now hands back a view of itself. A TCP
+// transport implements no such thing, so runRig against a `type = tcp` port
+// must fail fast with ErrNoControlChannel rather than silently talking Gaia
+// over a socket that was never a rig-control channel to begin with (the
+// prior behavior, before this switch).
+func TestRunRigOverNonControlCapableTransportFails(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		// Block until the probe request actually lands -- replying before
-		// that would race rig.New's reader loop registering as "waiting"
-		// and the reply would be silently dropped (see Rig.dispatch).
-		buf := make([]byte, 64)
-		if _, err := conn.Read(buf); err != nil {
-			return
-		}
-		m := benshi.Message{Group: benshi.GroupBasic, IsReply: true, Command: benshi.CmdGetDevInfo, Body: []byte{0x00}}
-		reply := benshi.Frame{Flags: benshi.FlagNone, Data: m.Bytes()}.Bytes()
-		conn.Write(reply)
-	}()
 
 	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
 
@@ -116,8 +100,12 @@ host = 127.0.0.1
 port = `+portStr+`
 `)
 
-	if err := runRig(cfgPath, 0, []string{"probe"}); err != nil {
-		t.Fatalf("runRig probe over plain TCP transport: %v", err)
+	err = runRig(cfgPath, 0, []string{"probe"})
+	if err == nil {
+		t.Fatal("runRig probe over a TCP transport: err = nil, want ErrNoControlChannel")
+	}
+	if !errors.Is(err, kiss.ErrNoControlChannel) {
+		t.Errorf("runRig probe over a TCP transport: err = %v, want it to wrap kiss.ErrNoControlChannel", err)
 	}
 }
 
