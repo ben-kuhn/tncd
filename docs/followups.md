@@ -50,9 +50,33 @@ length/resync arithmetic is line-for-line equivalent to `benshi.Decoder.Feed`.
 Nothing links them, so a firmware change that moves the frame header would need both edited.
 Either export the needed pieces from `benshi` or add a test that asserts the two agree.
 
+### 4. CI's fuzz smoke step fails intermittently, and the failure looks like a real finding
+`.github/workflows/test.yml` runs six fuzz targets at `-fuzztime=10s` each on every push.
+On 2026-09-24 the `main` build failed with:
+
+    --- FAIL: FuzzParseXID (11.00s)
+        context deadline exceeded
+
+That is Go's fuzz COORDINATOR timing out waiting on a worker, not a crasher. Re-running the
+identical commit with no changes passed. Evidence it was never a code defect: `ax25` was
+untouched by that merge; `ParseXID`'s loop is O(n) with every length bounds-checked, so
+there is no pathological input to find; a local 30s run did 5.1M execs clean; and the CI log
+shows throughput collapsing from 62,217/sec to 19,694/sec in the final seconds — runner
+contention.
+
+Why it matters: a deadline-exceeded result is reported exactly like a genuine fuzz failure,
+and writes nothing to `testdata/fuzz/`, so there is no artifact distinguishing "flake" from
+"found a crasher" without reading the log carefully. It will keep failing pushes and will
+train people to re-run red builds without looking — which is how a real crasher gets missed.
+
+Raising `-fuzztime` makes the step slower without making it more robust. Better options: tell
+the two apart and only fail on an actual crasher, or move fuzzing to a scheduled run rather
+than per-push, keeping the seed-corpus regression tests (which are deterministic and fast) in
+the per-push job.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
-### 4. The UV-PRO's TNC wedges after heavy connect/disconnect churn
+### 5. The UV-PRO's TNC wedges after heavy connect/disconnect churn
 Reproducible: after dozens of Bluetooth connect/disconnect cycles, KISS frames stop reaching
 the air while everything still reports healthy — port online, writes succeed, `tx` counter
 climbing. A power-cycle clears it. Independent of tncd; confirmed by reproducing the failure
@@ -61,7 +85,7 @@ with tncd's own unmodified AGWPE path after it had worked minutes earlier.
 Belongs in the OTA checklist: **if KISS goes silent after repeated reconnects, power-cycle
 the radio before debugging tncd.**
 
-### 5. BLE KISS does not pass traffic on the UV-PRO
+### 6. BLE KISS does not pass traffic on the UV-PRO
 With a genuine LE link (MTU negotiated 155, GATT resolved, notifications subscribed), writes
 to the BLE KISS characteristic either time out (write-with-response) or succeed and vanish
 (write-without-response), and nothing is ever received. The service is advertised and
@@ -82,13 +106,13 @@ must branch from a main that contains `e8c4b31` — the rig-control feature bran
 from the older main and does NOT have it. Merge main in first rather than cherry-picking,
 to keep the history clean.
 
-### 6. The Mobilinkd TNC4's pairing was removed and did not re-pair
+### 7. The Mobilinkd TNC4's pairing was removed and did not re-pair
 Its bond was deleted host-side during BLE investigation; re-pairing reports success but
 stores no key (`Paired: yes, Bonded: no`), so it works over neither classic nor LE. The
 device still holds its half of the old bond. Try a power-cycle first, then whatever reset
 Mobilinkd provides.
 
-### 7. PipeWire's ALSA plugin will not negotiate
+### 8. PipeWire's ALSA plugin will not negotiate
 `arecord -D pipewire` and `-D default` both fail at every rate and channel count, so Dire
 Wolf cannot use PipeWire and must grab the Digirig directly via `plughw`, which prevents any
 other application from sharing that audio interface. The running daemon reports libpipewire
