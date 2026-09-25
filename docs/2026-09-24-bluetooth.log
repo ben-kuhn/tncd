@@ -1,0 +1,132 @@
+Sep 24 18:07:16 CarKit systemd[1]: Starting Bluetooth service...
+Sep 24 18:07:16 CarKit bluetoothd[773]: Bluetooth daemon 5.86
+Sep 24 18:07:16 CarKit bluetoothd[773]: Starting SDP server
+Sep 24 18:07:16 CarKit bluetoothd[773]: Bluetooth management interface 1.23 initialized
+Sep 24 18:07:16 CarKit systemd[1]: Started Bluetooth service.
+Sep 24 18:07:16 CarKit bluetoothd[773]: Battery Provider Manager created
+Sep 24 18:07:16 CarKit bluetoothd[773]: Failed to set default system config for hci0
+Sep 24 18:07:22 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/ldac
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSink/aptx_hd
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_hd
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSink/aptx
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSink/aac
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aac
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSink/opus_g
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/opus_g
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSink/sbc
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/sbc
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/faststream
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/faststream_duplex
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSink/opus_05
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/opus_05
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSink/opus_05_duplex
+Sep 24 18:07:25 CarKit bluetoothd[773]: Endpoint registered: sender=:1.73 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+Sep 24 18:08:33 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:09:23 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:10:33 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:12:03 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:13:33 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:15:03 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:16:33 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:18:03 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:19:33 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:21:03 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:22:33 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:24:03 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:25:33 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:27:03 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/ldac
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSink/aptx_hd
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_hd
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSink/aptx
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSink/aac
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aac
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSink/opus_g
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/opus_g
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSink/sbc
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/sbc
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/faststream
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/faststream_duplex
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSink/opus_05
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/opus_05
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSink/opus_05_duplex
+Sep 24 18:27:08 CarKit bluetoothd[773]: Endpoint unregistered: sender=:1.73 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/ldac
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSink/aptx_hd
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/aptx_hd
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSink/aptx
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/aptx
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSink/aac
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/aac
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSink/opus_g
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/opus_g
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSink/sbc
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/sbc
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/faststream
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/faststream_duplex
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSink/opus_05
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/opus_05
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSink/opus_05_duplex
+Sep 24 18:27:09 CarKit bluetoothd[773]: Endpoint registered: sender=:1.1352 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+Sep 24 18:28:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:29:22 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:30:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:32:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:33:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:35:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:36:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:38:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:39:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:41:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:42:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:44:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:45:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:47:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:48:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:50:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:51:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:53:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:54:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:56:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:57:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 18:59:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:00:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:02:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:03:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:05:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:06:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:08:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:09:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:11:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:12:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:14:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:15:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:17:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:18:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:20:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:21:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:23:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:24:32 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:26:02 CarKit bluetoothd[773]: src/profile.c:record_cb() Unable to get Serial Port SDP record: Host is down
+Sep 24 19:29:37 CarKit bluetoothd[773]: sdp_extract_attr: Unknown data descriptor : 0x5 terminating
+Sep 24 19:30:33 CarKit bluetoothd[773]: Disconnecting failed: already disconnected
+Sep 24 19:30:33 CarKit bluetoothd[773]: No matching connection for device
+Sep 24 19:30:38 CarKit bluetoothd[773]: sdp_extract_attr: Unknown data descriptor : 0x30 terminating
+Sep 24 19:31:37 CarKit bluetoothd[773]: sdp_extract_attr: Unknown data descriptor : 0x30 terminating
+Sep 24 19:32:51 CarKit bluetoothd[773]: sdp_extract_attr: Unknown data descriptor : 0x30 terminating
+Sep 24 19:33:12 CarKit bluetoothd[773]: sdp_extract_attr: Unknown data descriptor : 0x30 terminating
