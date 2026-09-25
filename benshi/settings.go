@@ -1,6 +1,9 @@
 package benshi
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // DoubleChannel reports the radio's dual-watch setting: which of the two VFOs
 // is active, or OFF for single-VFO operation.
@@ -67,7 +70,7 @@ func DecodeSettings(body []byte) (Settings, error) {
 		return Settings{}, ErrShortSettings
 	}
 	if body[0] != 0 {
-		return Settings{}, ErrShortSettings
+		return Settings{}, fmt.Errorf("%w (READ_SETTINGS status %d)", ErrRadioRejected, body[0])
 	}
 	b := body[1:]
 	if len(b) < settingsMinLen {

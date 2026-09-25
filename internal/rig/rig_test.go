@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func scriptActiveChannel(t *testing.T, ch *fakeChannel, base int, settings []byt
 // channel record the active VFO points at, preserving every other field.
 func TestSetFreqRewritesTheActiveVFORecord(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -194,7 +195,7 @@ func TestSetFreqRewritesTheActiveVFORecord(t *testing.T) {
 // VFO, and rewriting it would destroy that memory.
 func TestSetFreqRefusesNamedChannel(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -218,7 +219,7 @@ func TestSetFreqRefusesNamedChannel(t *testing.T) {
 // record could retune a band the operator is still listening to.
 func TestSetFreqRefusesDualWatch(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	dual := append([]byte{}, fakeSettingsCh252...)
@@ -238,7 +239,7 @@ func TestSetFreqRefusesDualWatch(t *testing.T) {
 // this code does not model. Refusing beats guessing when the next step writes.
 func TestSetFreqRefusesWhenSettingsAndStatusDisagree(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -258,7 +259,7 @@ func TestSetFreqRefusesWhenSettingsAndStatusDisagree(t *testing.T) {
 // which on real firmware can hold a stale value the radio is not tuned to.
 func TestGetFreqReadsTheActiveVFORecord(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -277,7 +278,7 @@ func TestGetFreqReadsTheActiveVFORecord(t *testing.T) {
 // A radio that never answers must not wedge the caller.
 func TestRequestTimesOut(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, 50*time.Millisecond)
+	r := New(ch, 50*time.Millisecond, 0)
 	defer r.Close()
 
 	start := time.Now()
@@ -299,7 +300,7 @@ func TestRequestTimesOut(t *testing.T) {
 // and was silently useless.
 func TestTeardownRestoresTheDisplacedRecord(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -340,7 +341,7 @@ func TestTeardownRestoresTheDisplacedRecord(t *testing.T) {
 // to undo, and that is not an error -- but it must also not write anything.
 func TestTeardownWithoutSetFreqIsANoOp(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	restored, err := r.Teardown()
@@ -360,7 +361,7 @@ func TestTeardownWithoutSetFreqIsANoOp(t *testing.T) {
 // radio on a frequency this code chose.
 func TestTeardownRestoresTheOperatorsFrequencyNotOurOwn(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	base := 0
@@ -403,7 +404,7 @@ func TestTeardownRestoresTheOperatorsFrequencyNotOurOwn(t *testing.T) {
 
 func TestGetPTTReadsTXBit(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -428,7 +429,7 @@ func TestGetPTTReadsTXBit(t *testing.T) {
 func TestSetPTTSendsDoProgFuncMainPTT(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		ch := newFakeChannel()
-		r := New(ch, time.Second)
+		r := New(ch, time.Second, 0)
 
 		go func() {
 			time.Sleep(10 * time.Millisecond)
@@ -467,7 +468,7 @@ func TestSetPTTSendsDoProgFuncMainPTT(t *testing.T) {
 
 func TestProbeRejectsFailureStatus(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -512,7 +513,7 @@ func TestRequestTimesOutEvenWhenWriteBlocks(t *testing.T) {
 	ch := newBlockingChannel()
 	defer close(ch.unblock) // release the leaked internal Write/Read goroutines
 	timeout := 50 * time.Millisecond
-	r := New(ch, timeout)
+	r := New(ch, timeout, 0)
 	defer r.Close()
 
 	start := time.Now()
@@ -540,7 +541,7 @@ func (e *errCloseChannel) Close() error {
 func TestCloseReturnsErrorToAllCallers(t *testing.T) {
 	wantErr := errors.New("boom")
 	ch := &errCloseChannel{fakeChannel: newFakeChannel(), closeErr: wantErr}
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 
 	err1 := r.Close()
 	err2 := r.Close()
@@ -556,7 +557,7 @@ func TestCloseReturnsErrorToAllCallers(t *testing.T) {
 // making it wait out its full timeout.
 func TestCloseUnblocksInFlightRequest(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, 5*time.Second) // long enough that only Close should unblock this
+	r := New(ch, 5*time.Second, 0) // long enough that only Close should unblock this
 
 	done := make(chan error, 1)
 	go func() {
@@ -595,7 +596,7 @@ func TestCloseUnblocksInFlightRequest(t *testing.T) {
 // issued immediately afterward and must get its own correct reply.
 func TestLostReplyRequest2GetsOwnReply(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, 20*time.Millisecond)
+	r := New(ch, 20*time.Millisecond, 0)
 	defer r.Close()
 
 	if _, err := r.GetPTT(); !errors.Is(err, ErrTimeout) {
@@ -632,7 +633,7 @@ func TestLostReplyRequest2GetsOwnReply(t *testing.T) {
 func TestLateReplyDiscardedDuringQuietPeriod(t *testing.T) {
 	ch := newFakeChannel()
 	timeout := 40 * time.Millisecond
-	r := New(ch, timeout) // quiet period = 3*timeout = 120ms
+	r := New(ch, timeout, 0) // quiet period = 3*timeout = 120ms
 	defer r.Close()
 
 	staleReply := statusTX(false) // request1's straggler: TX idle
@@ -670,7 +671,7 @@ func TestLateReplyDiscardedDuringQuietPeriod(t *testing.T) {
 // later request must still get its own correct reply, with no trailing.
 func TestConsecutiveLossesDoNotTrail(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, 10*time.Millisecond)
+	r := New(ch, 10*time.Millisecond, 0)
 	defer r.Close()
 
 	for i := 0; i < 3; i++ {
@@ -698,7 +699,7 @@ func TestConsecutiveLossesDoNotTrail(t *testing.T) {
 func TestCloseDuringQuietPeriodReturnsPromptly(t *testing.T) {
 	ch := newFakeChannel()
 	timeout := 20 * time.Millisecond
-	r := New(ch, timeout) // quiet period = 60ms
+	r := New(ch, timeout, 0) // quiet period = 60ms
 	defer r.Close()
 
 	done := make(chan error, 1)
@@ -766,7 +767,7 @@ func (g *gatedWriteChannel) Write(p []byte) (int, error) {
 // hole this test covers never had a chance to show up there.
 func TestWriteTimeoutPoisonsAgainstLateLandingWrite(t *testing.T) {
 	ch := newGatedWriteChannel()
-	r := New(ch, 20*time.Millisecond)
+	r := New(ch, 20*time.Millisecond, 0)
 	defer r.Close()
 
 	if err := r.SetFreq(145030000); !errors.Is(err, ErrTimeout) {
@@ -793,7 +794,7 @@ func TestWriteTimeoutPoisonsAgainstLateLandingWrite(t *testing.T) {
 func TestWriteTimeoutPoisonsAllSubsequentCalls(t *testing.T) {
 	ch := newGatedWriteChannel()
 	defer close(ch.gate) // release the leaked abandoned-write goroutine
-	r := New(ch, 20*time.Millisecond)
+	r := New(ch, 20*time.Millisecond, 0)
 	defer r.Close()
 
 	if err := r.SetFreq(145030000); !errors.Is(err, ErrTimeout) {
@@ -826,7 +827,7 @@ func TestWriteTimeoutPoisonsAllSubsequentCalls(t *testing.T) {
 // the exact wire bytes against benlink's own frame for the same command.
 func TestProbeEmitsBenlinkMatchingFrame(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -861,7 +862,7 @@ func TestProbeEmitsBenlinkMatchingFrame(t *testing.T) {
 // this test isolates it against currChannel directly.
 func TestCurrChannelPlainStatusUsesLowerNibbleOnly(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -884,7 +885,7 @@ func TestCurrChannelPlainStatusUsesLowerNibbleOnly(t *testing.T) {
 // confirmed live by READ_RF_CH echoing channel_id=0xFC (252) back.
 func TestCurrChannelStatusExtUsesUpperAndLowerNibble(t *testing.T) {
 	ch := newFakeChannel()
-	r := New(ch, time.Second)
+	r := New(ch, time.Second, 0)
 	defer r.Close()
 
 	go func() {
@@ -908,3 +909,127 @@ func TestCurrChannelStatusExtUsesUpperAndLowerNibble(t *testing.T) {
 // over reading the wrong register in the first place. GetFreq now reads the
 // active VFO's channel record unconditionally -- see
 // TestGetFreqReadsTheActiveVFORecord.
+
+// TestSetFreqRefusesChannelBelowVFOFloor covers the gap the name guard alone
+// leaves: an operator's memory channel that was never NAMED passes the name
+// check. On a UV-PRO the VFOs live at 251/252 above a memory bank starting at
+// 0, so an id floor separates them.
+func TestSetFreqRefusesChannelBelowVFOFloor(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second, 0) // 0 -> DefaultVFOChannelMin
+	defer r.Close()
+
+	// An unnamed record at channel 7 -- a blank memory, not the VFO.
+	rec := append([]byte{}, fakeVFORecord...)
+	rec[0] = 7
+	settings := append([]byte{}, fakeSettingsCh252...)
+	settings[1] = (settings[1] & 0x0F) | 0x70 // channel_a_lower = 7
+	settings[10] = settings[10] & 0x0F        // channel_a_upper = 0
+
+	go func() {
+		scriptActiveChannel(t, ch, 0, settings, 7, rec)
+	}()
+
+	err := r.SetFreq(145670000)
+	if !errors.Is(err, ErrChannelMode) {
+		t.Fatalf("SetFreq on channel 7: err = %v, want ErrChannelMode", err)
+	}
+	// The message has to tell the operator how to override it, since other
+	// Benshi variants may not number their VFOs the same way.
+	if !strings.Contains(err.Error(), "vfo_channel_min") {
+		t.Errorf("refusal does not say how to override it: %v", err)
+	}
+	for _, w := range ch.writes() {
+		if m, derr := benshi.DecodeMessage(w[4:]); derr == nil && m.Command == benshi.CmdWriteRFCh {
+			t.Fatal("SetFreq wrote a record below the VFO floor -- a memory channel would have been destroyed")
+		}
+	}
+}
+
+// TestSetFreqRefusesSplitChannel is the guard that holds on ANY model
+// regardless of numbering: a repeater split is certainly a memory, and
+// WithFreq writes rx = tx, so tuning it would discard the offset.
+func TestSetFreqRefusesSplitChannel(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second, 0)
+	defer r.Close()
+
+	rec := append([]byte{}, fakeVFORecord...)
+	binary.BigEndian.PutUint32(rec[1:5], 146940000) // tx
+	binary.BigEndian.PutUint32(rec[5:9], 146340000) // rx -- a -600 split
+
+	go func() {
+		scriptActiveChannel(t, ch, 0, fakeSettingsCh252, 252, rec)
+	}()
+
+	if err := r.SetFreq(145670000); !errors.Is(err, ErrChannelMode) {
+		t.Fatalf("SetFreq on a split channel: err = %v, want ErrChannelMode", err)
+	}
+	for _, w := range ch.writes() {
+		if m, derr := benshi.DecodeMessage(w[4:]); derr == nil && m.Command == benshi.CmdWriteRFCh {
+			t.Fatal("SetFreq rewrote a split memory channel to simplex")
+		}
+	}
+}
+
+// TestSetFreqHonoursConfiguredVFOFloor proves the override works, for a
+// Benshi variant that keeps its VFO somewhere other than 251+.
+func TestSetFreqHonoursConfiguredVFOFloor(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second, 7) // this radio's VFO really is channel 7
+	defer r.Close()
+
+	rec := append([]byte{}, fakeVFORecord...)
+	rec[0] = 7
+	settings := append([]byte{}, fakeSettingsCh252...)
+	settings[1] = (settings[1] & 0x0F) | 0x70
+	settings[10] = settings[10] & 0x0F
+
+	go func() {
+		scriptActiveChannel(t, ch, 0, settings, 7, rec)
+		ch.awaitWrite(t, 4)
+		ch.reply(benshi.CmdWriteRFCh, []byte{0x00, 0x07})
+	}()
+
+	if err := r.SetFreq(145670000); err != nil {
+		t.Fatalf("SetFreq with vfo_channel_min = 7: %v", err)
+	}
+}
+
+// A rig that poisoned itself (write timeout) or whose reader exited must
+// report Closed, so a caller caching it can drop it instead of handing back
+// a permanently dead session.
+func TestClosedReportsPoisonedRig(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, 20*time.Millisecond, 0)
+	defer r.Close()
+
+	if r.Closed() {
+		t.Fatal("a fresh rig reports Closed")
+	}
+	r.Close()
+	if !r.Closed() {
+		t.Error("Closed() = false after Close()")
+	}
+}
+
+// A control channel that EOFs must close the rig, so later calls fail fast
+// with ErrClosed instead of burning a full timeout plus the quiet period.
+func TestReaderExitClosesRig(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, 5*time.Second, 0)
+	defer r.Close()
+
+	ch.Close() // reader sees EOF
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if r.Closed() {
+			if _, err := r.GetPTT(); !errors.Is(err, ErrClosed) {
+				t.Errorf("after reader exit: err = %v, want ErrClosed", err)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Error("reader loop exited without closing the rig -- every later command would burn timeout + quiet period")
+}

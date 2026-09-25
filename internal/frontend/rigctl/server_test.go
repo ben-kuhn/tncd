@@ -2,6 +2,7 @@ package rigctl
 
 import (
 	"bufio"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -354,18 +355,81 @@ func TestReleasePTTWithNothingKeyedIsHarmless(t *testing.T) {
 
 // forceReleasePTT must tolerate a nil Rig (port offline/mid-relink at the
 // moment of release) rather than panicking -- the one situation where the
-// radio genuinely cannot be reached, which is exactly when this code must
-// stay alive to at least clear tncd's own state and log loudly.
-func TestForceReleasePTTToleratesNilRig(t *testing.T) {
+// radio genuinely cannot be reached.
+//
+// A NON-final release keeps believing the key is down and leaves a retry
+// timer armed. That is the point: a nil rig means the port is mid-relink,
+// so the very next attempt may well find a live one, and clearing the state
+// here would disarm every remaining force-release path for a transmitter
+// that is probably still on the air.
+func TestForceReleasePTTWithNilRigKeepsRetrying(t *testing.T) {
 	st := &pttState{keyed: true, timer: time.AfterFunc(time.Hour, func() {})}
-	forceReleasePTT(nil, st)
+	forceReleasePTT(nil, st, false)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.keyed {
+		t.Error("gave up on a keyed transmitter when the rig was merely mid-relink")
+	}
+	if st.timer == nil {
+		t.Error("no retry timer armed after a failed release -- the backstop is gone")
+	}
+}
+
+// A FINAL release (server shutting down) must clear the state instead,
+// because nothing will be left running to fire a retry timer.
+func TestForceReleasePTTFinalWithNilRigClearsState(t *testing.T) {
+	st := &pttState{keyed: true, timer: time.AfterFunc(time.Hour, func() {})}
+	forceReleasePTT(nil, st, true)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.keyed {
-		t.Error("pttState still reports keyed after a force-release with a nil rig")
+		t.Error("pttState still reports keyed after a final force-release")
 	}
 	if st.timer != nil {
-		t.Error("timer not cleared after a force-release with a nil rig")
+		t.Error("timer not cleared after a final force-release -- it would only leak")
+	}
+}
+
+// A failed key must be treated as keyed. (*rig.Rig).request only reaches its
+// reply phase after the write has landed, so a reply timeout means the radio
+// very probably IS transmitting; recording "not keyed" would arm no timer and
+// make every force-release path short-circuit, leaving it keyed until a
+// power cycle.
+func TestFailedKeyStillArmsTheSafetyTimer(t *testing.T) {
+	st := &pttState{}
+	f := &fakeRig{pttErr: errors.New("reply timed out")}
+	if err := keyLocked(f, st, time.Hour); err == nil {
+		t.Fatal("keyLocked hid the failure from its caller")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.keyed {
+		t.Error("a failed key was recorded as not keyed -- every force-release path is now disarmed")
+	}
+	if st.timer == nil {
+		t.Error("no safety timer armed after a failed key")
+	}
+}
+
+// A failed un-key must not cancel the safety timer. The old code stopped and
+// nil'd it BEFORE calling the radio, so a failure there removed the only
+// thing that would have caught a key still being down.
+func TestFailedReleaseKeepsTheSafetyTimer(t *testing.T) {
+	st := &pttState{keyed: true}
+	f := &fakeRig{pttErr: errors.New("reply timed out")}
+	st.mu.Lock()
+	err := releaseLocked(f, st)
+	st.mu.Unlock()
+	if err == nil {
+		t.Fatal("releaseLocked hid the failure from its caller")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.keyed {
+		t.Error("a failed release cleared st.keyed -- tncd now believes a possibly-keyed radio is idle")
+	}
+	if st.timer == nil {
+		t.Error("a failed release left no retry timer armed")
 	}
 }
 

@@ -115,9 +115,51 @@ Note the parse failure returns BEFORE the relink counter is reset in `handleFram
 corrupt bytes do not currently reset the futile-relink budget. That is the correct behaviour
 and worth preserving if this is fixed.
 
+### 9. The demux does not handle compact (shared-FEND) KISS framing
+`kiss/demux.go` enters a KISS frame only on its own opening FEND and leaves on
+its own closing FEND. `framing.go`'s `Decoder` additionally treats a FEND seen
+while already in-frame as closing one frame AND opening the next -- the compact
+single-delimiter form -- and stays in-frame through it. So a peer emitting
+`C0 <f1> C0 <f2> C0` loses `f2`: after the middle FEND the demux is out of
+KISS, and `f2`'s first byte hits `scan`'s noise branch and is dropped, byte by
+byte, until the next FEND. Silent, with no counter.
+
+The demux is wired into EVERY port, so this would affect serial and TCP users
+who have nothing to do with Benshi radios.
+
+**Not fixed, deliberately.** The obvious fix -- treat a byte following a
+closing FEND as the next frame's content -- breaks
+`TestPortControlChannelKISSTXWriteNotCorruptedByConcurrentControlWrites`, which
+guards mixed KISS/control interleaving on one stream. That interleaving is
+verified on air (two KISS frames plus a Gaia reply, confirmed by an independent
+Dire Wolf receiver); compact-form framing is **not** verified to be emitted by
+any TNC in the supported matrix. Trading a confirmed guarantee for a
+hypothetical one is the wrong way round.
+
+**What would settle it:** capture raw bytes from each supported TNC (KPC-3+,
+PK-232, TS-2000, Mobilinkd TNC4, UV-PRO) and check whether any emits
+`C0 <f1> C0 <f2> C0` rather than `C0 <f1> C0 C0 <f2> C0`. If one does, the
+demux needs real disambiguation rather than a blanket rule -- note that on a
+Benshi port every control frame starts `0xFF`, so "anything else after a
+closing FEND is KISS content" may in fact be safe there, and the test's raw
+`0xBB` stand-in for a control write does not reflect the real Gaia framing.
+
+### 10. A stray `0xFF 0x01` can swallow a run of bytes on any port
+Same file: `scan` starts a Gaia candidate on `0xFF` regardless of whether a rig
+consumer is attached, and `deliverGaia` only checks for a consumer after the
+frame is fully accumulated. Noise matching `0xFF 0x01` therefore consumes up to
+263 following bytes, whole KISS frames included.
+
+Lower risk than it first looks: a `0xFF` not followed by `0x01` is rejected
+after one byte and re-examined, so it takes that exact pair to trigger.
+Gating accumulation on an attached consumer is NOT the fix -- it was tried and
+reverted. Skipping recognition feeds the Gaia frame's bytes to the KISS decoder
+as frame content and fabricates a spurious KISS frame, which is worse, and it
+would hit a real Benshi port whenever rig control happened to be detached.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
-### 9. The UV-PRO's TNC wedges after heavy connect/disconnect churn
+### 11. The UV-PRO's TNC wedges after heavy connect/disconnect churn
 Reproducible: after dozens of Bluetooth connect/disconnect cycles, KISS frames stop reaching
 the air while everything still reports healthy — port online, writes succeed, `tx` counter
 climbing. A power-cycle clears it. Independent of tncd; confirmed by reproducing the failure
@@ -126,7 +168,7 @@ with tncd's own unmodified AGWPE path after it had worked minutes earlier.
 Belongs in the OTA checklist: **if KISS goes silent after repeated reconnects, power-cycle
 the radio before debugging tncd.**
 
-### 10. BLE KISS does not pass traffic on the UV-PRO
+### 12. BLE KISS does not pass traffic on the UV-PRO
 With a genuine LE link (MTU negotiated 155, GATT resolved, notifications subscribed), writes
 to the BLE KISS characteristic either time out (write-with-response) or succeed and vanish
 (write-without-response), and nothing is ever received. The service is advertised and
@@ -147,13 +189,13 @@ must branch from a main that contains `e8c4b31` — the rig-control feature bran
 from the older main and does NOT have it. Merge main in first rather than cherry-picking,
 to keep the history clean.
 
-### 11. The Mobilinkd TNC4's pairing was removed and did not re-pair
+### 13. The Mobilinkd TNC4's pairing was removed and did not re-pair
 Its bond was deleted host-side during BLE investigation; re-pairing reports success but
 stores no key (`Paired: yes, Bonded: no`), so it works over neither classic nor LE. The
 device still holds its half of the old bond. Try a power-cycle first, then whatever reset
 Mobilinkd provides.
 
-### 12. PipeWire's ALSA plugin will not negotiate
+### 14. PipeWire's ALSA plugin will not negotiate
 `arecord -D pipewire` and `-D default` both fail at every rate and channel count, so Dire
 Wolf cannot use PipeWire and must grab the Digirig directly via `plughw`, which prevents any
 other application from sharing that audio interface. The running daemon reports libpipewire

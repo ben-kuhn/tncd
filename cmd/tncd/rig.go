@@ -109,7 +109,7 @@ func runRig(cfgPath string, port int, args []string) error {
 	}
 	defer cc.Close()
 
-	r := rig.New(cc, 5*time.Second)
+	r := rig.New(cc, 5*time.Second, cfg.Ports[port].VFOChannelMin)
 	defer r.Close()
 
 	switch cmd {

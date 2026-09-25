@@ -40,13 +40,43 @@ jobs:
           GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=0 go build -o /tmp/tncd ./cmd/tncd
           echo "ok: linux/arm (GOARM=6)"
 
+      # The generated corpus is cached across runs. That is not a speed
+      # optimisation: on a COLD cache each target rediscovers its whole corpus
+      # inside the 10s budget (FuzzParseModulo finds ~47 new inputs from its 6
+      # seeds, reproduced locally with an empty GOCACHE), and every new input
+      # triggers minimisation. When the deadline lands during that work the
+      # coordinator reports "context deadline exceeded" and the step fails
+      # with no crasher written -- which is what made this step flake twice,
+      # both times on commits that changed no Go code. A warm corpus finds ~0
+      # new inputs, so there is nothing to minimise at the boundary. It also
+      # makes fuzzing cumulative instead of restarting from the seeds on every
+      # push, which is strictly better coverage. Per-commit key with a prefix
+      # restore, so each run seeds from the latest corpus and saves its own.
+      - name: Fuzz corpus cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build/fuzz
+          key: fuzz-corpus-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-
+
       - name: Fuzz smoke (10s per parser target)
         run: |
           set -e
+          # EVERY Fuzz* target in the tree. Keep this list in sync when adding
+          # one: CLAUDE.md promises CI fuzzes every untrusted-byte parser, and
+          # a target missing here only ever replays its seed corpus under
+          # plain `go test` -- it is never actually fuzzed.
           for spec in "ax25 FuzzParseModulo" "ax25 FuzzParseXID" "ax25 FuzzParseAddress" \
-                      "agwpe FuzzParseHeader" "kiss FuzzDecoderFeed" "kiss FuzzParseRFCOMMChannel"; do
+                      "agwpe FuzzParseHeader" "kiss FuzzDecoderFeed" \
+                      "kiss FuzzParseRFCOMMChannel" "kiss FuzzDemuxFeed" \
+                      "benshi FuzzDecoder" "benshi FuzzDecodeMessage" \
+                      "benshi FuzzParseRFCh" "benshi FuzzDecodeSettings" \
+                      "internal/frontend/rigctl FuzzHandleLine"; do
             pkg="${spec% *}"; target="${spec#* }"
-            CGO_ENABLED=0 go test -fuzz="$target" -fuzztime=10s "./$pkg/"
+            # -fuzzminimizetime bounds the per-find minimisation that races the
+            # deadline; without it one slow minimisation can overrun the step.
+            CGO_ENABLED=0 go test -fuzz="$target" -fuzztime=10s -fuzzminimizetime=2s "./$pkg/"
           done
 
   vulncheck:

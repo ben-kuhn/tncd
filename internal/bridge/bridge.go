@@ -267,7 +267,15 @@ func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
 		b.invalidateRig(port)
 		return nil, fmt.Errorf("bridge: port %d is offline", port)
 	}
-	if port < len(b.rigs) && b.rigs[port].r != nil && b.rigs[port].kp == kp {
+	// A cached rig must be both the RIGHT link and still alive. Checking
+	// only the link left a self-poisoned rig cached forever: request()
+	// closes the rig on a write timeout, and because rigRequestTimeout (5s)
+	// is shorter than the port layer's own ctrlWriteTimeout (10s), the rig
+	// poisons itself while the PORT stays online -- so kp never changes,
+	// the cache never invalidates, and every later command returns
+	// ErrClosed until tncd restarts. Dropping a closed rig here rebuilds it
+	// on the next call instead.
+	if port < len(b.rigs) && b.rigs[port].r != nil && b.rigs[port].kp == kp && !b.rigs[port].r.Closed() {
 		return b.rigs[port].r, nil
 	}
 	// Either nothing cached yet, or the cached entry belonged to a port
@@ -278,7 +286,11 @@ func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bridge: port %d: %w", port, err)
 	}
-	r := rig.New(ch, rigRequestTimeout)
+	vfoMin := 0
+	if port < len(b.cfg.Ports) {
+		vfoMin = b.cfg.Ports[port].VFOChannelMin
+	}
+	r := rig.New(ch, rigRequestTimeout, vfoMin)
 	if port < len(b.rigs) {
 		b.rigs[port] = rigSlot{kp: kp, r: r}
 	}

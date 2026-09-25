@@ -1,6 +1,9 @@
 package benshi
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // goldenSettings is a READ_SETTINGS reply body captured from a BTech UV-PRO
 // on 2026-09-24. On that radio VFO A pointed at channel 252 (its unnamed VFO
@@ -41,8 +44,11 @@ func TestDecodeSettingsRejectsShortAndFailed(t *testing.T) {
 	if _, err := DecodeSettings(nil); err != ErrShortSettings {
 		t.Errorf("DecodeSettings(nil): err = %v, want ErrShortSettings", err)
 	}
-	if _, err := DecodeSettings([]byte{0x05, 1, 2, 3}); err != ErrShortSettings {
-		t.Errorf("DecodeSettings(failure status): err = %v, want ErrShortSettings", err)
+	// A radio that REFUSED the command is a different failure from a
+	// truncated reply, and reporting it as "too short" sends the operator
+	// looking at the wrong thing.
+	if _, err := DecodeSettings([]byte{0x05, 1, 2, 3}); !errors.Is(err, ErrRadioRejected) {
+		t.Errorf("DecodeSettings(failure status): err = %v, want ErrRadioRejected", err)
 	}
 	if _, err := DecodeSettings(goldenSettings[:settingsMinLen]); err != ErrShortSettings {
 		t.Errorf("DecodeSettings(truncated): err = %v, want ErrShortSettings", err)

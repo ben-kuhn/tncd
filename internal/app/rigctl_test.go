@@ -312,3 +312,60 @@ func TestRigCtlShutdownReleasesKeyedPTTBeforePortsTeardown(t *testing.T) {
 			"force-release any keyed PTT, before ports are torn down", n)
 	}
 }
+
+// TestRigCtlStartFailureDoesNotDeadlockNew is a regression test for a startup
+// hang: when a LATER rigctl listener failed to bind after an earlier one had
+// already succeeded, New's cleanup path never returned.
+//
+// The cycle was Runtime.New -> closeRigServers -> (*rigctl.Server).Close ->
+// forceReleasePTT(s.rig(), ...) -> Runtime.rigForPort -> eng.Do + block on the
+// reply. Nothing drains the engine queue until eng.Run, which only happens in
+// Runtime.Wait -- i.e. after New has returned. tncd hung at startup with no
+// output and no error and had to be killed. It fired regardless of allow_ptt
+// and regardless of whether anything had ever been keyed, because the rig was
+// resolved before the "is anything keyed?" check rather than after it.
+func TestRigCtlStartFailureDoesNotDeadlockNew(t *testing.T) {
+	// Occupy a port so the second listener's bind is guaranteed to fail.
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer occupied.Close()
+	_, portStr, err := net.SplitHostPort(occupied.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	taken, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+
+	cfg := minimalConfig(t)
+	cfg.Ports = append(cfg.Ports, cfg.Ports[0])
+	cfg.RigCtl = []config.RigCtl{
+		{Enabled: true, ListenHost: "127.0.0.1", ListenPort: 0, PTTTimeout: 30},     // binds
+		{Enabled: true, ListenHost: "127.0.0.1", ListenPort: taken, PTTTimeout: 30}, // fails
+	}
+
+	type result struct {
+		rt  *Runtime
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rt, err := New(cfg, 0, 0)
+		done <- result{rt, err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Fatal("New succeeded despite a rigctl listener that could not bind")
+		}
+		if got.rt != nil {
+			t.Error("New returned a Runtime alongside an error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DEADLOCK: New did not return within 5s on the rigctl start-failure cleanup path")
+	}
+}

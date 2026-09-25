@@ -78,6 +78,10 @@ type pttState struct {
 	// that window without needing to drain a channel or otherwise reason
 	// about time.Timer's notoriously fiddly Stop/Reset semantics.
 	gen uint64
+	// releaseTries counts consecutive FAILED un-key attempts, so a release
+	// that keeps failing is retried a bounded number of times instead of
+	// forever. Reset on any successful release. See releaseLocked.
+	releaseTries int
 }
 
 // errToRPRT maps a rig error onto the hamlib code a client expects.
@@ -269,10 +273,23 @@ func handleSetPTT(args []string, r Rig, cfg config.RigCtl, st *pttState) string 
 // place: it is a no-op on the radio, and only refreshes the timer.
 func keyLocked(r Rig, st *pttState, timeout time.Duration) error {
 	if !st.keyed {
-		if err := r.SetPTT(true); err != nil {
-			return err
-		}
+		err := r.SetPTT(true)
+		// A FAILED key must still be treated as keyed, and this is the
+		// case the whole safety net exists for. (*rig.Rig).request only
+		// reaches its reply phase once the write has already landed on the
+		// wire, so the error this is most likely to see -- a reply timeout
+		// -- means the radio very probably DID receive the toggle and is
+		// transmitting right now. Recording "not keyed" there would arm no
+		// timer and make every force-release path short-circuit on
+		// !st.keyed, disarming the backstop precisely when it is needed:
+		// the transmitter would then stay keyed until the radio is power
+		// cycled. Assuming keyed costs at most one redundant un-key attempt
+		// on a radio that never keyed; assuming not-keyed costs a stuck
+		// transmitter. The error is still returned, so the client sees the
+		// failure -- it just does not get to disarm the timer.
 		st.keyed = true
+		armTimerLocked(r, st, timeout)
+		return err
 	}
 	armTimerLocked(r, st, timeout)
 	return nil
@@ -326,16 +343,65 @@ func releaseLocked(r Rig, st *pttState) error {
 	if !st.keyed {
 		return nil
 	}
+	err := error(nil)
+	if rigIsNil(r) {
+		// No channel to un-key on at all (port offline or mid-relink).
+		err = rig.ErrClosed
+	} else {
+		err = r.SetPTT(false)
+	}
+	if err == nil {
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+		}
+		st.keyed = false
+		st.releaseTries = 0
+		return nil
+	}
+
+	// The un-key did not land. Do NOT clear st.keyed or stop the timer:
+	// the old code did both BEFORE calling the radio, so a failure here
+	// cancelled the backstop and left the key possibly down with nothing
+	// left to catch it. Keep believing the radio is keyed and re-arm a
+	// short timer so the release is retried -- by then the port may have
+	// relinked and the next attempt gets a live rig.
+	st.releaseTries++
+	if st.releaseTries <= maxReleaseRetries {
+		armTimerLocked(r, st, releaseRetryDelay)
+		return err
+	}
+
+	// Out of retries. Nothing in software can un-key this radio, and
+	// retrying forever would spin a timer and a log line every few seconds
+	// for the life of the process. Clear the state so tncd stops acting on
+	// a belief it can no longer do anything about, and say plainly that
+	// this needs a human -- CLAUDE.md documents that a wedged Bluetooth
+	// link accepts writes and drops them, so only powering the radio down
+	// (or its own key timeout) can be relied on here.
 	if st.timer != nil {
 		st.timer.Stop()
 		st.timer = nil
 	}
 	st.keyed = false
-	if rigIsNil(r) {
-		return rig.ErrClosed
-	}
-	return r.SetPTT(false)
+	st.releaseTries = 0
+	log.Printf("rigctl: giving up un-keying PTT after %d failed attempts -- "+
+		"THE TRANSMITTER MAY STILL BE KEYED; power-cycle the radio", maxReleaseRetries)
+	return err
 }
+
+// maxReleaseRetries bounds how many times a failing un-key is retried before
+// tncd stops trying. Small: each attempt is already bounded by
+// (*rig.Rig).request's timeout, and if several spaced-out attempts have all
+// failed, the transport is not coming back on a timescale that matters to a
+// transmitter that is currently on the air.
+const maxReleaseRetries = 3
+
+// releaseRetryDelay is how soon a FAILED un-key is retried by the safety
+// timer. Short, because the radio may be transmitting right now, but not so
+// short that it spins into a wedged transport -- each attempt is already
+// bounded by (*rig.Rig).request's own timeout.
+const releaseRetryDelay = 3 * time.Second
 
 // forceReleasePTT is releaseLocked for the two callers that don't already
 // hold st.mu, aren't tied to a specific timer generation, and have no RPRT
@@ -363,9 +429,23 @@ func releaseLocked(r Rig, st *pttState) error {
 // than silently swallowed, since that is the one situation where only a
 // human (power off, or wait for the physical key timeout on the radio side)
 // can guarantee the transmitter actually goes quiet.
-func forceReleasePTT(r Rig, st *pttState) {
+func forceReleasePTT(r Rig, st *pttState, final bool) {
 	st.mu.Lock()
 	err := releaseLocked(r, st)
+	if err != nil && final {
+		// Shutdown: releaseLocked has kept st.keyed true and armed a retry
+		// timer, which is right when something will still be running to
+		// fire it and wrong here -- the process is going away, so that
+		// timer never fires and only leaks. Clear the state and let the
+		// log line below be the last word. Nothing in software can do more
+		// for a radio that would not take the un-key.
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+		}
+		st.keyed = false
+		st.releaseTries = 0
+	}
 	st.mu.Unlock()
 	if err != nil {
 		log.Printf("rigctl: PTT force-release failed -- transmitter may still be keyed: %v", err)
@@ -503,7 +583,15 @@ func (s *Server) handleConn(conn net.Conn) {
 	// set_ptt 0. This is a no-op (see releaseLocked) unless this connection
 	// -- or another one sharing the same server-wide pttState -- actually
 	// left it keyed.
-	defer forceReleasePTT(s.rig(), s.ptt)
+	// Wrapped in a closure, NOT `defer forceReleasePTT(s.rig(), ...)`:
+	// deferred call ARGUMENTS evaluate when the defer statement runs, so
+	// the bare form resolves the Rig at accept time and un-keys through
+	// whatever rig existed then -- nil if the port was offline, or a since
+	// closed one if the port relinked mid-session. Resolve it at return
+	// instead, which is also what this file's provider doc promises
+	// ("called fresh per request, not cached at Accept time"). Not final:
+	// the server keeps running, so a failed release can still be retried.
+	defer func() { forceReleasePTT(s.rig(), s.ptt, false) }()
 
 	scanner := bufio.NewScanner(conn)
 	for {
@@ -537,7 +625,23 @@ func (s *Server) Close() error {
 	// the radio, so ordering relative to them doesn't matter, but doing it
 	// first means a Close() that's interrupted or panics partway through
 	// still attempted the release before anything else.
-	forceReleasePTT(s.rig(), s.ptt)
+	//
+	// The keyed check comes FIRST, and deliberately does not go through
+	// s.rig() unless something is actually keyed. Resolving a Rig means a
+	// round trip through the engine loop (Runtime.rigForPort does eng.Do
+	// then blocks on the reply), and Runtime.New's own error path calls
+	// Close on already-started servers BEFORE the engine is running --
+	// eng.Run only happens in Runtime.Wait. Unconditionally resolving here
+	// therefore deadlocked tncd at startup, with no output and no error,
+	// whenever a later rigctl listener failed to bind after an earlier one
+	// succeeded. Nothing can be keyed in that scenario, so asking at all
+	// was both unnecessary and fatal.
+	s.ptt.mu.Lock()
+	keyed := s.ptt.keyed
+	s.ptt.mu.Unlock()
+	if keyed {
+		forceReleasePTT(s.rig(), s.ptt, true)
+	}
 
 	var err error
 	if ln != nil {

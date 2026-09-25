@@ -71,9 +71,15 @@ const quietPeriodMultiplier = 3
 // the wire), the rig is poisoned instead: every later call fails with
 // ErrClosed rather than risking a second write interleaving with the
 // abandoned one, or a later request receiving its eventual stray reply.
+// DefaultVFOChannelMin is the fallback for Rig's VFO floor. See
+// SetFreq, and config.Port.VFOChannelMin for why it is configurable.
+const DefaultVFOChannelMin = 251
+
 type Rig struct {
 	ch      io.ReadWriteCloser
 	timeout time.Duration
+	// vfoMin is the lowest channel id SetFreq will overwrite.
+	vfoMin int
 
 	// reqMu serializes whole request/response exchanges, including the
 	// post-timeout quiet period -- that's what makes the period actually
@@ -95,10 +101,25 @@ type Rig struct {
 }
 
 // New starts a rig on ch. The reader goroutine runs until Close.
-func New(ch io.ReadWriteCloser, timeout time.Duration) *Rig {
-	r := &Rig{ch: ch, timeout: timeout, closedCh: make(chan struct{})}
+func New(ch io.ReadWriteCloser, timeout time.Duration, vfoChannelMin int) *Rig {
+	if vfoChannelMin <= 0 {
+		vfoChannelMin = DefaultVFOChannelMin
+	}
+	r := &Rig{ch: ch, timeout: timeout, vfoMin: vfoChannelMin, closedCh: make(chan struct{})}
 	go r.readLoop()
 	return r
+}
+
+// Closed reports whether this rig has been shut down -- by an explicit
+// Close, by a write-timeout self-poisoning, or by its reader loop exiting.
+//
+// Callers that CACHE a Rig must consult this: request() closes the rig on a
+// write timeout, and a cache that only checks "is this the same link?" will
+// otherwise hand out a permanently dead rig forever.
+func (r *Rig) Closed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
 }
 
 // Close shuts the rig down and closes the underlying channel.
@@ -202,9 +223,37 @@ func (r *Rig) SetFreq(hz uint32) error {
 	if err != nil {
 		return err
 	}
+	// Three independent guards, because each catches a case the others
+	// miss and the cost of being wrong is destroying a memory channel on
+	// the operator's physical radio, silently and permanently.
+	//
+	// 1. A NAME means the operator programmed this record, so the radio is
+	//    on a memory, not its VFO.
 	if name := ch.Name(); name != "" {
 		return fmt.Errorf("%w: channel %d is %q -- switch the radio to VFO/frequency mode first",
 			ErrChannelMode, ch.ID(), name)
+	}
+	// 2. An UNNAMED memory passes the name check but is still a memory. On
+	//    a UV-PRO the VFOs are 251 and 252, above a memory bank starting at
+	//    0, so an id floor separates them -- but other Benshi variants are
+	//    not confirmed to number theirs the same way, which is why this is
+	//    configurable and why the error says exactly what to set. Failing
+	//    here costs an operator one config line; not checking costs them a
+	//    memory channel.
+	if int(ch.ID()) < r.vfoMin {
+		return fmt.Errorf("%w: channel %d is below the VFO floor (%d), so it looks like a memory "+
+			"channel rather than the VFO -- if this radio really does keep its VFO at channel %d, "+
+			"set vfo_channel_min = %d for this port",
+			ErrChannelMode, ch.ID(), r.vfoMin, ch.ID(), ch.ID())
+	}
+	// 3. A repeater split is certainly a memory, whatever its id or name,
+	//    so this one holds on any model regardless of numbering. It also
+	//    stops a simplex QSY from silently discarding an offset the
+	//    operator set -- WithFreq writes rx = tx.
+	if ch.TXFreqHz() != ch.RXFreqHz() {
+		return fmt.Errorf("%w: channel %d has a split (tx %d, rx %d), so it is a memory channel, "+
+			"not a VFO -- tuning it would discard the offset",
+			ErrChannelMode, ch.ID(), ch.TXFreqHz(), ch.RXFreqHz())
 	}
 	r.rememberOriginal(ch)
 	body, err := r.request(benshi.CmdWriteRFCh, ch.WithFreq(hz).Bytes())
@@ -305,8 +354,11 @@ func (r *Rig) GetPTT() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if len(body) < 2 || body[0] != 0 {
+	if len(body) < 2 {
 		return false, benshi.ErrShortBody
+	}
+	if body[0] != 0 {
+		return false, fmt.Errorf("%w (GET_HT_STATUS status %d)", benshi.ErrRadioRejected, body[0])
 	}
 	return body[1]&htStatusTXBit != 0, nil
 }
@@ -335,8 +387,11 @@ func (r *Rig) currChannel() (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(body) < 3 || body[0] != 0 {
+	if len(body) < 3 {
 		return 0, benshi.ErrShortBody
+	}
+	if body[0] != 0 {
+		return 0, fmt.Errorf("%w (GET_HT_STATUS status %d)", benshi.ErrRadioRejected, body[0])
 	}
 	lower := body[2] >> 4
 	if len(body) < htStatusExtLen {
@@ -345,20 +400,6 @@ func (r *Rig) currChannel() (byte, error) {
 	tail := binary.BigEndian.Uint16(body[3:5])
 	upper := byte((tail >> 2) & 0x0F)
 	return upper<<4 | lower, nil
-}
-
-// channelFreq reads a stored channel's RX frequency. READ_RF_CH is read-only;
-// its writing counterpart is deliberately absent from this package.
-func (r *Rig) channelFreq(id byte) (uint32, error) {
-	body, err := r.request(benshi.CmdReadRFCh, []byte{id})
-	if err != nil {
-		return 0, err
-	}
-	// body: reply status, channel_id, tx word (mod<<30|freq), rx word.
-	if len(body) < 10 || body[0] != 0 {
-		return 0, benshi.ErrShortBody
-	}
-	return binary.BigEndian.Uint32(body[6:10]) & 0x3FFFFFFF, nil
 }
 
 // getDevInfoRequestByte is GET_DEV_INFO's one-byte request body. It's a
@@ -432,6 +473,19 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 			return nil, fmt.Errorf("rig: write: %w", err)
 		}
 	case <-deadline.C:
+		// select picks uniformly at random when several cases are ready, so
+		// a write that completed at the same instant the deadline fired can
+		// land here -- and poisoning the rig for a write that actually
+		// succeeded would permanently close a healthy session. Re-check
+		// non-blockingly before taking the fatal branch.
+		select {
+		case err := <-writeErr:
+			if err != nil {
+				return nil, fmt.Errorf("rig: write: %w", err)
+			}
+			goto awaitReply
+		default:
+		}
 		// A write timeout is fatal to the rig, not just to this request --
 		// see the doc comment on quietPeriodMultiplier for why the quiet
 		// period does not apply here. In short: we don't know whether any
@@ -452,6 +506,19 @@ func (r *Rig) request(cmd benshi.Command, body []byte) ([]byte, error) {
 	case <-r.closedCh:
 		return nil, ErrClosed
 	}
+
+awaitReply:
+	// Fresh budget for the reply. One timer shared across both phases meant
+	// a write that used 4.9s of a 5s budget left the reply 0.1s and reported
+	// a spurious ErrTimeout -- plus a 15s quiet period -- even though every
+	// doc comment here describes the two as independent timeouts.
+	if !deadline.Stop() {
+		select {
+		case <-deadline.C:
+		default:
+		}
+	}
+	deadline.Reset(r.timeout)
 
 	select {
 	case m := <-replyCh:
@@ -500,7 +567,16 @@ func (r *Rig) waitOutQuietPeriod(replyCh chan benshi.Message) (closed bool) {
 
 // readLoop decodes frames from the radio, routing replies to a waiting request
 // and folding notifications into the cache.
+// readLoop reads frames until the control channel fails.
+//
+// It closes the rig on the way out. Without that, a channel that EOFs (port
+// teardown, a relink closing portControlChannel) left a Rig that could never
+// receive a reply again but still reported itself open: every later request
+// burned its full timeout PLUS the quiet period -- 20s per command -- instead
+// of failing fast with ErrClosed.
 func (r *Rig) readLoop() {
+	defer r.Close()
+
 	dec := benshi.NewDecoder()
 	buf := make([]byte, 512)
 	for {
@@ -522,6 +598,16 @@ func (r *Rig) readLoop() {
 func (r *Rig) dispatch(f benshi.Frame) {
 	m, err := benshi.DecodeMessage(f.Data)
 	if err != nil {
+		return
+	}
+	if !m.IsReply {
+		// Only a REPLY can answer a request. The codec already decodes this
+		// from the top bit of the command word and the matcher below keys
+		// only on the command id, so without this an unsolicited message
+		// that happens to share the in-flight command's id would be handed
+		// to the waiting caller and parsed as its answer -- feeding, among
+		// other things, the channel-id cross-check that SetFreq's write
+		// guard depends on.
 		return
 	}
 	if m.Command == benshi.CmdEventNotification {

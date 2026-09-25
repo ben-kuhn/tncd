@@ -98,6 +98,18 @@ type Port struct {
 	// Seconds; 0 disables. Default 20 for bluetooth, 0 for serial/tcp.
 	RXWedgeTimeout int
 
+	// VFOChannelMin is the lowest channel-record id rig control will
+	// overwrite when tuning a Benshi radio. These radios have no scratch
+	// frequency register -- a VFO is an index into the channel table -- so
+	// QSY rewrites the record the active VFO points at, and this bounds
+	// which records that is allowed to be. Verified on a BTech UV-PRO,
+	// whose VFOs live at 251 and 252 above a memory bank starting at 0.
+	// Other Benshi variants are not confirmed to number theirs the same
+	// way, so it is configurable: a radio that refuses to tune says which
+	// channel it is on, and setting this to that id allows it.
+	// Default 251. Only consulted for rig control.
+	VFOChannelMin int
+
 	KISS kiss.Params // from [kiss.N]; nil fields = don't send
 }
 
@@ -350,6 +362,11 @@ func getIntPtr(s *ini.Section, key string) *int {
 
 // Load reads and parses the INI file at path. If path is empty, returns
 // defaults plus one serial port (client.0, /dev/ttyUSB0).
+// defaultVFOChannelMin is the default lowest channel-record id rig control
+// will overwrite. 251 is where a BTech UV-PRO's two VFO scratch records sit
+// (251 and 252), above a memory bank that starts at 0. See Port.VFOChannelMin.
+const defaultVFOChannelMin = 251
+
 func Load(path string) (*Config, error) {
 	// Configure ini to be lenient (allows inline comments, etc.)
 	opts := ini.LoadOptions{
@@ -643,6 +660,7 @@ func Load(path string) (*Config, error) {
 			AX25Version:       ax25Version,
 			SREJ:              getBool(s, "srej", true),
 			RXWedgeTimeout:    getInt(s, "rx_wedge_timeout", rxWedgeDefault),
+			VFOChannelMin:     getInt(s, "vfo_channel_min", defaultVFOChannelMin),
 		}
 
 		// Serial-only params validated at load: a typo in parity/stopbits must
