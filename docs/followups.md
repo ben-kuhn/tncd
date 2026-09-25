@@ -85,9 +85,39 @@ warn at config time. Deferred because it needs a decision about whether a non-an
 radio should be a hard config error — which would break startup for anyone who enables the
 key optimistically — or a logged warning.
 
+### 6. bluez cannot parse the DB-50B's SDP record
+From the CarKit flap report (`docs/2026-09-24-bluetooth-flap-report.md` on main):
+`sdp_extract_attr: Unknown data descriptor : 0x5/0x30 terminating` appears at the exact
+timestamp of every relink connect, and `Unable to get Serial Port SDP record: Host is down`
+throughout the preceding hour.
+
+If bluez's SDP parse terminates mid-record, the RFCOMM channel for SPP is resolved from
+cache or not verified at all — which fits the observed symptom of a `NewConnection` handing
+back a live fd that carries no traffic, and later a torn stream (a 5-byte fragment arriving
+7s after a fresh connect). Worth dumping the raw SDP record and, if it is malformed,
+reporting it to the vendor. Note the radio also advertises Handsfree and Handsfree Audio
+Gateway, which is unusual for a TNC.
+
+### 7. Unpaired ports are probed forever and spam the log
+Same report: two configured ports were not paired on that host, and tncd called
+`ConnectProfile` on them every 60s for over an hour, logging
+`Method "ConnectProfile" ... doesn't exist` each time, plus bluez `Host is down` SDP noise.
+tncd should gate on the bluez device object actually being present and paired, or support an
+explicit per-port disable, so an unprovisioned port does not bury the log that matters.
+
+### 8. A relinked socket is not resynchronised, so it delivers garbage
+Same report: 7s after a fresh SPP connect, the socket produced
+`failed to parse AX.25 frame: frame too short (5 bytes) raw=b2bd7d8fe9` — the tail of a torn
+stream. A newly established transport should discard bytes until a KISS frame boundary
+(FEND) rather than parsing whatever arrives first.
+
+Note the parse failure returns BEFORE the relink counter is reset in `handleFrame`, so
+corrupt bytes do not currently reset the futile-relink budget. That is the correct behaviour
+and worth preserving if this is fixed.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
-### 6. The UV-PRO's TNC wedges after heavy connect/disconnect churn
+### 9. The UV-PRO's TNC wedges after heavy connect/disconnect churn
 Reproducible: after dozens of Bluetooth connect/disconnect cycles, KISS frames stop reaching
 the air while everything still reports healthy — port online, writes succeed, `tx` counter
 climbing. A power-cycle clears it. Independent of tncd; confirmed by reproducing the failure
@@ -96,7 +126,7 @@ with tncd's own unmodified AGWPE path after it had worked minutes earlier.
 Belongs in the OTA checklist: **if KISS goes silent after repeated reconnects, power-cycle
 the radio before debugging tncd.**
 
-### 7. BLE KISS does not pass traffic on the UV-PRO
+### 10. BLE KISS does not pass traffic on the UV-PRO
 With a genuine LE link (MTU negotiated 155, GATT resolved, notifications subscribed), writes
 to the BLE KISS characteristic either time out (write-with-response) or succeed and vanish
 (write-without-response), and nothing is ever received. The service is advertised and
@@ -117,13 +147,13 @@ must branch from a main that contains `e8c4b31` — the rig-control feature bran
 from the older main and does NOT have it. Merge main in first rather than cherry-picking,
 to keep the history clean.
 
-### 8. The Mobilinkd TNC4's pairing was removed and did not re-pair
+### 11. The Mobilinkd TNC4's pairing was removed and did not re-pair
 Its bond was deleted host-side during BLE investigation; re-pairing reports success but
 stores no key (`Paired: yes, Bonded: no`), so it works over neither classic nor LE. The
 device still holds its half of the old bond. Try a power-cycle first, then whatever reset
 Mobilinkd provides.
 
-### 9. PipeWire's ALSA plugin will not negotiate
+### 12. PipeWire's ALSA plugin will not negotiate
 `arecord -D pipewire` and `-D default` both fail at every rate and channel count, so Dire
 Wolf cannot use PipeWire and must grab the Digirig directly via `plughw`, which prevents any
 other application from sharing that audio interface. The running daemon reports libpipewire
