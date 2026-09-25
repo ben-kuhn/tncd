@@ -36,14 +36,14 @@ reconnecting it.
 The report records every relink as "online, zero data." That is inferred from the
 absence of log lines, and it is wrong.
 
-`bridge.handleFrame` updates `lastRX` and clears `relinks[port]` **only after a
+`(*Bridge).OnKISSFrame` updates `lastRX` and clears `relinks[port]` **only after a
 successful `ax25.Parse`**. A parse failure returns before both. So a socket delivering
 a steady stream of non-KISS bytes is indistinguishable from a silent one as far as the
 wedge detector is concerned — and at default verbosity, inbound frames are not logged
 at all, so it is invisible in the journal too.
 
 The relink counter is the tell. On `0333204`, `relinks[port]` is reset in exactly one
-place — `internal/bridge/bridge.go:377`, inside `handleFrame`, after a successful
+place — `internal/bridge/bridge.go:377`, inside `OnKISSFrame`, after a successful
 parse. Nothing else touches it: `initLastRX` runs only at startup and on port
 (re)wiring, `resetPortCounters` does not clear it, and `reconnectPort` does not either.
 Yet the journal shows:
@@ -88,7 +88,7 @@ is diagnostic-only — tncd never stops. Each cycle also tears down the baseband
 `RequestDisconnection`, so if the radio's own data path could have self-recovered, we
 killed it.
 
-The unmerged `fix/connect-setup-timing` branch addresses this with a relink budget
+`fix/connect-setup-timing` addresses this with a relink budget
 (`relinkBudgetSpent`, spent at 3) plus a reset when nothing is awaiting a reply.
 Replaying the report's own timeline against that branch:
 

@@ -932,7 +932,7 @@ func shouldEscalateRelink(consecutive int) bool {
 // there: both present as total RX silence with TX outstanding, and on a quiet
 // channel there is no ambient traffic to break the tie. So rather than predict
 // which it is, relink and judge by the OUTCOME. A relink that helps produces
-// RX, which zeroes the counter (see handleFrame) and restores the full budget.
+// RX, which zeroes the counter (see OnKISSFrame) and restores the full budget.
 // A counter that keeps climbing means relinking is restoring nothing — either
 // an unreachable station, or a wedge a fresh link cannot clear — and in both
 // readings further cycles only add dead air and eat N2 retries, because frames

@@ -17,11 +17,19 @@ AGWPE client driving the session: `pat` (Winlink, pid 159659, 127.0.0.1:8005)
 
 Port 0 is the TNC that flapped. Ports 1 and 2 are not paired with the host and are a separate, sustained noise source (see §6).
 
+> **Superseded in part — see [`2026-09-24-bluetooth-flap-addendum.md`](2026-09-24-bluetooth-flap-addendum.md).**
+> The relinked sockets were not carrying *zero* data; they were carrying bytes that did
+> not parse as KISS. tncd only logs a parse failure and only advances `lastRX` on a
+> successful parse, so at default verbosity a mis-framed stream is indistinguishable
+> from silence. That changes the fix from "reconnect harder" to "resync to a FEND
+> boundary and check SDP channel resolution". The addendum also corrects H3's relink
+> threshold (below) and settles the RF-vs-Bluetooth question.
+
 ## Summary
 
 - After ~55 min of failed connect attempts, port 0 finally connected at `19:27:33` and an AX.25 (Winlink P2P) session `KU0HN -> KU0HN-10` ran normally.
 - At `19:29:06` an outstanding (un-ACKed) TX frame became stuck. tncd's wedge detector fired at `19:29:29` ("23s silence with unacked TX") and began a relink storm: **6 disconnect/reconnect cycles in ~98s** (`19:29:31` → `19:31:09`).
-- Every reconnect delivered a `NewConnection` + "SPP socket ready" + `bridge: port 0 online`, yet **no bytes ever arrived from the radio on any of them** — the port remained wedged the whole time.
+- Every reconnect delivered a `NewConnection` + "SPP socket ready" + `bridge: port 0 online`, yet **no *parseable* frame arrived from the radio on any of them** — the port remained wedged the whole time. (Originally written as "no bytes"; see the addendum — bytes did arrive, they just did not frame as KISS.)
 - bluetoothd shows the underlying transport was already dead: `Disconnecting failed: already disconnected` / `No matching connection for device` (`19:30:33`) immediately after tncd's own `RequestDisconnection` (`19:30:31`), and SDP parse failures (`sdp_extract_attr: Unknown data descriptor : 0x5/0x30 terminating`) at the exact timestamps of the later reconnects (`19:29:37`, `19:30:38`).
 - tncd's own guidance is borne out: "reconnecting is not clearing it; reset the Bluetooth adapter or power-cycle the TNC." Reconnecting SPP alone cannot recover this link.
 - A 5-byte, unparseable AX.25 frame (`raw=b2bd7d8fe9`) arrived on the freshly "reconnected" socket at `19:31:24` — evidence that the "new" channel is actually a torn/stale data stream, not a clean SPP session.
@@ -84,16 +92,16 @@ This proves the baseband + SPP path works when the radio is in a good state.
 ### 4. Relink storm (19:29:31 → 19:31:09) — the visible "flap"
 | # | Disconnect (tncd) | NewConnection | bluetoothd at same time | Result |
 |---|-------------------|---------------|--------------------------|--------|
-| 1 | 19:29:31 | 19:29:37 fd=12 | `sdp_extract_attr: Unknown data descriptor : 0x5 terminating` | online, zero data |
-| 2 | 19:29:51 | 19:29:56 fd=12 | — | online, zero data |
+| 1 | 19:29:31 | 19:29:37 fd=12 | `sdp_extract_attr: Unknown data descriptor : 0x5 terminating` | online, no parseable frames |
+| 2 | 19:29:51 | 19:29:56 fd=12 | — | online, no parseable frames |
 | — | — | 19:30:09 | `still wedged after 3 relinks` | — |
-| 3 | 19:30:11 | 19:30:18 fd=12 | — | online, zero data |
+| 3 | 19:30:11 | 19:30:18 fd=12 | — | online, no parseable frames |
 | — | — | 19:30:29 | `still wedged after 4 relinks` | — |
-| 4 | 19:30:31 | 19:30:38 fd=12 | `Disconnecting failed: already disconnected` (19:30:33), `No matching connection for device` (19:30:33), `sdp_extract_attr: Unknown data descriptor : 0x30 terminating` (19:30:38) | online, zero data |
+| 4 | 19:30:31 | 19:30:38 fd=12 | `Disconnecting failed: already disconnected` (19:30:33), `No matching connection for device` (19:30:33), `sdp_extract_attr: Unknown data descriptor : 0x30 terminating` (19:30:38) | online, no parseable frames |
 | — | — | 19:30:49 | `still wedged after 5 relinks` | — |
-| 5 | 19:30:51 | 19:30:56 fd=12 | — | online, zero data |
+| 5 | 19:30:51 | 19:30:56 fd=12 | — | online, no parseable frames |
 | — | — | 19:31:09 | `still wedged after 6 relinks -- reconnecting is not clearing it; reset the Bluetooth adapter or power-cycle the TNC (consider serial/tcp for this port)` | — |
-| 6 | 19:31:11 | 19:31:17 fd=12 | — | online, zero data |
+| 6 | 19:31:11 | 19:31:17 fd=12 | — | online, no parseable frames |
 
 ### 5. End of session
 ```
@@ -118,7 +126,7 @@ That last line is important: 7 s after a *fresh* SPP connect, the socket deliver
 ### H3 — tncd relink policy makes the flap worse
 - Backoff between relinks is ~20 s and relinks proceed even when the preceding `RequestDisconnection` itself errored ("already disconnected").
 - Each relink tears down the baseband link (`RequestDisconnection`), so even if the radio firmware might have recovered its own data path after a hiccup, tncd kills it.
-- After N=6 relinks tncd only prints a warning; it keeps cycling forever against a dead radio, keeping the AGWPE client's session half-alive (outstanding frames pinned, 'Y' queries answered with no progress).
+- From the 3rd relink onward (`relinkEscalateAfter = 3`) tncd only prints a warning; it keeps cycling forever against a dead radio, keeping the AGWPE client's session half-alive (outstanding frames pinned, 'Y' queries answered with no progress). The 6 above is the count observed before the log was drafted, not a threshold.
 - `19:31:24` garbage frame shows the socket isn't even discarded/framed properly on an exhausted reconnect — consider tearing down to a *hard* reset (adapter power cycle == what the warning suggests) rather than more SPP reconnects.
 
 ## Secondary issues worth fixing while you're in here
