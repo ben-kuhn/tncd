@@ -202,70 +202,104 @@ header (command group + command id) followed by a typed body.
 | `GET_HT_STATUS` | 20 | Source for `t` (get_ptt) |
 | `DO_PROG_FUNC` | 66 | Key/unkey the transmitter via the `MAIN_PTT` (13) effect, when PTT is enabled |
 
-`WRITE_RF_CH`, `WRITE_SETTINGS` and `STORE_SETTINGS` are **not** implemented in
-v1. Nothing in the v1 command set writes a channel record or persists to NVRAM.
+`WRITE_SETTINGS` and `STORE_SETTINGS` are **not** implemented in v1.
+`WRITE_RF_CH` **is**, because on this hardware it is the only way to QSY --
+the VFO is a pointer into the channel table, so tuning means rewriting the
+record it points at. It is reachable only behind the guards in Component C,
+which refuse any record carrying a name. See that section for why the
+apparently safer `FREQ_MODE_SET_PAR` does not work.
 
 **Testing.** Golden-byte fixtures as for `ax25/` and `agwpe/`, plus a
 `FuzzGaiaFrame` target — radio-sourced bytes are untrusted input, and CLAUDE.md
 requires a fuzz target for every such parser.
 
-## Component C: the rig layer (`internal/rig/`) — QSY via VFO mode
+## Component C: the rig layer (`internal/rig/`) — QSY by rewriting the VFO's record
 
-These radios have no VFO scratch register in the conventional sense. `RfCh` is
-a memory-channel record (`channel_id`, `tx_freq`/`rx_freq`, sub-audio,
-`bandwidth`, power flags, `name_str`), and `Settings.channel_a_*` /
-`channel_b_*` compose an 8-bit *index* selecting which channel each VFO points
-at. Writing "the VFO's channel" would therefore write a real memory-channel
-record.
+> **Superseded 2026-09-25.** This section originally specified QSY via
+> `FREQ_MODE_SET_PAR` and explicitly forbade `WRITE_RF_CH`. Hardware proved
+> that backwards. What follows is the corrected design, as shipped; the
+> original reasoning is preserved at the end because the trap it fell into is
+> easy to fall into again.
 
-`FREQ_MODE_SET_PAR` avoids that entirely: it puts the radio into frequency
-(VFO) mode and tunes explicit frequencies without touching stored channels.
-HTCommander uses it for satellite Doppler tracking, sending it about once a
-second for a whole pass — a mechanism designed to be driven continuously is by
-construction not writing NVRAM, which is a stronger guarantee than any
-save-and-restore scheme.
+These radios have no scratch frequency register. `RfCh` is a channel record
+(`channel_id`, `tx_freq`/`rx_freq`, sub-audio, `bandwidth`, power flags,
+`name_str`), and `Settings.channel_a_*` / `channel_b_*` compose an 8-bit
+*index* selecting which record each VFO points at. **The VFO is a pointer into
+the channel table, and "frequency mode" is that pointer aimed at an unnamed
+scratch record near the top of the table.** On a BTech UV-PRO those records are
+251 and 252.
 
-**`FREQ_MODE_SET_PAR` payload, 16 bytes, big-endian:**
+So QSY is a read-modify-write of the record the active VFO points at. There is
+no way around writing a channel record, because that record *is* the VFO.
 
-```
-0..3    RX frequency: top 2 bits = modulation, low 30 bits = Hz
-4..7    TX frequency, same encoding
-8..9    RX sub-audio (CTCSS/DCS), units of 0.01 Hz, 0 = none
-10..11  TX sub-audio, same units
-12..13  status/mode flags (settles to 0 once in VFO mode)
-14..15  channel step, constant 0x61A8 (25000)
-```
+**Resolving the target (`activeChannel`):**
 
-An all-zero payload is the documented teardown: it drops the radio out of VFO
-mode and restores its normal channel state.
+1. `READ_SETTINGS` → `channel_a`, `channel_b`, `double_channel`.
+2. Pick the transmit VFO: A when `double_channel` is OFF or A. When it is B,
+   **refuse** — which VFO carries a transmission is not derivable from this
+   record, and writing the wrong one retunes a band the operator is still
+   listening to.
+3. Cross-check against `GET_HT_STATUS`'s `curr_ch_id`. Disagreement means a
+   radio state this code does not model; refuse rather than guess, because the
+   next step is a write. (`curr_ch_id` is not used as the primary source: under
+   dual watch it reports whichever VFO last *received*.)
+4. `READ_RF_CH(id)` → the full record.
 
-> **Corrected (see "Corrections" above, item 2): this is false on real
-> firmware.** An all-zero payload clamps the radio to 136.000 MHz and leaves
-> it in VFO mode. The shipped `Teardown()` reads the active channel's stored
-> frequency and writes that back explicitly instead of relying on this
-> behavior.
+**The guard that protects operator data:** refuse any record whose `name_str`
+is non-empty. A named record is a memory the operator programmed, which means
+the radio is in channel mode, not VFO mode; retuning it would silently destroy
+that memory. An unnamed record is a VFO scratch record and is fair game. This
+is the check that makes `WRITE_RF_CH` safe to reach at all.
 
-**`FREQ_MODE_GET_STATUS` reply:** `data[4]` is reply status (0 = success),
-`data[5..8]` is the frequency in Hz big-endian with the top 2 bits carrying
-modulation (mask with `0x3FFFFFFF`).
-
-**Notification 14** (`freqModeStatusChanged`) is pushed by the radio whenever
-the tuned frequency changes in VFO mode: `data[5..8]` RX frequency,
-`data[9..12]` TX, `data[13..16]` sub-audio, `data[17..18]` status flags. The
-**low** flags byte (`data[18]`) is the authoritative in-VFO-mode indicator —
-non-zero while in frequency mode, 0 on a preset channel. The high byte is
-unreliable and can stay set on exit.
+**The write:** patch the two frequency words in the record *in place* and send
+it back via `WRITE_RF_CH`. The record is never rebuilt from a partial model —
+sub-audio, bandwidth, power flags, pre-emphasis bypass and any DMR tail survive
+byte-for-byte, because re-serialising from a struct would zero every field the
+struct failed to represent.
 
 **Resulting behavior:**
 
-- `\set_freq <hz>` → `FREQ_MODE_SET_PAR` with rx = tx = hz, FM modulation, no
-  sub-audio, flags 0, step `0x61A8`. Repeat calls retune.
-- `\get_freq` → served from the notification-14 cache; `FREQ_MODE_GET_STATUS`
-  as fallback. When not in VFO mode, read the active channel's `rx_freq` via
-  `READ_SETTINGS` + `READ_RF_CH` — read-only, still no writes.
-- Release/shutdown → all-zero teardown, restoring the radio's own state.
+- `\set_freq <hz>` → resolve, guard, read-modify-write. Repeat calls retune.
+- `\get_freq` → the active VFO's record `rx_freq`. Nothing else: see below.
+- `Teardown()` → rewrite the record this session's **first** `set_freq`
+  displaced, from a saved copy. Not a re-read: after a QSY the radio's own
+  record holds *our* frequency, so read-then-write is a no-op dressed up as a
+  restore. Only the first is saved, because later ones are our own QSYs.
 
 v1 is simplex only (rx = tx), which is what Winlink RMS gateways need.
+
+### Why `FREQ_MODE_SET_PAR` is not used (the original design, and why it failed)
+
+The original spec chose `FREQ_MODE_SET_PAR` (35) precisely *to avoid* writing a
+channel record, reasoning that HTCommander drives it once a second for
+satellite Doppler tracking and so it cannot be touching NVRAM.
+
+On real UV-PRO firmware it writes a frequency-mode register that the radio
+**never promotes to the operating frequency**. The failure is silent and
+self-consistent, which is what made it expensive: `set_freq` returns success,
+and `get_freq` — reading the same register back via `FREQ_MODE_GET_STATUS` —
+echoes the commanded value. Every software-visible signal agrees, while the
+radio keeps transmitting on its old frequency.
+
+It was pinned on 2026-09-24 by turning the radio's dial and re-reading both
+registers: channel record 252 followed the dial; `FREQ_MODE_GET_STATUS` went on
+reporting a stale value written minutes earlier. Confirmed the other way on
+2026-09-25 — after the rewrite, a UI frame sent through tncd was decoded off
+air by an independent Dire Wolf receiver on the newly-set frequency.
+
+Two documented behaviours of that command are also false on this firmware, and
+are recorded here so nobody re-derives them:
+
+- The all-zero "teardown" payload does **not** drop the radio out of frequency
+  mode. It is taken literally as "tune to 0 Hz" and clamps to 136.000 MHz, the
+  bottom of the VHF range.
+- Notification 14's frequency is the frequency-mode register's, not the
+  operating frequency, so caching it answers "what frequency are we on" with
+  confident nonsense.
+
+`CmdFreqModeSetPar`, `CmdFreqModeGetStatus`, the payload/status codecs and the
+notification-14 cache were all removed rather than left unused — a wrong turn
+that compiles is an invitation to take it again.
 
 ## Component D: the rigctl server
 

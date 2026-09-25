@@ -61,36 +61,53 @@ func FuzzDecodeMessage(f *testing.F) {
 	})
 }
 
-// FuzzDecodeFreqMode exercises both untrusted-bytes decoders added for VFO-mode
-// QSY. They parse radio-sourced bytes over BLE/RFCOMM, so per the project's
-// fuzz-every-untrusted-parser rule they need a target even though the plan that
-// added them didn't call one out.
-func FuzzDecodeFreqMode(f *testing.F) {
-	f.Add([]byte{0x00, 0x09, 0xB0, 0x50, 0xF0}) // valid FREQ_MODE_GET_STATUS reply
-	f.Add([]byte{                               // valid notification 14
-		14,
-		0x08, 0xA4, 0xFB, 0x70,
-		0x08, 0xA4, 0xFB, 0x70,
-		0x00, 0x00, 0x00, 0x00,
-		0x00, 0x40,
-	})
-	f.Add(make([]byte, 15)) // notification type 0 -- wrong type, same length as valid
-	f.Add([]byte{0x00, 0x09})
+// FuzzParseRFCh covers the channel-record parser. Both accessors index the
+// record directly, so a length check that lets a short record through is a
+// panic; the round-trip invariant also guards the read-modify-write QSY
+// relies on -- WithFreq must never change a record's length.
+func FuzzParseRFCh(f *testing.F) {
+	f.Add(goldenVFOCh)
+	f.Add(goldenAPRSCh)
+	f.Add(append(append([]byte{}, goldenAPRSCh...), 0xAB, 0xCD))
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
-		// Same bytes handed to both decoders: each interprets an unrelated
-		// wire shape, so garbage for one is a fine stress input for the
-		// other, and this keeps a single corpus covering both.
-		if freq, err := DecodeFreqModeStatus(data); err == nil && freq&^uint32(freqMask) != 0 {
-			t.Fatalf("DecodeFreqModeStatus: freq %#x has bits set above the 30-bit field mask", freq)
+		c, err := ParseRFCh(data)
+		if err != nil {
+			return
 		}
-		if status, err := DecodeFreqModeNotification(data); err == nil {
-			if status.RXFreqHz&^uint32(freqMask) != 0 {
-				t.Fatalf("DecodeFreqModeNotification: RXFreqHz %#x has bits set above the 30-bit field mask", status.RXFreqHz)
-			}
-			if status.TXFreqHz&^uint32(freqMask) != 0 {
-				t.Fatalf("DecodeFreqModeNotification: TXFreqHz %#x has bits set above the 30-bit field mask", status.TXFreqHz)
-			}
+		_ = c.ID()
+		_ = c.RXFreqHz()
+		_ = c.TXFreqHz()
+		_ = c.Name()
+		if got := c.Bytes(); len(got) != len(data) {
+			t.Fatalf("Bytes() length = %d, want %d", len(got), len(data))
+		}
+		tuned := c.WithFreq(145670000)
+		if got := len(tuned.Bytes()); got != len(data) {
+			t.Fatalf("WithFreq changed length: %d, want %d", got, len(data))
+		}
+		if got := tuned.RXFreqHz(); got != 145670000 {
+			t.Fatalf("WithFreq did not take: rx = %d", got)
+		}
+		if tuned.Name() != c.Name() {
+			t.Fatalf("WithFreq changed the name: %q -> %q", c.Name(), tuned.Name())
+		}
+	})
+}
+
+// FuzzDecodeSettings covers the settings bitfield reader, whose bit offsets
+// run past the end of a short record.
+func FuzzDecodeSettings(f *testing.F) {
+	f.Add(goldenSettings)
+	f.Add([]byte{0x00})
+	f.Add([]byte{0x05, 1, 2, 3})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		s, err := DecodeSettings(data)
+		if err != nil {
+			return
+		}
+		if id, ok := s.ActiveChannel(); ok && s.DoubleChannel == DoubleChannelB {
+			t.Fatalf("ActiveChannel accepted dual-watch B, returned %d", id)
 		}
 	})
 }

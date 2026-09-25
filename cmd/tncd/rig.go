@@ -116,16 +116,30 @@ func runRig(cfgPath string, port int, args []string) error {
 	case "get-freq":
 		got, err := r.GetFreq()
 		if err != nil {
-			return fmt.Errorf("rig: port %d: get-freq: radio did not answer: %w", port, err)
+			return fmt.Errorf("rig: port %d: get-freq: %w", port, err)
 		}
 		fmt.Println(got)
 	case "set-freq":
+		// Not "radio did not answer": SetFreq also refuses on purpose when
+		// the radio is on a named memory or in dual watch, and reporting
+		// those as a dead link would send the operator hunting the wrong
+		// problem. The wrapped error says which it was.
 		if err := r.SetFreq(hz); err != nil {
-			return fmt.Errorf("rig: port %d: set-freq: radio did not answer: %w", port, err)
+			return fmt.Errorf("rig: port %d: set-freq: %w", port, err)
 		}
 	case "teardown":
-		if err := r.Teardown(); err != nil {
-			return fmt.Errorf("rig: port %d: teardown: radio did not answer: %w", port, err)
+		// Teardown restores what THIS session's first set-freq displaced,
+		// and each run of this one-shot command is its own session -- so it
+		// only ever has something to restore when a set-freq preceded it in
+		// the same invocation, which the CLI has no verb for. Say so plainly
+		// rather than exiting 0 on a command that did nothing.
+		restored, err := r.Teardown()
+		if err != nil {
+			return fmt.Errorf("rig: port %d: teardown: %w", port, err)
+		}
+		if !restored {
+			fmt.Println("nothing to restore: no frequency was changed in this invocation " +
+				"(use set-freq to tune the radio back by hand)")
 		}
 	case "probe":
 		if err := r.Probe(); err != nil {

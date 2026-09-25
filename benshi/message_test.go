@@ -6,19 +6,19 @@ import (
 )
 
 func TestMessageBytesGolden(t *testing.T) {
-	m := Message{Group: GroupBasic, IsReply: false, Command: CmdFreqModeGetStatus}
+	m := Message{Group: GroupBasic, IsReply: false, Command: CmdReadRFCh}
 	got := m.Bytes()
-	// group 2 big-endian, then reply bit clear | command 36.
-	want := []byte{0x00, 0x02, 0x00, 0x24}
+	// group 2 big-endian, then reply bit clear | command 13.
+	want := []byte{0x00, 0x02, 0x00, 0x0D}
 	if !bytes.Equal(got, want) {
 		t.Errorf("Bytes() = % X, want % X", got, want)
 	}
 }
 
 func TestMessageReplyBitIsTopBit(t *testing.T) {
-	m := Message{Group: GroupBasic, IsReply: true, Command: CmdFreqModeGetStatus}
+	m := Message{Group: GroupBasic, IsReply: true, Command: CmdReadRFCh}
 	got := m.Bytes()
-	want := []byte{0x00, 0x02, 0x80, 0x24}
+	want := []byte{0x00, 0x02, 0x80, 0x0D}
 	if !bytes.Equal(got, want) {
 		t.Errorf("Bytes() = % X, want % X", got, want)
 	}

@@ -65,51 +65,212 @@ func (f *fakeChannel) reply(cmd benshi.Command, body []byte) {
 	f.replies <- benshi.Frame{Flags: benshi.FlagNone, Data: m.Bytes()}.Bytes()
 }
 
-func TestSetFreqSendsFreqModeSetPar(t *testing.T) {
+// --- channel-record fixtures ------------------------------------------------
+//
+// Captured from a BTech UV-PRO on 2026-09-24. Channel 252 is the record VFO A
+// points at -- the radio's VFO -- and is unnamed. Channel 1 is a real memory.
+var (
+	fakeVFORecord = []byte{
+		0xfc, 0x08, 0xa4, 0xfb, 0x70, 0x08, 0xa4, 0xfb, 0x70,
+		0x00, 0x00, 0x00, 0x00, 0x14, 0x00,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	fakeNamedRecord = []byte{
+		0x01, 0x08, 0xae, 0xbf, 0x70, 0x08, 0xae, 0xbf, 0x70,
+		0x00, 0x00, 0x00, 0x00, 0x1c, 0x00,
+		'M', 'N', ' ', 'P', 'a', 'c', 'k', 0, 0, 0,
+	}
+	// A READ_SETTINGS reply putting VFO A on channel 252, VFO B on 1, dual
+	// watch off.
+	fakeSettingsCh252 = []byte{
+		0x00,
+		0xc1, 0x04, 0xa6, 0x06, 0x18, 0x01, 0x3c, 0xe0, 0xa3, 0xf0,
+		0x00, 0x20, 0x00, 0x00, 0x08, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+)
+
+// statusExtFor builds a GET_HT_STATUS StatusExt reply reporting channel id.
+// curr_ch_id is split: the low nibble is the high nibble of the second Status
+// byte, the high nibble sits in the trailing word at bits 2..5.
+func statusExtFor(id byte) []byte {
+	tail := uint16(id>>4) << 2
+	out := []byte{0x00, 0x80, (id & 0x0F) << 4, 0, 0}
+	binary.BigEndian.PutUint16(out[3:5], tail)
+	return out
+}
+
+// statusTX builds a plain GET_HT_STATUS reply with is_in_tx set or clear.
+// is_in_tx is bit 6 of the first Status byte (see htStatusTXBit).
+func statusTX(keyed bool) []byte {
+	b := byte(0x80) // is_power_on
+	if keyed {
+		b |= htStatusTXBit
+	}
+	return []byte{0x00, b, 0x00}
+}
+
+// awaitWrite blocks until the rig has written at least n frames.
+//
+// Replies must be enqueued only AFTER the request they answer has gone out:
+// dispatch routes a reply to whatever request is waiting for that command
+// type, so a reply queued early is delivered while nothing is waiting and is
+// silently dropped, wedging every later request in the sequence.
+func (f *fakeChannel) awaitWrite(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		got := len(f.written)
+		f.mu.Unlock()
+		if got >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for write %d", n)
+}
+
+// scriptActiveChannel answers the three requests activeChannel makes, each
+// only once its request has actually been sent. base is how many frames the
+// rig had already written before this exchange began.
+func scriptActiveChannel(t *testing.T, ch *fakeChannel, base int, settings []byte, id byte, record []byte) {
+	t.Helper()
+	ch.awaitWrite(t, base+1)
+	ch.reply(benshi.CmdReadSettings, settings)
+	ch.awaitWrite(t, base+2)
+	ch.reply(benshi.CmdGetHTStatus, statusExtFor(id))
+	ch.awaitWrite(t, base+3)
+	ch.reply(benshi.CmdReadRFCh, append([]byte{0x00}, record...))
+}
+
+// TestSetFreqRewritesTheActiveVFORecord is the core of QSY on this hardware:
+// the radio has no scratch frequency register, so tuning means rewriting the
+// channel record the active VFO points at, preserving every other field.
+func TestSetFreqRewritesTheActiveVFORecord(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second)
 	defer r.Close()
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		ch.reply(benshi.CmdFreqModeSetPar, []byte{0x00})
+		scriptActiveChannel(t, ch, 0, fakeSettingsCh252, 252, fakeVFORecord)
+		ch.awaitWrite(t, 4)
+		ch.reply(benshi.CmdWriteRFCh, []byte{0x00, 0xfc})
 	}()
 
-	if err := r.SetFreq(145030000); err != nil {
+	const target = 145670000
+	if err := r.SetFreq(target); err != nil {
 		t.Fatalf("SetFreq: %v", err)
 	}
 	w := ch.writes()
-	if len(w) != 1 {
-		t.Fatalf("wrote %d frames, want 1", len(w))
+	if len(w) != 4 {
+		t.Fatalf("wrote %d frames, want 4 (settings, status, read, write)", len(w))
 	}
-	m, err := benshi.DecodeMessage(w[0][4:])
+	m, err := benshi.DecodeMessage(w[3][4:])
 	if err != nil {
 		t.Fatalf("DecodeMessage: %v", err)
 	}
-	if m.Command != benshi.CmdFreqModeSetPar {
-		t.Errorf("command = %d, want CmdFreqModeSetPar", m.Command)
+	if m.Command != benshi.CmdWriteRFCh {
+		t.Fatalf("final command = %d, want CmdWriteRFCh", m.Command)
 	}
-	if len(m.Body) != 16 {
-		t.Errorf("body length = %d, want 16", len(m.Body))
+	got, err := benshi.ParseRFCh(m.Body)
+	if err != nil {
+		t.Fatalf("ParseRFCh(written): %v", err)
+	}
+	if got.ID() != 252 {
+		t.Errorf("wrote channel %d, want 252", got.ID())
+	}
+	if got.RXFreqHz() != target || got.TXFreqHz() != target {
+		t.Errorf("wrote rx/tx %d/%d, want %d both", got.RXFreqHz(), got.TXFreqHz(), target)
+	}
+	// Everything past the frequency words must survive verbatim, or a QSY
+	// would silently reset sub-audio, bandwidth and power flags.
+	if !bytes.Equal(m.Body[9:], fakeVFORecord[9:]) {
+		t.Errorf("QSY changed fields past the frequencies:\n got % x\nwant % x", m.Body[9:], fakeVFORecord[9:])
 	}
 }
 
-func TestGetFreqUsesStatusReply(t *testing.T) {
+// TestSetFreqRefusesNamedChannel is the guard that protects the operator's
+// memories: a named record means the radio is on a stored channel, not its
+// VFO, and rewriting it would destroy that memory.
+func TestSetFreqRefusesNamedChannel(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second)
 	defer r.Close()
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		ch.reply(benshi.CmdFreqModeGetStatus, []byte{0x00, 0x09, 0xB0, 0x50, 0xF0})
+		scriptActiveChannel(t, ch, 0, fakeSettingsCh252, 252, fakeNamedRecord)
+	}()
+
+	err := r.SetFreq(145670000)
+	if !errors.Is(err, ErrChannelMode) {
+		t.Fatalf("SetFreq on a named channel: err = %v, want ErrChannelMode", err)
+	}
+	for _, w := range ch.writes() {
+		m, derr := benshi.DecodeMessage(w[4:])
+		if derr == nil && m.Command == benshi.CmdWriteRFCh {
+			t.Fatal("SetFreq wrote a channel record despite refusing -- a real memory would have been destroyed")
+		}
+	}
+}
+
+// TestSetFreqRefusesDualWatch covers the other refusal: with dual watch on,
+// which VFO a transmission goes out on is not derivable, so writing either
+// record could retune a band the operator is still listening to.
+func TestSetFreqRefusesDualWatch(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second)
+	defer r.Close()
+
+	dual := append([]byte{}, fakeSettingsCh252...)
+	dual[2] |= 0x20 // double_channel = B (bits 10..11 of the record)
+
+	go func() {
+		ch.awaitWrite(t, 1)
+		ch.reply(benshi.CmdReadSettings, dual)
+	}()
+
+	if err := r.SetFreq(145670000); !errors.Is(err, ErrDualWatch) {
+		t.Fatalf("SetFreq in dual watch: err = %v, want ErrDualWatch", err)
+	}
+}
+
+// TestSetFreqRefusesWhenSettingsAndStatusDisagree covers a radio in a state
+// this code does not model. Refusing beats guessing when the next step writes.
+func TestSetFreqRefusesWhenSettingsAndStatusDisagree(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second)
+	defer r.Close()
+
+	go func() {
+		ch.awaitWrite(t, 1)
+		ch.reply(benshi.CmdReadSettings, fakeSettingsCh252) // says 252
+		ch.awaitWrite(t, 2)
+		ch.reply(benshi.CmdGetHTStatus, statusExtFor(1)) // says 1
+	}()
+
+	if err := r.SetFreq(145670000); !errors.Is(err, ErrVFOAmbiguous) {
+		t.Fatalf("SetFreq with disagreeing state: err = %v, want ErrVFOAmbiguous", err)
+	}
+}
+
+// TestGetFreqReadsTheActiveVFORecord proves GetFreq answers from the record
+// the radio actually operates on rather than the frequency-mode register,
+// which on real firmware can hold a stale value the radio is not tuned to.
+func TestGetFreqReadsTheActiveVFORecord(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second)
+	defer r.Close()
+
+	go func() {
+		scriptActiveChannel(t, ch, 0, fakeSettingsCh252, 252, fakeVFORecord)
 	}()
 
 	hz, err := r.GetFreq()
 	if err != nil {
 		t.Fatalf("GetFreq: %v", err)
 	}
-	if hz != 162550000 {
-		t.Errorf("GetFreq = %d, want 162550000", hz)
+	if hz != 145030000 {
+		t.Errorf("GetFreq = %d, want 145030000 (the VFO record's rx frequency)", hz)
 	}
 }
 
@@ -129,116 +290,114 @@ func TestRequestTimesOut(t *testing.T) {
 	}
 }
 
-// Teardown must restore the frequency read from the current channel's
-// stored record, NOT send the documented all-zero FREQ_MODE_SET_PAR payload.
-// Live UV-PRO testing showed that payload does not exit frequency mode as
-// benshi.TeardownPayload's old doc comment (and the upstream spec) claimed --
-// the radio takes it literally as "tune to 0 Hz" and clamps to 136.000 MHz,
-// the bottom of its VHF range, silently relocating the operator's radio to
-// the band edge. A test asserting the all-zero payload would be asserting
-// that broken behavior, so there is deliberately no such test here any more.
-func TestTeardownRestoresChannelFrequency(t *testing.T) {
+// TestTeardownRestoresTheDisplacedRecord proves Teardown puts back what this
+// session's first SetFreq displaced -- byte for byte, from the saved copy.
+//
+// It deliberately does NOT re-read the radio first. After a SetFreq the
+// radio's own record holds this code's QSY, so a read-then-write would be a
+// no-op dressed up as a restore; the previous implementation did exactly that
+// and was silently useless.
+func TestTeardownRestoresTheDisplacedRecord(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second)
 	defer r.Close()
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		// Captured live: GET_HT_STATUS (StatusExt) -> channel 252.
-		ch.reply(benshi.CmdGetHTStatus, []byte{0x00, 0x80, 0xC1, 0x00, 0x3C})
-		time.Sleep(10 * time.Millisecond)
-		// Captured live: READ_RF_CH(252) -> 145.670 MHz.
-		ch.reply(benshi.CmdReadRFCh, []byte{
-			0x00, 0xFC, 0x08, 0xAE, 0xBF, 0x70, 0x08, 0xAE, 0xBF, 0x70,
-			0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		})
-		time.Sleep(10 * time.Millisecond)
-		ch.reply(benshi.CmdFreqModeSetPar, []byte{0x00})
+		scriptActiveChannel(t, ch, 0, fakeSettingsCh252, 252, fakeVFORecord)
+		ch.awaitWrite(t, 4)
+		ch.reply(benshi.CmdWriteRFCh, []byte{0x00, 0xfc})
 	}()
+	if err := r.SetFreq(145670000); err != nil {
+		t.Fatalf("SetFreq: %v", err)
+	}
 
-	if err := r.Teardown(); err != nil {
+	go func() {
+		ch.awaitWrite(t, 5)
+		ch.reply(benshi.CmdWriteRFCh, []byte{0x00, 0xfc})
+	}()
+	restored, err := r.Teardown()
+	if err != nil {
 		t.Fatalf("Teardown: %v", err)
+	}
+	if !restored {
+		t.Fatal("Teardown reported nothing to restore after a SetFreq")
 	}
 
 	w := ch.writes()
-	if len(w) != 3 {
-		t.Fatalf("wrote %d frames, want 3 (GET_HT_STATUS, READ_RF_CH, FREQ_MODE_SET_PAR)", len(w))
-	}
-	m, err := benshi.DecodeMessage(w[2][4:])
+	m, err := benshi.DecodeMessage(w[len(w)-1][4:])
 	if err != nil {
 		t.Fatalf("DecodeMessage: %v", err)
 	}
-	if m.Command != benshi.CmdFreqModeSetPar {
-		t.Fatalf("final command = %d, want CmdFreqModeSetPar", m.Command)
+	if m.Command != benshi.CmdWriteRFCh {
+		t.Fatalf("final command = %d, want CmdWriteRFCh", m.Command)
 	}
-	if len(m.Body) != 16 {
-		t.Fatalf("body length = %d, want 16", len(m.Body))
-	}
-	allZero := true
-	for _, b := range m.Body {
-		if b != 0 {
-			allZero = false
-			break
-		}
-	}
-	if allZero {
-		t.Fatal("Teardown sent an all-zero payload -- on real firmware this clamps the radio to 136.000 MHz instead of restoring the channel frequency")
-	}
-	gotHz := binary.BigEndian.Uint32(m.Body[0:4]) & 0x3FFFFFFF
-	if gotHz != 145670000 {
-		t.Errorf("Teardown set frequency = %d, want 145670000 (the channel's stored frequency)", gotHz)
+	if !bytes.Equal(m.Body, fakeVFORecord) {
+		t.Errorf("Teardown wrote\n got % x\nwant % x (the original record verbatim)", m.Body, fakeVFORecord)
 	}
 }
 
-// A pushed notification updates the cache, so GetFreq need not hit the radio.
-func TestNotificationPopulatesCache(t *testing.T) {
+// TestTeardownWithoutSetFreqIsANoOp: a session that never tuned has nothing
+// to undo, and that is not an error -- but it must also not write anything.
+func TestTeardownWithoutSetFreqIsANoOp(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second)
 	defer r.Close()
 
-	body := []byte{14, 0x08, 0xA4, 0xFB, 0x70, 0x08, 0xA4, 0xFB, 0x70,
-		0, 0, 0, 0, 0x00, 0x40}
-	ch.reply(benshi.CmdEventNotification, body)
-
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if hz, ok := r.CachedFreq(); ok && hz == 145030000 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	restored, err := r.Teardown()
+	if err != nil {
+		t.Fatalf("Teardown: %v", err)
 	}
-	t.Error("notification never reached the cache")
+	if restored {
+		t.Error("Teardown claimed to restore something on a session that never tuned")
+	}
+	if n := len(ch.writes()); n != 0 {
+		t.Errorf("Teardown sent %d frames, want 0", n)
+	}
 }
 
-func TestGetFreqFallsBackToChannelRead(t *testing.T) {
+// TestTeardownRestoresTheOPERATORsFrequencyNotOurOwn: only the FIRST record
+// SetFreq displaces is the operator's. Saving a later one would strand the
+// radio on a frequency this code chose.
+func TestTeardownRestoresTheOperatorsFrequencyNotOurOwn(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second)
 	defer r.Close()
+
+	base := 0
+	qsy := func(hz uint32, record []byte) {
+		b := base
+		go func() {
+			scriptActiveChannel(t, ch, b, fakeSettingsCh252, 252, record)
+			ch.awaitWrite(t, b+4)
+			ch.reply(benshi.CmdWriteRFCh, []byte{0x00, 0xfc})
+		}()
+		if err := r.SetFreq(hz); err != nil {
+			t.Fatalf("SetFreq(%d): %v", hz, err)
+		}
+		base += 4
+	}
+	qsy(145670000, fakeVFORecord)
+	// Second QSY: the radio now reports what we wrote.
+	tuned, err := benshi.ParseRFCh(fakeVFORecord)
+	if err != nil {
+		t.Fatalf("ParseRFCh: %v", err)
+	}
+	qsy(145710000, tuned.WithFreq(145670000).Bytes())
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		// FREQ_MODE_GET_STATUS reports failure: not in frequency mode.
-		ch.reply(benshi.CmdFreqModeGetStatus, []byte{0x01})
-		time.Sleep(10 * time.Millisecond)
-		// GET_HT_STATUS: reply_status 0, then Status. curr_ch_id_lower is the
-		// high nibble of the second status byte; channel 3 here.
-		ch.reply(benshi.CmdGetHTStatus, []byte{0x00, 0x80, 0x30})
-		time.Sleep(10 * time.Millisecond)
-		// READ_RF_CH: status, channel_id, tx word, rx word (145.030 MHz).
-		ch.reply(benshi.CmdReadRFCh, []byte{
-			0x00, 0x03,
-			0x08, 0xA4, 0xFB, 0x70,
-			0x08, 0xA4, 0xFB, 0x70,
-		})
+		ch.awaitWrite(t, base+1)
+		ch.reply(benshi.CmdWriteRFCh, []byte{0x00, 0xfc})
 	}()
-
-	hz, err := r.GetFreq()
-	if err != nil {
-		t.Fatalf("GetFreq: %v", err)
+	if _, err := r.Teardown(); err != nil {
+		t.Fatalf("Teardown: %v", err)
 	}
-	if hz != 145030000 {
-		t.Errorf("GetFreq = %d, want 145030000 via the channel-mode fallback", hz)
+	w := ch.writes()
+	m, err := benshi.DecodeMessage(w[len(w)-1][4:])
+	if err != nil {
+		t.Fatalf("DecodeMessage: %v", err)
+	}
+	if !bytes.Equal(m.Body, fakeVFORecord) {
+		t.Errorf("Teardown restored the wrong record:\n got % x\nwant % x (the operator's original)", m.Body, fakeVFORecord)
 	}
 }
 
@@ -401,7 +560,7 @@ func TestCloseUnblocksInFlightRequest(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := r.GetFreq()
+		_, err := r.GetPTT()
 		done <- err
 	}()
 
@@ -439,21 +598,21 @@ func TestLostReplyRequest2GetsOwnReply(t *testing.T) {
 	r := New(ch, 20*time.Millisecond)
 	defer r.Close()
 
-	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+	if _, err := r.GetPTT(); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("request1 err = %v, want ErrTimeout", err)
 	}
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		ch.reply(benshi.CmdFreqModeGetStatus, []byte{0x00, 0x08, 0xA4, 0xFB, 0x70})
+		ch.reply(benshi.CmdGetHTStatus, statusTX(true))
 	}()
 
-	hz, err := r.GetFreq()
+	tx, err := r.GetPTT()
 	if err != nil {
 		t.Fatalf("request2: %v", err)
 	}
-	if hz != 145030000 {
-		t.Errorf("GetFreq = %d, want 145030000", hz)
+	if !tx {
+		t.Error("GetPTT = false, want true (request2's own reply)")
 	}
 }
 
@@ -476,8 +635,8 @@ func TestLateReplyDiscardedDuringQuietPeriod(t *testing.T) {
 	r := New(ch, timeout) // quiet period = 3*timeout = 120ms
 	defer r.Close()
 
-	staleFreq := []byte{0x00, 0x08, 0x9E, 0x86, 0x00} // != 145030000
-	freshFreq := []byte{0x00, 0x08, 0xA4, 0xFB, 0x70} // 145030000 Hz
+	staleReply := statusTX(false) // request1's straggler: TX idle
+	freshReply := statusTX(true)  // request2's own answer: TX keyed
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -486,24 +645,24 @@ func TestLateReplyDiscardedDuringQuietPeriod(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		time.Sleep(timeout + 10*time.Millisecond) // shortly after request1's own deadline
-		ch.reply(benshi.CmdFreqModeGetStatus, staleFreq)
+		ch.reply(benshi.CmdGetHTStatus, staleReply)
 	}()
 	go func() {
 		defer wg.Done()
 		time.Sleep(timeout + 30*time.Millisecond)
-		ch.reply(benshi.CmdFreqModeGetStatus, freshFreq)
+		ch.reply(benshi.CmdGetHTStatus, freshReply)
 	}()
 
-	if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+	if _, err := r.GetPTT(); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("request1 err = %v, want ErrTimeout", err)
 	}
 
-	hz, err := r.GetFreq()
+	tx, err := r.GetPTT()
 	if err != nil {
 		t.Fatalf("request2: %v", err)
 	}
-	if hz != 145030000 {
-		t.Errorf("GetFreq = %d, want 145030000 (request2's own fresh reply, not request1's stale straggler)", hz)
+	if !tx {
+		t.Error("GetPTT = false, want true (request2's own fresh reply, not request1's stale straggler)")
 	}
 }
 
@@ -515,22 +674,22 @@ func TestConsecutiveLossesDoNotTrail(t *testing.T) {
 	defer r.Close()
 
 	for i := 0; i < 3; i++ {
-		if _, err := r.GetFreq(); !errors.Is(err, ErrTimeout) {
+		if _, err := r.GetPTT(); !errors.Is(err, ErrTimeout) {
 			t.Fatalf("request %d err = %v, want ErrTimeout", i+1, err)
 		}
 	}
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		ch.reply(benshi.CmdFreqModeGetStatus, []byte{0x00, 0x08, 0xA4, 0xFB, 0x70})
+		ch.reply(benshi.CmdGetHTStatus, statusTX(true))
 	}()
 
-	hz, err := r.GetFreq()
+	tx, err := r.GetPTT()
 	if err != nil {
 		t.Fatalf("final request: %v, want a clean reply -- consecutive losses must not trail", err)
 	}
-	if hz != 145030000 {
-		t.Errorf("GetFreq = %d, want 145030000", hz)
+	if !tx {
+		t.Error("GetPTT = false, want true")
 	}
 }
 
@@ -742,43 +901,10 @@ func TestCurrChannelStatusExtUsesUpperAndLowerNibble(t *testing.T) {
 	}
 }
 
-// Bug C: GetFreq did not fall back when the radio is in CHANNEL mode. In
-// that mode FREQ_MODE_GET_STATUS replies with status=0 and an all-zero body
-// -- DecodeFreqModeStatus only treats a non-zero status as an error, so the
-// old code returned 0 Hz as if it were a real frequency. This end-to-end
-// test drives GetFreq through all three requests it needs in that case,
-// using only captured live bytes, and checks the final result is the radio's
-// real frequency (145.670 MHz), not 0.
-func TestGetFreqFallsBackWhenFreqModeStatusIsAllZero(t *testing.T) {
-	ch := newFakeChannel()
-	r := New(ch, time.Second)
-	defer r.Close()
-
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		// Captured live: FREQ_MODE_GET_STATUS reply while in channel mode --
-		// status=0 (success) but an all-zero body, meaning "no frequency".
-		ch.reply(benshi.CmdFreqModeGetStatus, []byte{
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		})
-		time.Sleep(10 * time.Millisecond)
-		// Captured live: GET_HT_STATUS (StatusExt) -> channel 252.
-		ch.reply(benshi.CmdGetHTStatus, []byte{0x00, 0x80, 0xC1, 0x00, 0x3C})
-		time.Sleep(10 * time.Millisecond)
-		// Captured live: READ_RF_CH(252) -> 145.670 MHz.
-		ch.reply(benshi.CmdReadRFCh, []byte{
-			0x00, 0xFC, 0x08, 0xAE, 0xBF, 0x70, 0x08, 0xAE, 0xBF, 0x70,
-			0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		})
-	}()
-
-	hz, err := r.GetFreq()
-	if err != nil {
-		t.Fatalf("GetFreq: %v", err)
-	}
-	if hz != 145670000 {
-		t.Errorf("GetFreq = %d, want 145670000 (fell back to the channel read, not 0 Hz)", hz)
-	}
-}
+// The CHANNEL-mode fallback this file used to test is gone along with the
+// command it fell back FROM. GetFreq no longer consults FREQ_MODE_GET_STATUS
+// at all: that command answers from a frequency-mode register the radio does
+// not necessarily operate on, so "fall back when it looks wrong" was papering
+// over reading the wrong register in the first place. GetFreq now reads the
+// active VFO's channel record unconditionally -- see
+// TestGetFreqReadsTheActiveVFORecord.

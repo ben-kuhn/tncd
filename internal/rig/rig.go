@@ -84,8 +84,10 @@ type Rig struct {
 	waiting chan benshi.Message // non-nil while a request awaits its reply
 	waitCmd benshi.Command
 
-	cachedHz  uint32
-	cachedOK  bool
+	// orig is the channel record the first SetFreq of this session
+	// displaced, kept so Teardown can restore it verbatim.
+	orig      benshi.RFCh
+	origOK    bool
 	closed    bool
 	closeErr  error
 	closeOnce sync.Once
@@ -119,90 +121,159 @@ func (r *Rig) Close() error {
 	return r.closeErr
 }
 
-// CachedFreq returns the last frequency pushed by the radio, if any.
-func (r *Rig) CachedFreq() (uint32, bool) {
+// ErrDualWatch reports a radio in dual-watch mode, where which VFO carries a
+// transmission is not derivable from the settings record.
+var ErrDualWatch = errors.New("rig: radio is in dual-watch mode; turn dual watch off before tuning")
+
+// ErrChannelMode reports a radio parked on a named memory channel rather than
+// on its VFO.
+var ErrChannelMode = errors.New("rig: radio is on a named memory channel, not its VFO")
+
+// ErrVFOAmbiguous reports the settings record and the live status disagreeing
+// about which channel the radio is on.
+var ErrVFOAmbiguous = errors.New("rig: radio's settings and status disagree about the active channel")
+
+// activeChannel resolves which channel record the radio actually transmits on,
+// and reads it.
+//
+// This is deliberately not just GET_HT_STATUS's curr_ch_id. That field reports
+// whichever channel is live at the instant it is read, which under dual watch
+// is whichever VFO last received -- not necessarily the one a transmission
+// would go out on. The settings record names both VFOs explicitly, so it is
+// the authority here, and curr_ch_id is used only to cross-check it: if the
+// two disagree the radio is in a state this code does not model, and refusing
+// is the only safe answer when the next step is a write.
+func (r *Rig) activeChannel() (benshi.RFCh, error) {
+	sb, err := r.request(benshi.CmdReadSettings, nil)
+	if err != nil {
+		return benshi.RFCh{}, err
+	}
+	set, err := benshi.DecodeSettings(sb)
+	if err != nil {
+		return benshi.RFCh{}, err
+	}
+	id, ok := set.ActiveChannel()
+	if !ok {
+		return benshi.RFCh{}, ErrDualWatch
+	}
+	live, err := r.currChannel()
+	if err != nil {
+		return benshi.RFCh{}, err
+	}
+	if live != id {
+		return benshi.RFCh{}, fmt.Errorf("%w (settings say channel %d, status says %d)", ErrVFOAmbiguous, id, live)
+	}
+	body, err := r.request(benshi.CmdReadRFCh, []byte{id})
+	if err != nil {
+		return benshi.RFCh{}, err
+	}
+	if len(body) < 1 || body[0] != 0 {
+		return benshi.RFCh{}, fmt.Errorf("rig: radio rejected READ_RF_CH for channel %d", id)
+	}
+	return benshi.ParseRFCh(body[1:])
+}
+
+// SetFreq tunes the radio's active VFO to hz simplex.
+//
+// It does this by rewriting the channel record the active VFO points at,
+// because these radios have no separate scratch frequency register: a VFO is
+// an index into the channel table, and "frequency mode" is a VFO pointed at
+// an unnamed record near the top of that table (252 on a UV-PRO, with 251 as
+// its partner). FREQ_MODE_SET_PAR, which reads like the command for this and
+// is what this package used to send, writes a different register that the
+// firmware never promotes to the operating frequency -- proven on hardware by
+// tuning the radio's dial and watching channel 252 follow it while
+// FREQ_MODE_GET_STATUS kept reporting a stale value this code had written.
+//
+// Because the target is a real channel record, SetFreq refuses rather than
+// writes in three cases: dual watch on (which VFO transmits is unknowable),
+// settings and live status disagreeing about the active channel, and -- the
+// one that protects the operator's data -- a record carrying a NAME. A named
+// record is a memory the operator programmed, which means the radio is in
+// channel mode, not VFO mode; retuning it would silently destroy that memory.
+// An unnamed record is a VFO scratch record and is fair game.
+//
+// The record is patched in place rather than rebuilt, so sub-audio,
+// bandwidth, power flags, pre-emphasis bypass and any DMR fields survive the
+// round trip untouched. v1 is simplex only, which is what Winlink RMS
+// gateways need.
+func (r *Rig) SetFreq(hz uint32) error {
+	ch, err := r.activeChannel()
+	if err != nil {
+		return err
+	}
+	if name := ch.Name(); name != "" {
+		return fmt.Errorf("%w: channel %d is %q -- switch the radio to VFO/frequency mode first",
+			ErrChannelMode, ch.ID(), name)
+	}
+	r.rememberOriginal(ch)
+	body, err := r.request(benshi.CmdWriteRFCh, ch.WithFreq(hz).Bytes())
+	if err != nil {
+		return err
+	}
+	if len(body) < 1 || body[0] != 0 {
+		return fmt.Errorf("rig: radio rejected WRITE_RF_CH for channel %d", ch.ID())
+	}
+	return nil
+}
+
+// rememberOriginal records the first record SetFreq displaced this session, so
+// Teardown can put the radio back exactly where the operator left it. Only the
+// FIRST is kept: later SetFreqs in the same session are this code's own QSYs,
+// and restoring one of those would strand the radio on a frequency the
+// operator never chose.
+func (r *Rig) rememberOriginal(ch benshi.RFCh) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.cachedHz, r.cachedOK
-}
-
-// SetFreq enters frequency (VFO) mode and tunes rx = tx = hz.
-//
-// v1 is simplex only, which is what Winlink RMS gateways need.
-func (r *Rig) SetFreq(hz uint32) error {
-	p := benshi.FreqModeParams{
-		RXFreqHz: hz,
-		TXFreqHz: hz,
-		RXMod:    benshi.ModFM,
-		TXMod:    benshi.ModFM,
-		Step:     benshi.DefaultStep,
+	if !r.origOK {
+		r.orig = ch
+		r.origOK = true
 	}
-	_, err := r.request(benshi.CmdFreqModeSetPar, p.Payload())
-	return err
 }
 
-// GetFreq reads the current frequency from the radio.
+// GetFreq reads the frequency the radio's active VFO is tuned to.
 //
-// A radio not in frequency (VFO) mode -- e.g. sitting on a stored channel --
-// must fall back to reading the active channel directly instead of trusting
-// FREQ_MODE_GET_STATUS's answer. "Not in frequency mode" shows up two ways:
-// a non-zero (failure) status, which DecodeFreqModeStatus already turns into
-// an error, OR a *successful* status with an all-zero frequency --
-// HTCommander documents that leaving frequency mode clears the reported
-// frequency to zero, so a clean 0 Hz reply is not a real answer (145.030 MHz
-// on channel 0 is a valid station; a VFO genuinely tuned to 0 Hz is not) but
-// the same "go read the channel instead" signal as a failure status. Treating
-// only the error case as the trigger (the previous behavior) reported 0 Hz
-// as if it were a real frequency whenever the radio was on a channel -- live
-// UV-PRO captures show status=0 with an all-zero body in exactly that case.
+// This reads the channel record the VFO points at, NOT FREQ_MODE_GET_STATUS.
+// That command answers from a separate frequency-mode register which on real
+// firmware can hold a value the radio is not operating on -- on the bench it
+// reported a stale 145.670 MHz while the radio sat on 145.030 MHz, so
+// trusting it means reporting a frequency the operator is not listening to.
 func (r *Rig) GetFreq() (uint32, error) {
-	body, err := r.request(benshi.CmdFreqModeGetStatus, nil)
+	ch, err := r.activeChannel()
 	if err != nil {
 		return 0, err
 	}
-	hz, ferr := benshi.DecodeFreqModeStatus(body)
-	if ferr == nil && hz != 0 {
-		return hz, nil
-	}
-	id, cerr := r.currChannel()
-	if cerr != nil {
-		if ferr != nil {
-			return 0, ferr
-		}
-		return 0, cerr
-	}
-	return r.channelFreq(id)
+	return ch.RXFreqHz(), nil
 }
 
-// Teardown restores the radio to the frequency its currently selected
-// channel would have tuned, undoing this session's QSY(s).
+// Teardown puts the radio back on the frequency it was on before this
+// session's first SetFreq, and reports whether there was anything to undo.
 //
-// This is NOT what the name might suggest from the Benshi spec: the
-// documented all-zero FREQ_MODE_SET_PAR payload (benshi.TeardownPayload)
-// claims to drop the radio out of frequency mode, but live UV-PRO testing
-// showed that claim is false for real firmware -- the radio takes the
-// all-zero payload literally as "tune to 0 Hz" and clamps to 136.000 MHz,
-// the bottom of its VHF range, silently relocating the operator's radio to
-// the band edge instead of exiting frequency mode. This package never sends
-// that payload.
+// This restores the saved ORIGINAL record rather than re-reading the radio:
+// after SetFreq the radio's own record holds this code's QSY, so a
+// read-then-write would be a no-op that merely looks like a restore. The
+// earlier implementation did exactly that and was silently useless.
 //
-// Instead, Teardown reads the frequency the radio's own channel record
-// reports (via currChannel + channelFreq) and sets the VFO to match. That
-// record is proven stable across a full QSY-and-Teardown cycle on
-// hardware -- this package never writes it -- so this is an honest "put the
-// VFO back where the channel says it belongs", not the spec's fictional
-// "exit the mode". The radio is left in frequency mode, tuned to that
-// value, since a genuine exit does not appear to be available.
-func (r *Rig) Teardown() error {
-	id, err := r.currChannel()
-	if err != nil {
-		return err
+// Nothing to undo is not an error -- a session that never tuned has nothing
+// to restore -- so callers get (false, nil) rather than a failure.
+func (r *Rig) Teardown() (bool, error) {
+	r.mu.Lock()
+	orig, ok := r.orig, r.origOK
+	r.mu.Unlock()
+	if !ok {
+		return false, nil
 	}
-	hz, err := r.channelFreq(id)
+	body, err := r.request(benshi.CmdWriteRFCh, orig.Bytes())
 	if err != nil {
-		return err
+		return false, err
 	}
-	return r.SetFreq(hz)
+	if len(body) < 1 || body[0] != 0 {
+		return false, fmt.Errorf("rig: radio rejected WRITE_RF_CH restoring channel %d", orig.ID())
+	}
+	r.mu.Lock()
+	r.origOK = false
+	r.mu.Unlock()
+	return true, nil
 }
 
 // htStatusTXBit is is_in_tx within the first Status byte. Status packs, MSB
@@ -454,15 +525,12 @@ func (r *Rig) dispatch(f benshi.Frame) {
 		return
 	}
 	if m.Command == benshi.CmdEventNotification {
-		if st, err := benshi.DecodeFreqModeNotification(m.Body); err == nil {
-			r.mu.Lock()
-			if st.Active {
-				r.cachedHz, r.cachedOK = st.RXFreqHz, true
-			} else {
-				r.cachedOK = false
-			}
-			r.mu.Unlock()
-		}
+		// Event notifications are not replies to anything, so they must
+		// never reach the reply matcher below. Nothing here consumes them:
+		// the one that looked useful, the frequency-mode change (type 14),
+		// reports the frequency-mode register rather than the channel record
+		// the radio actually operates on, so caching it produced a
+		// confidently wrong answer to "what frequency are we on".
 		return
 	}
 	// At most one request is ever outstanding -- request() holds a quiet

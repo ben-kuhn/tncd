@@ -17,16 +17,33 @@ const (
 type Command uint16
 
 // The v1 subset. The full protocol has roughly fifty basic commands; only
-// those needed for read-only status and VFO-mode QSY are defined here, so that
-// no channel-writing or NVRAM-persisting command is reachable from this code.
+// those needed for status and VFO QSY are defined here.
+//
+// CmdWriteRFCh is the one command in this set that changes stored radio
+// state, and it is here because on this hardware there is no other way to
+// QSY. The radio has no scratch frequency register: each VFO is an INDEX
+// into the channel table, and "frequency mode" is a VFO pointed at an
+// unnamed record near the top of it.
+//
+// FREQ_MODE_SET_PAR (35) and FREQ_MODE_GET_STATUS (36) read like the right
+// commands for this and are deliberately absent. They address a separate
+// frequency-mode register that real UV-PRO firmware never promotes to the
+// operating frequency: on 2026-09-24 the radio's dial was turned and channel
+// record 252 followed it while FREQ_MODE_GET_STATUS went on reporting a
+// stale value this code had written minutes earlier, with the radio
+// transmitting on the channel record's frequency throughout. Defining them
+// again would invite the same wrong turn.
+//
+// Callers must guard the write; see internal/rig's SetFreq, which refuses
+// any record carrying a name so a real memory channel can never be the
+// target.
 const (
 	CmdGetDevInfo        Command = 4
 	CmdEventNotification Command = 9
 	CmdReadSettings      Command = 10
 	CmdReadRFCh          Command = 13
+	CmdWriteRFCh         Command = 14
 	CmdGetHTStatus       Command = 20
-	CmdFreqModeSetPar    Command = 35
-	CmdFreqModeGetStatus Command = 36
 	CmdDoProgFunc        Command = 66
 )
 
