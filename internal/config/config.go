@@ -104,7 +104,37 @@ type Port struct {
 	// Seconds; 0 disables. Default 20 for bluetooth, 0 for serial/tcp.
 	RXWedgeTimeout int
 
+	// VFOChannelMin is the lowest channel-record id rig control will
+	// overwrite when tuning a Benshi radio. These radios have no scratch
+	// frequency register -- a VFO is an index into the channel table -- so
+	// QSY rewrites the record the active VFO points at, and this bounds
+	// which records that is allowed to be. Verified on a BTech UV-PRO,
+	// whose VFOs live at 251 and 252 above a memory bank starting at 0.
+	// Other Benshi variants are not confirmed to number theirs the same
+	// way, so it is configurable: a radio that refuses to tune says which
+	// channel it is on, and setting this to that id allows it.
+	// Default 251. Only consulted for rig control.
+	VFOChannelMin int
+
 	KISS kiss.Params // from [kiss.N]; nil fields = don't send
+}
+
+// RigCtl holds one [rigctl.N] section: a hamlib Net rigctl listener for port N.
+//
+// One listener per port because hamlib's Net rigctl protocol has no way to
+// select among several rigs on one socket.
+type RigCtl struct {
+	Enabled    bool   // default false; the module is opt-in
+	ListenHost string // default "127.0.0.1"
+	ListenPort int    // default 4532 + N
+	// AllowedSubnets restricts rigctl client source IPs. Empty = allow all.
+	AllowedSubnets netutil.Allowlist
+	AllowPTT       bool // default false; see PTTTimeout
+	// PTTTimeout is the maximum time tncd will leave the transmitter keyed
+	// before force-releasing it, in seconds. Default 30. A remote key whose
+	// un-key path can be swallowed by a wedged Bluetooth link is a stuck
+	// transmitter, so this is not optional when AllowPTT is set.
+	PTTTimeout int
 }
 
 // Config is the parsed configuration.
@@ -114,6 +144,9 @@ type Config struct {
 	KISSTCP KISSTCP
 	API     APIConfig
 	Ports   []Port
+	// RigCtl holds one entry per configured port (RigCtl[i] is [rigctl.i],
+	// defaulted even when the section is absent), matching Ports by index.
+	RigCtl []RigCtl
 }
 
 // knownServerKeys are the recognized keys in [server].
@@ -125,6 +158,12 @@ var knownServerKeys = []string{
 // knownAX25Keys are the recognized keys in [ax25].
 var knownAX25Keys = []string{
 	"max_window", "n2_retry", "t3_timeout", "frack",
+}
+
+// knownRigCtlKeys are the recognized keys in [rigctl.N].
+var knownRigCtlKeys = []string{
+	"enabled", "listen_host", "listen_port", "allowed_subnets",
+	"allow_ptt", "ptt_timeout",
 }
 
 // knownKISSTCPKeys are the recognized keys in [kisstcp].
@@ -329,6 +368,11 @@ func getIntPtr(s *ini.Section, key string) *int {
 
 // Load reads and parses the INI file at path. If path is empty, returns
 // defaults plus one serial port (client.0, /dev/ttyUSB0).
+// defaultVFOChannelMin is the default lowest channel-record id rig control
+// will overwrite. 251 is where a BTech UV-PRO's two VFO scratch records sit
+// (251 and 252), above a memory bank that starts at 0. See Port.VFOChannelMin.
+const defaultVFOChannelMin = 251
+
 func Load(path string) (*Config, error) {
 	// Configure ini to be lenient (allows inline comments, etc.)
 	opts := ini.LoadOptions{
@@ -630,6 +674,7 @@ func Load(path string) (*Config, error) {
 			AX25Version:       ax25Version,
 			SREJ:              getBool(s, "srej", true),
 			RXWedgeTimeout:    getInt(s, "rx_wedge_timeout", rxWedgeDefault),
+			VFOChannelMin:     getInt(s, "vfo_channel_min", defaultVFOChannelMin),
 		}
 
 		// Serial-only params validated at load: a typo in parity/stopbits must
@@ -657,6 +702,38 @@ func Load(path string) (*Config, error) {
 		}
 
 		cfg.Ports[i] = port
+	}
+
+	// --- Parse [rigctl.N], one per configured port (section optional) ---
+	cfg.RigCtl = make([]RigCtl, len(portEntries))
+	for i := range portEntries {
+		secName := fmt.Sprintf("rigctl.%d", i)
+		s := f.Section(secName) // ini creates an empty section on demand
+		warnUnknownKeys(s, knownRigCtlKeys)
+
+		rigctlAllow, err := parseAllowlistKey(s, "allowed_subnets")
+		if err != nil {
+			return nil, fmt.Errorf("[%s] %w", secName, err)
+		}
+
+		pttTimeout := getInt(s, "ptt_timeout", 30)
+		if pttTimeout <= 0 {
+			// A zero or negative timeout would defeat the stuck-transmitter
+			// guard (tncd could leave the rig keyed indefinitely), so treat
+			// it the same as n2_retry <= 0: clamp and warn, don't silently
+			// disable the safety bound.
+			log.Printf("warning: [%s] ptt_timeout = %d is invalid; using 30", secName, pttTimeout)
+			pttTimeout = 30
+		}
+
+		cfg.RigCtl[i] = RigCtl{
+			Enabled:        getBool(s, "enabled", false),
+			ListenHost:     getString(s, "listen_host", "127.0.0.1"),
+			ListenPort:     getInt(s, "listen_port", 4532+i),
+			AllowedSubnets: rigctlAllow,
+			AllowPTT:       getBool(s, "allow_ptt", false),
+			PTTTimeout:     pttTimeout,
+		}
 	}
 
 	warnDuplicatePorts(cfg.Ports)

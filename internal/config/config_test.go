@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -424,5 +425,110 @@ func TestAPIAllowedHosts(t *testing.T) {
 	want := []string{"tncd.example.org", "shack-pi:8002"}
 	if fmt.Sprint(cfg.API.AllowedHosts) != fmt.Sprint(want) {
 		t.Fatalf("AllowedHosts = %q, want %q", cfg.API.AllowedHosts, want)
+	}
+}
+
+func TestRigCtlDefaults(t *testing.T) {
+	cfg, err := Load(write(t, "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.RigCtl) != 1 {
+		t.Fatalf("len(RigCtl) = %d, want 1 (one per port)", len(cfg.RigCtl))
+	}
+	rc := cfg.RigCtl[0]
+	if rc.Enabled {
+		t.Error("RigCtl must be opt-in, got Enabled = true")
+	}
+	if rc.ListenPort != 4532 {
+		t.Errorf("ListenPort = %d, want 4532 for port 0", rc.ListenPort)
+	}
+	if rc.AllowPTT {
+		t.Error("AllowPTT must default to false")
+	}
+	if rc.PTTTimeout != 30 {
+		t.Errorf("PTTTimeout = %d, want 30", rc.PTTTimeout)
+	}
+}
+
+func TestRigCtlPortDefaultsIncrementWithIndex(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
+		"[client.1]\ntype=bluetooth\nbdaddr=00:11:22:33:44:66\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RigCtl[1].ListenPort != 4533 {
+		t.Errorf("port 1 ListenPort = %d, want 4533", cfg.RigCtl[1].ListenPort)
+	}
+}
+
+func TestRigCtlExplicitValues(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
+		"[rigctl.0]\nenabled=true\nlisten_port=4600\nallow_ptt=true\nptt_timeout=10\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.RigCtl[0].Enabled || cfg.RigCtl[0].ListenPort != 4600 {
+		t.Errorf("RigCtl[0] = %+v", cfg.RigCtl[0])
+	}
+	if !cfg.RigCtl[0].AllowPTT || cfg.RigCtl[0].PTTTimeout != 10 {
+		t.Errorf("PTT config = %+v", cfg.RigCtl[0])
+	}
+}
+
+// A zero or negative key timeout would defeat the stuck-transmitter guard.
+func TestRigCtlRejectsNonPositivePTTTimeout(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
+		"[rigctl.0]\nenabled=true\nallow_ptt=true\nptt_timeout=0\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RigCtl[0].PTTTimeout != 30 {
+		t.Errorf("PTTTimeout = %d, want the 30s default to replace an invalid 0", cfg.RigCtl[0].PTTTimeout)
+	}
+}
+
+// The rigctl listener is the one listener that can key a transmitter, and a
+// wiring mistake here (wrong section read, value assigned to the wrong
+// field, parsed before the key is set) fails OPEN: the allowlist would
+// silently not apply and every source IP would be accepted. A check that
+// merely asserts "not the zero value" would still pass if the wrong subnet
+// were wired in, so this asserts actual allow/deny behavior via Allowlist's
+// own methods.
+func TestRigCtlAllowedSubnetsWiring(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
+		"[rigctl.0]\nenabled=true\nallowed_subnets=192.168.1.0/24\n"
+	cfg, err := Load(write(t, ini))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	allow := cfg.RigCtl[0].AllowedSubnets
+	if !allow.Enabled() {
+		t.Fatal("RigCtl[0].AllowedSubnets should be enabled")
+	}
+	in := &net.TCPAddr{IP: net.ParseIP("192.168.1.5"), Port: 1234}
+	if !allow.Allows(in) {
+		t.Errorf("Allows(%s) = false, want true (inside configured subnet)", in)
+	}
+	out := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 1234}
+	if allow.Allows(out) {
+		t.Errorf("Allows(%s) = true, want false (outside configured subnet)", out)
+	}
+}
+
+// An invalid allowed_subnets entry under [rigctl.N] must fail the load, and
+// the error must name the section so an operator can tell which one to fix.
+func TestRigCtlAllowedSubnetsInvalid(t *testing.T) {
+	ini := "[client.0]\ntype=bluetooth\nbdaddr=00:11:22:33:44:55\n" +
+		"[rigctl.0]\nenabled=true\nallowed_subnets=not-a-cidr\n"
+	_, err := Load(write(t, ini))
+	if err == nil {
+		t.Fatal("invalid [rigctl.0] allowed_subnets should fail config load")
+	}
+	if !strings.Contains(err.Error(), "rigctl.0") {
+		t.Errorf("error = %q, want it to name [rigctl.0]", err.Error())
 	}
 }

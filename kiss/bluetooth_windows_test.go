@@ -2,7 +2,11 @@
 
 package kiss
 
-import "testing"
+import (
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
 
 func TestParseBTAddr(t *testing.T) {
 	cases := []struct {
@@ -25,5 +29,18 @@ func TestParseBTAddr(t *testing.T) {
 		if !c.ok && err == nil {
 			t.Errorf("parseBTAddr(%q) = %#x, nil; want error", c.in, got)
 		}
+	}
+}
+
+// TestControlChannelRequiresOpenTransport: asking for rig control before the
+// port has opened the transport must fail cleanly rather than hand back a
+// channel wrapping an unopened socket. Mirrors the Linux test; a real-socket
+// equivalent of TestControlChannelBacksOntoTransport (kiss/bluetooth_linux_test.go)
+// cannot run here since it needs a live Winsock connection this environment
+// cannot fake, but the "not open" guard is pure logic and needs none.
+func TestControlChannelRequiresOpenTransport(t *testing.T) {
+	bt := &bluetoothTransport{fd: windows.InvalidHandle}
+	if _, err := bt.ControlChannel(); err == nil {
+		t.Fatal("ControlChannel on an unopened transport: err = nil, want error")
 	}
 }

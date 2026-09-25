@@ -307,6 +307,39 @@ func (bt *bluetoothTransport) Close() error {
 func (bt *bluetoothTransport) EnterKISS() error { return nil }
 func (bt *bluetoothTransport) ExitKISS()        {}
 
+// ControlChannel returns the Benshi rig-control channel for this transport.
+//
+// There is no second RFCOMM link to dial: confirmed live against a UV-PRO
+// (2026-09-23), the radio's Gaia command protocol is served on the SAME
+// RFCOMM connection as KISS traffic ("SPP Dev"). A separate "BS AOC" service
+// exists on the radio's SDP record, accepts a connection, and then answers
+// nothing, ever -- an earlier version of this method dialled that service as
+// a second Winsock RFCOMM socket (pinned by config.Port.ControlChannel or
+// resolved via its own SDP lookup); that path is gone. A Gaia request
+// written straight to the already-open KISS socket gets a real reply, and
+// KISS/Gaia frames were shown to interleave cleanly on the wire (two
+// independent KISS frames plus a Gaia reply, confirmed on-air by a separate
+// Dire Wolf receiver), distinguished only by their leading bytes (KISS:
+// 0xC0, Gaia: 0xFF 0x01) -- never by which socket they arrived on, because
+// there is only one.
+//
+// Sharp edge: the returned channel and bt's own KISS reader both read from
+// this one byte stream. Today that is safe because the only consumer is the
+// one-shot `tncd rig` CLI, which opens the transport and runs no KISS reader
+// of its own. It will NOT be safe for rig control running alongside a live
+// KISS port -- that needs a demultiplexer (one reader owning the stream,
+// routing 0xC0 to the KISS decoder and 0xFF 0x01 to the rig layer) in front
+// of both consumers. Not built here; that is the next task.
+func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
+	bt.mu.Lock()
+	open := bt.open
+	bt.mu.Unlock()
+	if !open {
+		return nil, fmt.Errorf("bluetooth: not open")
+	}
+	return &selfControlChannel{ReadWriteCloser: bt}, nil
+}
+
 // parseBTAddr parses "AA:BB:CC:DD:EE:FF" (colons or dashes, any case, or no
 // separators) into a BTH_ADDR: the 48-bit address in the low 6 bytes of a
 // uint64, with AA as the most-significant octet.

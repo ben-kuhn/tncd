@@ -195,7 +195,7 @@ func sdpDiscoverSPPChannel(addr [6]byte) (int, error) {
 		return 0, fmt.Errorf("connect SDP PSM: %w", err)
 	}
 
-	if _, err := unix.Write(fd, buildSSAReq()); err != nil {
+	if _, err := unix.Write(fd, buildSSAReq(uuid16Bytes(uuidSPP16))); err != nil {
 		return 0, fmt.Errorf("sdp request write: %w", err)
 	}
 	buf := make([]byte, 4096)

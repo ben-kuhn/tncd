@@ -5,11 +5,14 @@ package kiss
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"golang.org/x/sys/unix"
 )
 
 // TestEnsureProfileRetrySeam verifies the retry behaviour of ensureProfile
@@ -150,6 +153,64 @@ func TestCallBlueZPassesThrough(t *testing.T) {
 	want := errors.New("boom")
 	if err := callBlueZ(okCaller{err: want}, time.Second, "m"); !errors.Is(err, want) {
 		t.Fatalf("error = %v, want %v", err, want)
+	}
+}
+
+// TestControlChannelBacksOntoTransport is the regression test for the
+// deleted second-RFCOMM-link design: on a real UV-PRO, a separate "BS AOC"
+// control service accepts a connection and answers nothing, while the Gaia
+// protocol round-trips fine over the SAME socket as KISS ("SPP Dev"). So
+// ControlChannel must not dial anything -- it must hand back a view of bt's
+// own already-open file, reads and writes going straight through to it.
+//
+// It must also NOT close bt's underlying file: the port, not a rig-control
+// caller, owns the transport's lifetime, and Close()ing the rig's view must
+// never take the KISS data path down. Proven here by writing through bt
+// again after the control channel's Close().
+func TestControlChannelBacksOntoTransport(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	peer := os.NewFile(uintptr(fds[1]), "peer")
+	defer peer.Close()
+
+	bt := &bluetoothTransport{file: os.NewFile(uintptr(fds[0]), "bt")}
+	defer bt.file.Close()
+
+	cc, err := bt.ControlChannel()
+	if err != nil {
+		t.Fatalf("ControlChannel: %v", err)
+	}
+
+	if _, err := cc.Write([]byte("hello")); err != nil {
+		t.Fatalf("control channel write: %v", err)
+	}
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(peer, buf); err != nil {
+		t.Fatalf("peer read: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Fatalf("peer read = %q, want %q", buf, "hello")
+	}
+
+	if err := cc.Close(); err != nil {
+		t.Fatalf("control channel Close: %v", err)
+	}
+	// The underlying transport must still be usable: Close() on the
+	// control-channel view must not have closed bt.file.
+	if _, err := bt.Write([]byte("still alive")); err != nil {
+		t.Fatalf("bt.Write after control channel Close: %v", err)
+	}
+}
+
+// TestControlChannelRequiresOpenTransport: asking for rig control before the
+// port has opened the transport must fail cleanly, not hand back a channel
+// wrapping a nil file that panics on first use.
+func TestControlChannelRequiresOpenTransport(t *testing.T) {
+	bt := &bluetoothTransport{}
+	if _, err := bt.ControlChannel(); err == nil {
+		t.Fatal("ControlChannel on an unopened transport: err = nil, want error")
 	}
 }
 

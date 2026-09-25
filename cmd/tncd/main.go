@@ -87,6 +87,8 @@ func main() {
 			return
 		case "ports":
 			os.Exit(runPorts(os.Args[2:]))
+		case "rig":
+			os.Exit(runRigCommand(os.Args[2:]))
 		case "service":
 			os.Exit(runServiceCommand(os.Args[2:]))
 		case "install":
@@ -115,7 +117,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  version         Print version and exit\n")
 		fmt.Fprintf(os.Stderr, "  genconfig       Print example configuration and exit\n")
 		fmt.Fprintf(os.Stderr, "  check -c FILE   Validate configuration file and exit\n")
-		fmt.Fprintf(os.Stderr, "  ports [--json]  List serial devices and their stable references\n\n")
+		fmt.Fprintf(os.Stderr, "  ports [--json]  List serial devices and their stable references\n")
+		fmt.Fprintf(os.Stderr, "  rig             Query or set radio frequency (Benshi radios)\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		fs.PrintDefaults()
 	}

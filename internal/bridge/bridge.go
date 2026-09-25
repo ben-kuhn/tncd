@@ -1,8 +1,8 @@
 // Package bridge wires together the AX.25 L2 engine, KISS ports, and AGWPE
 // clients. All state-touching methods (AddClient, RemoveClient, Clients,
-// SendToKISS, SendAX25, OnKISSFrame, PortOnline, PortCount) MUST be called
-// on the engine loop unless otherwise noted. Bridge.Start may be called from
-// any goroutine; it posts online/offline events back via eng.Do.
+// SendToKISS, SendAX25, OnKISSFrame, PortOnline, PortCount, RigFor) MUST be
+// called on the engine loop unless otherwise noted. Bridge.Start may be
+// called from any goroutine; it posts online/offline events back via eng.Do.
 package bridge
 
 import (
@@ -16,6 +16,7 @@ import (
 	l2pkg "github.com/ben-kuhn/tncd/v2/ax25/l2"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/engine"
+	"github.com/ben-kuhn/tncd/v2/internal/rig"
 	"github.com/ben-kuhn/tncd/v2/kiss"
 )
 
@@ -71,6 +72,12 @@ type Bridge struct {
 	// traffic. Reset by any inbound frame, so it measures a single unbroken
 	// run of futile reconnects rather than a lifetime total (see checkRXWedge).
 	relinks []int
+
+	// rigs[port] caches the rig.Rig currently bound to that port's control
+	// channel, keyed to the *kiss.Port it was built from. See RigFor for why
+	// this is cached (not built fresh per call) and how the cache is
+	// invalidated across a reconnect.
+	rigs []rigSlot
 
 	// portEpoch[port] is bumped every time a connect attempt for the port is
 	// initiated (initial, auto-reconnect, manual relink, wedge relink). A dial
@@ -207,6 +214,101 @@ func (b *Bridge) PortOnline(port int) bool {
 		return false
 	}
 	return b.ports[port].Online()
+}
+
+// rigSlot is one entry of Bridge.rigs: the rig.Rig currently bound to a
+// port's control channel, tagged with the *kiss.Port it was built from so a
+// later reconnect (which replaces that pointer -- see connectPort) can be
+// detected and invalidated. The zero value (nil, nil) means "nothing
+// cached".
+type rigSlot struct {
+	kp *kiss.Port
+	r  *rig.Rig
+}
+
+// rigRequestTimeout bounds one rig.Rig request/response round trip to the
+// radio. It governs only the rigctl connection goroutine that issued the
+// request -- never the engine goroutine, which RigFor returns control to
+// well before any radio I/O happens (see RigFor's doc comment) -- so a slow
+// or wedged Benshi link (a documented failure mode on these radios, see
+// CLAUDE.md) fails that one rigctl command instead of hanging it
+// indefinitely, with no effect on packet on any port.
+const rigRequestTimeout = 5 * time.Second
+
+// RigFor returns a rig bound to port n's live control channel, or an error
+// if the port is out of range, offline, or mid-relink (a fresh *kiss.Port
+// that has not yet reported online is, from here, indistinguishable from
+// "not there" -- both fail the type assertion or the Online() check below).
+//
+// Must be called on the engine loop: it reads b.ports and b.rigs, which are
+// both engine-owned state, same as PortOnline. The returned *rig.Rig does
+// all of ITS work off that loop -- see internal/rig's package doc -- so
+// resolving "which rig to use" (this call, fast, on-loop) and "talking to
+// the radio" (a later call on the returned value, slow, off-loop) are
+// deliberately two different steps; callers (internal/app's rigctl provider)
+// must keep them that way.
+//
+// A *rig.Rig is cached per port, keyed to the *kiss.Port it was opened
+// against, rather than built fresh on every call. Port.ControlChannel
+// enforces a single attached consumer (ErrControlChannelInUse otherwise, see
+// kiss/port.go), and nothing between rigctl requests ever detaches a
+// freshly-created one, so "one rig.Rig per request" would fail every request
+// after the first. Caching also gives Close-and-rebuild-on-reconnect for
+// free: comparing b.rigs[port].kp against the current b.ports[port] detects
+// a transport swap (a new *kiss.Port instance -- see connectPort) and
+// invalidates the stale entry before it can be handed back bound to a dead
+// control channel.
+func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
+	if port < 0 || port >= len(b.ports) {
+		return nil, fmt.Errorf("bridge: port %d out of range", port)
+	}
+	kp, ok := b.ports[port].(*kiss.Port)
+	if !ok || !kp.Online() {
+		b.invalidateRig(port)
+		return nil, fmt.Errorf("bridge: port %d is offline", port)
+	}
+	// A cached rig must be both the RIGHT link and still alive. Checking
+	// only the link left a self-poisoned rig cached forever: request()
+	// closes the rig on a write timeout, and because rigRequestTimeout (5s)
+	// is shorter than the port layer's own ctrlWriteTimeout (10s), the rig
+	// poisons itself while the PORT stays online -- so kp never changes,
+	// the cache never invalidates, and every later command returns
+	// ErrClosed until tncd restarts. Dropping a closed rig here rebuilds it
+	// on the next call instead.
+	if port < len(b.rigs) && b.rigs[port].r != nil && b.rigs[port].kp == kp && !b.rigs[port].r.Closed() {
+		return b.rigs[port].r, nil
+	}
+	// Either nothing cached yet, or the cached entry belonged to a port
+	// instance this one has replaced (a reconnect) -- either way, drop
+	// whatever's there before attaching a new consumer.
+	b.invalidateRig(port)
+	ch, err := kp.ControlChannel()
+	if err != nil {
+		return nil, fmt.Errorf("bridge: port %d: %w", port, err)
+	}
+	vfoMin := 0
+	if port < len(b.cfg.Ports) {
+		vfoMin = b.cfg.Ports[port].VFOChannelMin
+	}
+	r := rig.New(ch, rigRequestTimeout, vfoMin)
+	if port < len(b.rigs) {
+		b.rigs[port] = rigSlot{kp: kp, r: r}
+	}
+	return r, nil
+}
+
+// invalidateRig closes and drops any rig cached for port. Rig.Close detaches
+// the control-channel consumer (kiss.Port.ControlChannel's single-consumer
+// slot) and stops the rig's reader goroutine; it does not touch the
+// transport (see portControlChannel.Close's doc comment), so this is safe
+// and fast to call regardless of whether the underlying port is still
+// online, still connecting, or already gone.
+func (b *Bridge) invalidateRig(port int) {
+	if port < 0 || port >= len(b.rigs) || b.rigs[port].r == nil {
+		return
+	}
+	b.rigs[port].r.Close()
+	b.rigs[port] = rigSlot{}
 }
 
 // Clients returns a snapshot of the connected AGWPE clients.
@@ -461,10 +563,11 @@ func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, sende
 
 // initLastRX (re)sizes lastRX and seeds every entry to now so a freshly-wired
 // port is never treated as wedged before its first frame arrives. Also sizes
-// the matching relink counters.
+// the matching relink counters and the per-port rig cache (see RigFor).
 func (b *Bridge) initLastRX() {
 	b.lastRX = make([]time.Time, len(b.ports))
 	b.relinks = make([]int, len(b.ports))
+	b.rigs = make([]rigSlot, len(b.ports))
 	now := time.Now()
 	for i := range b.lastRX {
 		b.lastRX[i] = now
@@ -703,6 +806,17 @@ func (b *Bridge) Shutdown() {
 	}
 	for _, c := range b.clients {
 		c.CloseTransport()
+	}
+	// Drop any cached rigs before the ports themselves close. This is
+	// defensive, not load-bearing for the documented shutdown order: callers
+	// like internal/app close every rigctl server (which force-releases any
+	// keyed PTT while the port is still alive) BEFORE calling Shutdown at
+	// all, so nothing should still be using a cached rig by the time this
+	// runs. It's cheap and it means Bridge.Shutdown never leaves a rig's
+	// reader goroutine to be cleaned up implicitly by the port's own
+	// teardown (see portControlChannel.Read's stopCh case) instead.
+	for i := range b.rigs {
+		b.invalidateRig(i)
 	}
 	for _, p := range b.ports {
 		if kp, ok := p.(*kiss.Port); ok {

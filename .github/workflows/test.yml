@@ -63,11 +63,16 @@ jobs:
       - name: Fuzz smoke (10s per parser target)
         run: |
           set -e
-          # Keep this list in sync when adding a Fuzz* target: CLAUDE.md
-          # promises CI fuzzes every untrusted-byte parser, and a target
-          # missing here only ever replays its seed corpus under `go test`.
+          # EVERY Fuzz* target in the tree. Keep this list in sync when adding
+          # one: CLAUDE.md promises CI fuzzes every untrusted-byte parser, and
+          # a target missing here only ever replays its seed corpus under
+          # plain `go test` -- it is never actually fuzzed.
           for spec in "ax25 FuzzParseModulo" "ax25 FuzzParseXID" "ax25 FuzzParseAddress" \
-                      "agwpe FuzzParseHeader" "kiss FuzzDecoderFeed" "kiss FuzzParseRFCOMMChannel"; do
+                      "agwpe FuzzParseHeader" "kiss FuzzDecoderFeed" \
+                      "kiss FuzzParseRFCOMMChannel" "kiss FuzzDemuxFeed" \
+                      "benshi FuzzDecoder" "benshi FuzzDecodeMessage" \
+                      "benshi FuzzParseRFCh" "benshi FuzzDecodeSettings" \
+                      "internal/frontend/rigctl FuzzHandleLine"; do
             pkg="${spec% *}"; target="${spec#* }"
             # -fuzzminimizetime bounds the per-find minimisation that races the
             # deadline; without it one slow minimisation can overrun the step.

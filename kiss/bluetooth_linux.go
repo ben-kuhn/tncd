@@ -5,6 +5,7 @@ package kiss
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -168,6 +169,35 @@ func (bt *bluetoothTransport) Open() error {
 		removePending(string(devicePath))
 		return fmt.Errorf("bluetooth: connection to %s timed out (30s)", bt.cfg.BDAddr)
 	}
+}
+
+// ControlChannel returns the Benshi rig-control channel for this transport.
+//
+// There is no second RFCOMM link to dial: confirmed live against a UV-PRO
+// (2026-09-23), the radio's Gaia command protocol is served on the SAME
+// RFCOMM connection as KISS traffic ("SPP Dev"). A separate "BS AOC" service
+// (channel 2) exists on the radio's SDP record, accepts a connection, and
+// then answers nothing, ever -- an earlier version of this method dialled
+// that service via its own Profile1 registration at /org/tncd/control; it is
+// gone. A Gaia request written straight to the already-open KISS socket gets
+// a real reply, and KISS/Gaia frames were shown to interleave cleanly on the
+// wire (two independent KISS frames plus a Gaia reply, confirmed on-air by a
+// separate Dire Wolf receiver), distinguished only by their leading bytes
+// (KISS: 0xC0, Gaia: 0xFF 0x01) -- never by which socket they arrived on,
+// because there is only one.
+//
+// Sharp edge: the returned channel and bt's own KISS reader both read from
+// this one byte stream. Today that is safe because the only consumer is the
+// one-shot `tncd rig` CLI, which opens the transport and runs no KISS reader
+// of its own. It will NOT be safe for rig control running alongside a live
+// KISS port -- that needs a demultiplexer (one reader owning the stream,
+// routing 0xC0 to the KISS decoder and 0xFF 0x01 to the rig layer) in front
+// of both consumers. Built in kiss/demux.go.
+func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
+	if bt.file == nil {
+		return nil, fmt.Errorf("bluetooth: not open")
+	}
+	return &selfControlChannel{ReadWriteCloser: bt}, nil
 }
 
 // bluetoothReconnectSettle is how long Open waits after disconnecting a stale
