@@ -7,8 +7,15 @@ Benshi command protocol over the same link tncd already holds for KISS —
 nothing here is reachable by a unit test or the e2e harness, which both run
 against Dire Wolf, not a real Benshi radio.
 
-Scope: BTech UV-PRO, RadioOddity GA-5WB, Vero VR-N76/VR-N7500 (Benshi
-protocol only — see README). Verified against a real BTech UV-PRO.
+Scope: BTech UV-PRO, RadioOddity GA-5WB/DB-50B, Vero VR-N76/VR-N7500 (Benshi
+protocol only — see README, whose radio list this must match).
+
+**Only the UV-PRO has actually been verified.** The others are listed because
+they share the Benshi protocol, which is an inference, not a test result — and
+one worth treating carefully here specifically: the VFO channel-id floor
+(`vfo_channel_min`, default 251) was derived from a UV-PRO's channel map, and
+nothing confirms other variants number their VFOs the same way. On a new
+model, run section A first and read what a refusal names.
 
 ## Before you start
 
@@ -52,29 +59,39 @@ not just an `RPRT 0`.
       within a couple of seconds
 - [ ] Repeated `set-freq` calls (simulating a Doppler-tracking client)
       continue to retune correctly, not just the first call
-- [ ] With the radio on a **stored memory channel** (not in VFO mode —
-      power-cycle or otherwise back it out of frequency mode first),
-      `tncd rig get-freq` still returns that channel's frequency. This
-      exercises the `READ_RF_CH` fallback path (rather than the VFO-mode
-      `FREQ_MODE_GET_STATUS` cache) and confirms its request encoding is
-      correct against real firmware, not just against a fake
+- [ ] With the radio on a **named stored memory channel**, `tncd rig get-freq`
+      still returns that channel's frequency — `GetFreq` always reads the
+      active VFO's channel record (`READ_SETTINGS` → `GET_HT_STATUS` →
+      `READ_RF_CH`; there is no second path and no notification cache), so
+      this confirms that request encoding against real firmware rather than
+      against a fake
+- [ ] On that same named memory channel, `tncd rig set-freq <hz>` **refuses**
+      with a message naming the channel, and the memory is unchanged
+      afterwards. This is the guard that stops rig control overwriting a
+      memory you programmed; verify it on the radio, not just in tests
+- [ ] With the radio in **dual watch**, `set-freq` refuses rather than
+      guessing which VFO transmits
 
-### B. Teardown restores the prior state — NOT the band edge
+### B. Teardown restores the prior frequency
 
-The spec originally claimed an all-zero `FREQ_MODE_SET_PAR` "drops the radio
-out of frequency mode and restores its normal channel state." **That is
-false on real firmware**: an all-zero payload clamps the radio to 136.000 MHz
-(the bottom of its tuning range) and leaves it stuck in frequency/VFO mode.
-`Teardown()` was reimplemented to read the active channel's stored frequency
-and set that back explicitly — confirm the fix actually holds on your unit:
+`Teardown` restores a saved copy of the record this session's **first**
+`set-freq` displaced. Note that each `tncd rig` invocation is its own session,
+so a standalone `tncd rig teardown` has nothing to restore and will say so —
+exercise this through the **rigctld server**, which holds one session for the
+life of the connection, or accept that the CLI cannot test it.
 
-- [ ] After `set-freq` followed by `tncd rig teardown`, the radio shows the
-      **frequency it was on before `set-freq`**, not 136.000 MHz
-- [ ] The radio is out of VFO/frequency-mode display state after teardown
-      (back to showing a normal channel, if the radio distinguishes the two)
-- [ ] After a **power cycle**, no memory channel has changed and the radio
-      powers up on its original channel — confirms nothing was written to
-      NVRAM anywhere in the get-freq/set-freq/teardown path
+Do NOT expect an "exit VFO mode" command to exist. The spec originally claimed
+an all-zero `FREQ_MODE_SET_PAR` payload does that; on real firmware it clamps
+the radio to 136.000 MHz, the bottom of its tuning range. tncd never sends it.
+
+- [ ] Through a rigctl client: `set_freq`, then drop the connection, and the
+      radio returns to the **frequency it was on beforehand**, not 136.000 MHz
+- [ ] `tncd rig teardown` on its own prints that there is nothing to restore,
+      rather than silently doing nothing or claiming success
+- [ ] After a **power cycle**, the VFO holds whatever it was last set to and
+      **no named memory channel has changed** — QSY writes the VFO's own
+      channel record, so this is the check that the guards kept it away from
+      everything else
 
 ### C. Packet still works while rig control is in use (the real test)
 

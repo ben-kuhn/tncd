@@ -14,7 +14,7 @@ import (
 // to 0xC0 inside a Gaia frame's payload is never mistaken for a KISS FEND.
 // benshi.Decoder's Feed is deliberately a black box (whole frames in, whole
 // frames out) and exposing that partial-frame state would serve no consumer
-// but this one; a kiss -> benshi import for four small integers was judged
+// but this one; a kiss -> benshi import for five small integers was judged
 // not worth that dependency. benshi/frame.go remains the source of truth
 // these constants must stay in sync with.
 const (

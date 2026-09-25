@@ -42,7 +42,7 @@ benign (a clean "not open" error rather than a use-after-close), but it is a dat
 Go's memory model and `-race` would flag it under the right interleaving.
 
 ### 3. Benshi framing constants are duplicated with no compile-time link
-`kiss/demux.go` mirrors four constants from `benshi/frame.go` (`gaiaStart`, `gaiaVersion`,
+`kiss/demux.go` mirrors five constants from `benshi/frame.go` (`gaiaStart`, `gaiaVersion`,
 `gaiaHeaderLen`, `gaiaMsgHeaderLen`, `gaiaFlagChecksum`) because `benshi` does not export the
 internals the demultiplexer needs. They were verified identical when written, and the
 length/resync arithmetic is line-for-line equivalent to `benshi.Decoder.Feed`.
@@ -182,7 +182,7 @@ Related: the LE-transport fix (`30885b9`) is now MERGED to main (`e8c4b31`, push
 2026-09-24). It makes tncd establish a real LE link instead of reporting a phantom one.
 
 **That fix is a prerequisite for any BLE rig-control work.** The deferred BLE control
-channel (Task 4b of the rig-control plan) cannot be validated without it: before the fix,
+channel (Task 4 (BLE) / Task 11 (classic RFCOMM) of the rig-control plan) cannot be validated without it: before the fix,
 tncd reported a healthy online port with no LE link at all, so a BLE control channel would
 have appeared to open and then silently failed every write. Whoever picks up BLE rig control
 must branch from a main that contains `e8c4b31` — the rig-control feature branch was cut

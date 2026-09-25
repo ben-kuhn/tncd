@@ -2,7 +2,7 @@
 
 **Date**: 2026-09-22
 **Branch**: `feature/benshi-rig-control`
-**Status**: design approved, implementation not started
+**Status**: implemented on `feature/benshi-rig-control`; the QSY path was hardware-validated 2026-09-25 (a UI frame sent through tncd after a `set_freq` was decoded off air by an independent Dire Wolf receiver on the new frequency). The OTA checklist is not yet signed off.
 
 ## Corrections (2026-09-24, post-hardware-validation)
 
@@ -28,23 +28,39 @@ sections these point at without reading this first.
    `kiss/control.go`, `kiss/port.go`). Ignore the "Classic RFCOMM (all
    platforms)" paragraph and the `control_channel = 2` example under
    Configuration below; they describe the abandoned design.
-2. **The all-zero `FREQ_MODE_SET_PAR` teardown does not work as documented.**
-   Component C claims an all-zero payload "drops the radio out of VFO mode
-   and restores its normal channel state." On real firmware it does not: the
-   radio clamps to 136.000 MHz (the bottom of its tuning range) and **stays**
-   in frequency mode. `(*rig.Rig).Teardown` was reimplemented to read the
-   active channel's stored frequency (via `READ_SETTINGS` + `READ_RF_CH`) and
-   set that back explicitly, rather than relying on any documented "exit VFO
-   mode" behavior — there isn't one. See `internal/rig/rig.go`.
-3. **QSY never touches a memory channel, confirmed, not just intended.** The
-   "never writes a stored memory channel" goal held up: the channel record
-   read identically before, during, and after a full QSY-and-teardown cycle
-   on real hardware. This one was validated as designed — noted here only so
-   it isn't mistaken for another casualty of the corrections above.
+2. **`FREQ_MODE_SET_PAR` does not tune the radio at all** — the single
+   largest correction, and the one that reshaped the design. It writes a
+   register real UV-PRO firmware never promotes to the operating frequency,
+   and because `FREQ_MODE_GET_STATUS` reads that *same* register back, every
+   software-visible signal agreed with itself while the radio transmitted
+   somewhere else. Both commands are now absent from the codec. Its
+   documented all-zero "teardown" payload is false too: the radio takes it
+   literally as 0 Hz and clamps to 136.000 MHz, still in frequency mode.
+   **Read Component C**, which is rewritten; QSY is a guarded read-modify-write
+   of the VFO's channel record via `WRITE_RF_CH`.
 
-Everything else below — the codec, `FREQ_MODE_GET_STATUS`/notification 14
-semantics, the rigctl command surface and error codes, and the PTT toggle
-risk analysis — held up on the bench and is accurate as written.
+   `(*rig.Rig).Teardown` went through two designs before the shipped one.
+   The interim version — re-read the active channel and write that value
+   back — is also wrong: after a QSY the radio's own record already holds
+   *our* frequency, so it is a no-op dressed up as a restore. The shipped
+   `Teardown` restores a saved copy of the record this session's **first**
+   `SetFreq` displaced, and returns `(bool, error)` where `false` means there
+   was nothing to undo.
+3. **"QSY never touches a memory channel" is no longer true as stated**, and
+   the evidence that appeared to confirm it came from the `FREQ_MODE` build,
+   where nothing was written at all. QSY now rewrites the channel record the
+   active VFO points at, because on this hardware that record *is* the VFO.
+   What survives is narrower and enforced rather than assumed: **no memory
+   channel you programmed is ever written.** `SetFreq` refuses a record that
+   carries a name, one whose id is below `vfo_channel_min` (default 251), one
+   with a tx/rx split, and any radio in dual watch. See Component C.
+
+The rigctl command surface, the PTT toggle risk analysis and the codec's
+framing held up on the bench. Two smaller claims below did not, and are
+corrected in place: the architecture table's "caches pushed status" (there is
+no cache — notification 14 reports the same dead register, so `dispatch`
+discards notifications), and Component D's `RPRT -9` row (the server never
+emits it; a refusal surfaces as `RPRT -8`).
 
 ## Purpose
 
@@ -98,6 +114,14 @@ documentation is used the same way.
 
 ### The contention worry dissolves
 
+> **Superseded — see Corrections §1.** The conclusion (one process holding the
+> link can serve both KISS and rig control, so there is no contention) is
+> right; the mechanism described below is not. There is no second connection
+> and no `control_channel` key: on classic Bluetooth, command and KISS share
+> ONE RFCOMM link and are told apart by their leading bytes (`0xC0` vs
+> `0xFF 0x01`), demultiplexed in `kiss/demux.go`. The separate "BS AOC"
+> channel accepts a connection and answers nothing.
+
 The UV-PRO exposes two entirely separate GATT services:
 
 | Service | UUID | Used by |
@@ -123,7 +147,7 @@ Four components, following tncd's existing layering:
 |---|---|---|
 | Benshi codec | `benshi/` | GaiaFrame framing + message encode/decode. Pure, no I/O. |
 | Control channel | `kiss/` | Expose a byte-duplex for the Benshi command channel from the BLE and SPP transports. |
-| Rig | `internal/rig/` | Request/response over the control channel; frequency get/set; caches pushed status. |
+| Rig | `internal/rig/` | Request/response over the control channel; frequency get/set via the VFO's channel record. (Does **not** cache pushed status — see Corrections.) |
 | rigctl server | `internal/frontend/rigctl/` | hamlib Net rigctl TCP listener, one per port. |
 
 Exported reusable code lives at the top level (`benshi/`), policy and glue
@@ -195,8 +219,7 @@ header (command group + command id) followed by a typed body.
 | Command | Id | Use |
 |---|---|---|
 | `GET_DEV_INFO` | 4 | Identify the radio; verify it speaks the protocol |
-| `FREQ_MODE_SET_PAR` | 35 | Enter VFO mode and tune; all-zero payload tears down |
-| `FREQ_MODE_GET_STATUS` | 36 | Read current VFO frequency |
+| `WRITE_RF_CH` | 14 | Rewrite the active VFO's channel record — **the QSY mechanism**; guarded in Component C |
 | `READ_RF_CH` | 13 | Read the active channel's frequency when not in VFO mode |
 | `READ_SETTINGS` | 10 | Read the active channel index; squelch and power (structured for, not wired to hamlib in v1) |
 | `GET_HT_STATUS` | 20 | Source for `t` (get_ptt) |
@@ -363,7 +386,7 @@ a KISS TNC the radio keys itself. PTT exists for other hamlib clients.
 | Radio did not reply in time | `RPRT -5` | `RIG_ETIMEOUT` = 5 |
 | Port offline or relinking | `RPRT -6` | `RIG_EIO` = 6 |
 | Malformed reply from radio | `RPRT -8` | `RIG_EPROTO` = 8 |
-| Radio replied with a failure status | `RPRT -9` | `RIG_ERJCTED` = 9 |
+| Radio replied with a failure status, or tuning was refused by a guard | `RPRT -8` | `RIG_EPROTO` = 8. An earlier draft promised `RPRT -9` (`RIG_ERJCTED`); the server does not emit it — `errToRPRT` maps every non-timeout, non-closed error to `-8`. |
 
 **Concurrency.** One goroutine per client connection. Rig requests are
 serialized by a per-port mutex and executed off the engine loop with a timeout.

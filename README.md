@@ -391,14 +391,40 @@ controls `[client.0]`):
 | `allow_ptt` | `false` | See PTT warning below |
 | `ptt_timeout` | `30` | Seconds; maximum time tncd will leave the transmitter keyed before force-releasing it, only relevant when `allow_ptt = true` |
 
-**What it never does**: rig control only tunes the radio's frequency (VFO)
-mode via `FREQ_MODE_SET_PAR`. It **never writes a stored memory channel and
-never persists anything to the radio's NVRAM** — confirmed on real hardware
-by reading the active channel record before, during, and after a QSY and
-finding it unchanged. `teardown` (see below) restores the frequency the radio
-was on before rig control touched it, by reading the channel record back —
-not by any special "exit VFO mode" command, because on real firmware that
-does not restore state (see the design spec's corrections section).
+One related key lives on the **port** (`[client.N]`), not here, because it
+describes the radio rather than the listener:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `vfo_channel_min` | `251` | Lowest channel-record id rig control will overwrite when tuning. See "How tuning works" below. |
+
+**How tuning works, and what it refuses to touch**: these radios have no
+scratch frequency register. A VFO is an *index* into the radio's channel
+table, and "frequency mode" is that index pointed at an unnamed scratch
+record near the top of it (251 and 252 on a BTech UV-PRO). So a QSY rewrites
+the channel record the active VFO points at — there is no way around writing
+a channel record, because that record *is* the VFO.
+
+Because the target is a real channel record, tuning **refuses** rather than
+writes whenever the record might be a memory you programmed:
+
+- the record carries a **name** — you named it, so the radio is on a memory,
+  not its VFO;
+- its id is **below `vfo_channel_min`** (default 251) — an unnamed memory
+  would otherwise pass the name check. If your radio genuinely keeps its VFO
+  somewhere else, the refusal names the channel and you set that key for the
+  port;
+- its **tx and rx differ** — a repeater split is certainly a memory, and
+  tuning is simplex, so it would discard the offset;
+- the radio is in **dual watch**, where which VFO transmits is not derivable.
+
+Only the frequencies are rewritten; sub-audio, bandwidth, power flags and
+everything else in the record are preserved byte for byte.
+
+`FREQ_MODE_SET_PAR`, which reads like the command for this, is deliberately
+unused: on real UV-PRO firmware it writes a register the radio never actually
+tunes to, while reporting the value back to you. See the design spec's
+Component C.
 
 **PTT is off by default and experimental.** The radio has no separate
 key/unkey command — a single "PTT" effect byte **toggles** the transmitter on
@@ -418,11 +444,17 @@ there is no unit ambiguity to resolve.
 without a rigctl client:
 
 ```bash
-tncd rig -c tncd.ini --port 0 probe          # identify the radio
+tncd rig -c tncd.ini --port 0 probe          # confirm the radio answers the protocol
 tncd rig -c tncd.ini --port 0 get-freq       # current frequency, Hz
 tncd rig -c tncd.ini --port 0 set-freq 145030000
-tncd rig -c tncd.ini --port 0 teardown       # restore the pre-QSY frequency
+tncd rig -c tncd.ini --port 0 teardown       # undo a QSY made earlier in the SAME process
 ```
+
+`teardown` restores the record this session's first `set-freq` displaced,
+from a saved copy. Each `tncd rig` invocation is its own session, so running
+`teardown` on its own has nothing to restore and says so — it is there for
+the rigctld server, which keeps one session for the life of the connection.
+To put a radio back by hand, use `set-freq`.
 
 `--port` is the index into `[client.N]` (default 0). See
 `docs/superpowers/specs/rig-control-ota-checklist.md` for the full hardware
@@ -664,7 +696,7 @@ Below is a list of hardware and software I have easily available to test with.  
 ### Hardware TNCs
 These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
 
-- [x] BTECH UV-Pro/Radioddity GA-5WB/Radioddity DB-50B/Vero NR N76 (Bluetooth) — all Benshi-protocol radios; they share one Bluetooth implementation, so a fix for one generally applies to all
+- [x] BTECH UV-Pro/Radioddity GA-5WB/Radioddity DB-50B/Vero NR N76 (Bluetooth) — all Benshi-protocol radios sharing one Bluetooth implementation, so a fix for one *generally* applies to all. Treat that as an inference, not a result: the UV-PRO and the DB-50B are the units actually exercised here, and they have already diverged once — the DB-50B's SDP record defeats bluez on one host where the UV-PRO is fine (see `docs/followups.md`). **Rig control is verified on the UV-PRO only.**
 - [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A
 - [x] Mobilinkd TNC3 (Bluetooth SPP) — OTA-verified at 1200 baud via native D-Bus SPP, full Winlink CMS round-trip with 10KB attachment; 2-hop digipeater verified
 - [x] Mobilinkd TNC2 (Bluetooth) — OTA-verified for APRS via native D-Bus SPP. Connected mode sort-of works, but there's a known hardware limitation (the TNC2 is really an APRS-focused device), so it's not recommended for Winlink/connected-mode use.

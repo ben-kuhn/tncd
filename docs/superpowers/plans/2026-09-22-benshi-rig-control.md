@@ -1,10 +1,39 @@
 # Benshi Rig Control Implementation Plan
 
+> # ⛔ SUPERSEDED 2026-09-25 — HISTORICAL RECORD, DO NOT EXECUTE
+>
+> **This plan is finished, and parts of it are now known to be wrong. Do not
+> hand it to an agentic worker.** It is kept only to show how the design was
+> arrived at and where it went wrong.
+>
+> The current design is **Component C of the spec**
+> (`docs/superpowers/specs/2026-09-22-benshi-rig-control-design.md`). Read that
+> instead. The shipped code is on `feature/benshi-rig-control`.
+>
+> **The central instruction below is inverted.** This plan mandates QSY via
+> `FREQ_MODE_SET_PAR` and states that "`WRITE_RF_CH`, `WRITE_SETTINGS` and
+> `STORE_SETTINGS` must not appear in the implementation". On real UV-PRO
+> firmware `FREQ_MODE_SET_PAR` writes a register the radio never tunes to; a
+> VFO is an index into the channel table, so QSY **requires** `WRITE_RF_CH` on
+> the record the VFO points at. An agent following this plan would delete the
+> working QSY mechanism. Proven on hardware 2026-09-24/25 — see the spec.
+>
+> Consequently these no longer exist and must not be recreated:
+> `benshi.FreqModeParams`, `TeardownPayload`, `DecodeFreqModeStatus`,
+> `DecodeFreqModeNotification`, `CmdFreqModeSetPar`, `CmdFreqModeGetStatus`,
+> `ModFM`, `DefaultStep`, `(*Rig).CachedFreq`, and the `control_channel`
+> config key. `(*Rig).Teardown` returns `(bool, error)`, not `error`. There is
+> no second GATT service and no second RFCOMM socket — command and KISS share
+> one connection, demultiplexed by leading bytes (`kiss/demux.go`).
+>
+> Task 0 was a gate spike; it passed, and its result is what overturned the
+> design.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give tncd an optional hamlib-compatible Net rigctl server that QSYs Benshi-protocol radios (BTech UV-Pro and relatives) over the Bluetooth connection tncd already holds for KISS.
 
-**Architecture:** A pure `benshi/` codec (GaiaFrame framing + messages) sits under an `internal/rig/` request/response layer, which talks over a byte-duplex control channel exposed by the existing Bluetooth transports — a second GATT service on BLE, a second RFCOMM channel on classic. `internal/frontend/rigctl/` serves hamlib Net rigctl on TCP, one listener per port. QSY uses the radio's frequency (VFO) mode, so no memory channel is ever written and nothing is persisted to NVRAM.
+**Architecture:** A pure `benshi/` codec (GaiaFrame framing + messages) sits under an `internal/rig/` request/response layer, which talks over a byte-duplex control channel exposed by the existing Bluetooth transports — a second GATT service on BLE, a second RFCOMM channel on classic. `internal/frontend/rigctl/` serves hamlib Net rigctl on TCP, one listener per port. ~~QSY uses the radio's frequency (VFO) mode, so no memory channel is ever written and nothing is persisted to NVRAM.~~ **(False — see the banner above. QSY rewrites the VFO's channel record, guarded so a named memory can never be the target.)**
 
 **Tech Stack:** Go 1.24+, pure Go (`CGO_ENABLED=0`), BlueZ D-Bus (`github.com/godbus/dbus/v5`) on Linux, Winsock `AF_BTH` on Windows, `gopkg.in/ini.v1` for config.
 
@@ -18,7 +47,7 @@
 - `CGO_ENABLED=0 go test ./...` must pass before every commit.
 - Every parser of untrusted bytes needs a `Fuzz*` target. Radio-sourced bytes are untrusted.
 - Nothing may block the engine goroutine (`internal/engine`). It owns all L2 state; blocking it stalls AX.25 on every port.
-- **No v1 code path may write a memory channel record or persist to NVRAM.** `WRITE_RF_CH`, `WRITE_SETTINGS` and `STORE_SETTINGS` must not appear in the implementation.
+- ~~**No v1 code path may write a memory channel record or persist to NVRAM.** `WRITE_RF_CH`, `WRITE_SETTINGS` and `STORE_SETTINGS` must not appear in the implementation.~~ **⛔ DISPROVEN — see the banner at the top of this file. `WRITE_RF_CH` IS the QSY mechanism; the property that actually survives is that no *named* memory channel is ever written.**
 - tncd is GPL-3.0. Protocol structures are derived from benlink (Apache-2.0) and HTCommander. Each new file that encodes protocol knowledge carries an attribution comment naming the source.
 - Commit messages end with the two attribution lines used by the rest of this branch.
 

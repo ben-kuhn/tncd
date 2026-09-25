@@ -158,7 +158,7 @@ func runRigCommand(args []string) int {
 	fs := flag.NewFlagSet("rig", flag.ContinueOnError)
 	cfgFile := fs.String("c", "", "Configuration file (INI format)")
 	fs.String("config", "", "Configuration file (INI format) (long form of -c)")
-	port := fs.Int("port", 0, "Port number to control (index into [port.N] sections, default 0)")
+	port := fs.Int("port", 0, "Port number to control (index into [client.N] sections, default 0)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: tncd rig -c FILE [--port N] get-freq|set-freq HZ|teardown|probe\n\n")
 		fs.PrintDefaults()

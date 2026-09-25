@@ -192,7 +192,7 @@ func (bt *bluetoothTransport) Open() error {
 // of its own. It will NOT be safe for rig control running alongside a live
 // KISS port -- that needs a demultiplexer (one reader owning the stream,
 // routing 0xC0 to the KISS decoder and 0xFF 0x01 to the rig layer) in front
-// of both consumers. Not built here; that is the next task.
+// of both consumers. Built in kiss/demux.go.
 func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
 	if bt.file == nil {
 		return nil, fmt.Errorf("bluetooth: not open")

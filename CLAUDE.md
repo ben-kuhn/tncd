@@ -88,18 +88,20 @@ pip install -r e2e/requirements-test.txt
 pytest -c e2e/pytest.ini e2e/
 ```
 
-Useful subcommands: `tncd version`, `tncd genconfig`, `tncd check -c FILE`, `tncd ports [--json]`, and (Windows) `tncd service install|uninstall|start|stop` / `tncd install|uninstall`.
+Useful subcommands: `tncd version`, `tncd genconfig`, `tncd check -c FILE`, `tncd ports [--json]`, `tncd rig -c FILE [--port N] probe|get-freq|set-freq HZ|teardown`, and (Windows) `tncd service install|uninstall|start|stop` / `tncd install|uninstall`.
 
 ## Architecture
 
 Go module `github.com/ben-kuhn/tncd/v2`. Exported reusable packages at the top level; policy/glue under `internal/`.
 
 - **`ax25/`** — AX.25 frame parse/build, addresses, control fields (mod-8 + mod-128), XID. `ax25/l2/` is the connected-mode engine: per-connection state machines, T1/T2/T3 timers, the 3-second duplicate-RR guard, backwards-N(R) protection, and I-frame coalescing.
-- **`kiss/`** — KISS framing/escaping plus transports behind one `Transport` interface: serial (`go.bug.st/serial`, with `usb:` resolution and a modem-status disconnect probe), TCP, and Bluetooth SPP (`bluetooth_linux.go` BlueZ/D-Bus; `bluetooth_windows.go` Winsock `AF_BTH`; `bluetooth_stub.go` elsewhere). Handles `init_string`/`exit_string` TNC lifecycle.
+- **`kiss/`** — KISS framing/escaping plus transports behind one `Transport` interface: serial (`go.bug.st/serial`, with `usb:` resolution and a modem-status disconnect probe), TCP, and Bluetooth SPP (`bluetooth_linux.go` BlueZ/D-Bus; `bluetooth_windows.go` Winsock `AF_BTH`; `bluetooth_stub.go` elsewhere). Handles `init_string`/`exit_string` TNC lifecycle. `kiss/demux.go` + `kiss/control.go` split one byte stream between the KISS decoder and an optional rig-control consumer by leading byte (`0xC0` vs `0xFF 0x01`), since Benshi radios serve both on a single link.
 - **`agwpe/`** — AGWPE 36-byte header + frame encode/decode.
+- **`benshi/`** — the Benshi/Gaia control protocol used by BTech UV-PRO and relatives: frame codec, message layer, channel records (`RFCh`) and the settings bitfield. Rig control's wire format.
 - **`internal/engine/`** — a single serialized event loop (one goroutine owns all L2/bridge state; everything else messages it via `Do`/`After`). This mirrors the asyncio serialization the half-duplex fixes depend on.
 - **`internal/bridge/`** — coordinator: connections table, dispatch by AX.25 frame type, TX-echo suppression, transport construction (`buildTransport`), and per-port auto-reconnect with backoff.
-- **`internal/frontend/{agwpe,kisstcp,api}/`** — the AGWPE TCP server, the KISS-over-TCP passthrough, and the JSON/SSE monitoring API (read-only apart from a guarded port-reconnect POST).
+- **`internal/frontend/{agwpe,kisstcp,api,rigctl}/`** — the AGWPE TCP server, the KISS-over-TCP passthrough, the JSON/SSE monitoring API (read-only apart from a guarded port-reconnect POST), and a hamlib-compatible Net rigctl server (one listener per port with `[rigctl.N] enabled = true`).
+- **`internal/rig/`** — request/response session with a Benshi radio, off the engine goroutine. QSY rewrites the channel record the active VFO points at, behind guards that refuse any record that looks like a memory channel.
 - **`internal/netutil/`** — client-IP allowlist (`allowed_subnets`) shared by all three listeners, enforced by a filtering `net.Listener` at accept time.
 - **`internal/app/`** — `Runtime` (wires engine + bridge + frontends; `New`/`Wait`/`Shutdown`), shared by the console and Windows-service launch paths.
 - **`internal/config/`** — INI load, validation, and `genconfig` example.
