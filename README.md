@@ -324,7 +324,7 @@ ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
 # listen_host = 127.0.0.1
 # listen_port = 8002
 
-# Rig control (Benshi radios only — BTech UV-PRO, RadioOddity GA-5WB, Vero
+# Rig control (Benshi radios only — BTech UV-PRO, RadioOddity GA-5WB/DB-50B, Vero
 # VR-N76/VR-N7500). Opt-in hamlib Net rigctl server for the matching [client.N]
 # port, so PAT and other rigctl clients can QSY the radio. See "Rig Control"
 # below.
@@ -370,7 +370,8 @@ curl -N http://127.0.0.1:8002/api/events   # live event stream
 ### Rig Control (2.0 Go line, Benshi radios only)
 
 tncd can expose frequency (and optional PTT) control for **Benshi-protocol
-radios only** — BTech UV-Pro, RadioOddity GA-5WB, Vero VR-N76/VR-N7500 — as a
+radios only** — BTech UV-Pro, RadioOddity GA-5WB, RadioOddity DB-50B,
+Vero VR-N76/VR-N7500 — as a
 hamlib-compatible Net `rigctld` TCP server, so PAT and other rigctl clients
 can QSY the radio before connecting. It is **disabled by default** and rides
 the same Bluetooth link tncd already holds open for KISS: the radio's Benshi
@@ -663,7 +664,7 @@ Below is a list of hardware and software I have easily available to test with.  
 ### Hardware TNCs
 These are TNCs I own and can test against.  Please feel free to add any TNCs you own and have verified.
 
-- [x] BTECH UV-Pro/Radioddity GA-5WB/Vero NR N76 (Bluetooth)
+- [x] BTECH UV-Pro/Radioddity GA-5WB/Radioddity DB-50B/Vero NR N76 (Bluetooth) — all Benshi-protocol radios; they share one Bluetooth implementation, so a fix for one generally applies to all
 - [x] Mobilinkd TNC4 (USB) — OTA-verified at 1200 baud with Kenwood TH-D7A
 - [x] Mobilinkd TNC3 (Bluetooth SPP) — OTA-verified at 1200 baud via native D-Bus SPP, full Winlink CMS round-trip with 10KB attachment; 2-hop digipeater verified
 - [x] Mobilinkd TNC2 (Bluetooth) — OTA-verified for APRS via native D-Bus SPP. Connected mode sort-of works, but there's a known hardware limitation (the TNC2 is really an APRS-focused device), so it's not recommended for Winlink/connected-mode use.
