@@ -395,3 +395,71 @@ func TestPendingAutoReconnectYieldsToManualRelink(t *testing.T) {
 		t.Errorf("relinked port was displaced (closed=%d online=%v)", f2.closeCount(), portOnline(eng, b, 0))
 	}
 }
+
+// TestWedgeRelinkStopsAfterBudget — 2026-09-22 field finding. On a Surface Go
+// running over Bluetooth, a connect attempt to a station that could not be
+// heard made the SPP link flap for the whole attempt: the session sat in
+// Connecting, so portAwaitingReply stayed true, and with no RX ever arriving
+// the watchdog relinked every rx_wedge_timeout indefinitely. Worse, frames sent
+// during each relink window hit an offlineSentinel and never reached the air,
+// so the flapping ate the N2 retries that were supposed to be establishing the
+// link.
+//
+// A relink that is going to help helps on the first try. After relinkEscalateAfter
+// futile cycles the transport must stop being cycled, leaving L2 to run out its
+// remaining retries over a stable link.
+func TestWedgeRelinkStopsAfterBudget(t *testing.T) {
+	eng := engine.New()
+	cfg := reconnCfg(false) // no auto-reconnect: only wedge relinks may dial
+	cfg.Ports[0].RXWedgeTimeout = 20
+	b := New(eng, cfg)
+
+	var dials int32
+	b.newTransport = func(config.Port) (kiss.Transport, error) {
+		atomic.AddInt32(&dials, 1)
+		return newGateFake(false), nil
+	}
+
+	if err := b.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	go eng.Run()
+	t.Cleanup(func() {
+		onLoop(t, eng, func() { b.Shutdown() })
+		eng.Stop()
+	})
+	waitFor(t, func() bool { return portOnline(eng, b, 0) }, 2*time.Second, "initial open")
+
+	// An outgoing connect that is never answered: the unreachable-gateway case.
+	// The session stays in Connecting, so portAwaitingReply stays true forever.
+	onLoop(t, eng, func() {
+		if _, err := b.L2().Connect(0, "LOCAL-1", "REMOTE-2", nil); err != nil {
+			t.Errorf("Connect: %v", err)
+		}
+	})
+
+	// Sweep well past the timeout far more often than the budget allows. Each
+	// sweep uses a fresh "now" because a relink reseeds lastRX to the sweep time.
+	base := time.Now()
+	for i := 1; i <= relinkEscalateAfter+4; i++ {
+		// A relink leaves the slot offline until its dial lands; an offline
+		// port is never judged wedged, so let it settle or the sweep is a no-op.
+		waitFor(t, func() bool { return portOnline(eng, b, 0) }, 2*time.Second, "port online before sweep")
+		onLoop(t, eng, func() { b.checkRXWedge(base.Add(time.Duration(i) * time.Minute)) })
+	}
+	waitFor(t, func() bool { return portOnline(eng, b, 0) }, 2*time.Second, "port online after sweeps")
+
+	want := 1 + relinkEscalateAfter // initial dial + the capped run of relinks
+	if got := int(atomic.LoadInt32(&dials)); got != want {
+		t.Errorf("dials = %d, want %d (initial open + %d relinks, then the budget stops it)",
+			got, want, relinkEscalateAfter)
+	}
+
+	// The session must survive: the point of stopping is to let L2 keep
+	// retrying over a stable link, not to drop the connect attempt.
+	onLoop(t, eng, func() {
+		if c := b.L2().Get(0, "LOCAL-1", "REMOTE-2"); c == nil {
+			t.Errorf("capped relink run dropped the session")
+		}
+	})
+}

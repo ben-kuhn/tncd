@@ -782,3 +782,54 @@ func TestUnrepeatedDigipeatedFrameNotProcessed(t *testing.T) {
 		t.Fatalf("repeated copy produced %d frame(s), want 1 UA", n)
 	}
 }
+
+// TestRelinkBudgetSpent covers the hard cap on futile wedge relinks. The
+// watchdog cannot distinguish a wedged SPP link from an unreachable station --
+// both are total RX silence with TX outstanding -- so it judges by outcome: a
+// relink that helps produces RX and zeroes the counter, and a counter that
+// keeps climbing means relinking is restoring nothing and must stop.
+func TestRelinkBudgetSpent(t *testing.T) {
+	cases := []struct {
+		name  string
+		count int
+		want  bool
+	}{
+		{"no relinks yet: budget available", 0, false},
+		{"first relink allowed", 1, false},
+		{"still under budget", relinkEscalateAfter - 1, false},
+		{"budget spent at the threshold", relinkEscalateAfter, true},
+		{"budget stays spent beyond the threshold", relinkEscalateAfter + 5, true},
+	}
+	for _, tc := range cases {
+		if got := relinkBudgetSpent(tc.count); got != tc.want {
+			t.Errorf("%s: relinkBudgetSpent(%d) = %v, want %v",
+				tc.name, tc.count, got, tc.want)
+		}
+	}
+}
+
+// TestRelinkCounterResetsWhenNothingAwaitsReply: the relink counter is normally
+// cleared by inbound traffic, but a port that never receives a single frame
+// would keep a spent budget forever -- leaving the NEXT connect attempt (maybe
+// from somewhere with an actual path) with no watchdog at all. Once no session
+// is awaiting a reply the run is over, so checkRXWedge must clear it there too.
+func TestRelinkCounterResetsWhenNothingAwaitsReply(t *testing.T) {
+	eng := engine.New()
+	go eng.Run()
+	defer eng.Stop()
+	fp := newFakePort(true)
+	var after int
+	onLoop(t, eng, func() {
+		b := makeBridge(t, eng, fp)
+		b.cfg.Ports[0].RXWedgeTimeout = 20
+		b.initLastRX() // makeBridge skips Start, so the watchdog slices are nil
+		// A spent budget from a previous, now-finished connect attempt. No L2
+		// session exists, so nothing is awaiting a reply.
+		b.relinks[0] = relinkEscalateAfter
+		b.checkRXWedge(time.Now().Add(time.Hour)) // long past any timeout
+		after = b.relinks[0]
+	})
+	if after != 0 {
+		t.Errorf("relinks[0] = %d after a sweep with no session awaiting a reply, want 0", after)
+	}
+}

@@ -136,7 +136,7 @@ When cutting a release, follow this order:
 
 1. **Run unit tests**: `CGO_ENABLED=0 go test ./...` — all must pass
 2. **Run e2e tests**: `pytest -c e2e/pytest.ini e2e/` — validates serial/PTY/TCP regressions
-3. **OTA test** (if hardware changes): connect PAT via tncd to a real TNC and complete a Winlink CMS round-trip; for a v2.0.0 tag, revalidate the full hardware matrix (serial TNCs + Bluetooth)
+3. **OTA test** (if hardware changes): connect PAT via tncd to a real TNC and complete a Winlink CMS round-trip; for a v2.0.0 tag, revalidate the full hardware matrix (serial TNCs + Bluetooth). Also run `docs/superpowers/specs/connect-setup-ota-checklist.md` — it covers the **failed**-connect path (unreachable station must not flap the link; a real wedge must still be recovered), which no unit or e2e test reaches because both cases need a real radio and a genuinely absent peer.
 4. **Commit** all changes on the feature branch
 5. **Merge to main**: `git checkout main && git merge --no-ff feature/branch-name`
 6. **Bump version** in `packaging/PKGBUILD` and `nix/default.nix`, commit

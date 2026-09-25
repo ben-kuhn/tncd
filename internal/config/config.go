@@ -30,6 +30,12 @@ type AX25 struct {
 	MaxWindow int // default 3, clamped 1..7
 	N2Retry   int // default 10
 	T3Timeout int // seconds, default 180, <=0 disables
+	// Frack is the connection-setup retransmit interval in seconds: how long to
+	// wait for a UA after sending SABM/SABME/DISC before resending. Named for
+	// the FRACK parameter in TNC firmware. Default 3 (Dire Wolf's default; a
+	// KPC-3+ uses 4, a TM-D710A 3). Scaled by 2m+1 for m digipeater hops.
+	// Distinct from the data-phase T1, which is derived from ota_baudrate.
+	Frack int
 }
 
 // KISSTCP holds the [kisstcp] section: a KISS-over-TCP passthrough listener.
@@ -118,7 +124,7 @@ var knownServerKeys = []string{
 
 // knownAX25Keys are the recognized keys in [ax25].
 var knownAX25Keys = []string{
-	"max_window", "n2_retry", "t3_timeout",
+	"max_window", "n2_retry", "t3_timeout", "frack",
 }
 
 // knownKISSTCPKeys are the recognized keys in [kisstcp].
@@ -434,6 +440,14 @@ func Load(path string) (*Config, error) {
 		MaxWindow: maxWindow,
 		N2Retry:   getInt(ax25Sec, "n2_retry", 10),
 		T3Timeout: getInt(ax25Sec, "t3_timeout", 180),
+		Frack:     getInt(ax25Sec, "frack", 3),
+	}
+	if cfg.AX25.Frack < 1 {
+		// A sub-second setup timer would retransmit SABMs faster than a
+		// half-duplex radio can key up and get a UA back, burning N2 on frames
+		// that never had time to be answered.
+		log.Printf("warning: [ax25] frack = %d is invalid; using 3", cfg.AX25.Frack)
+		cfg.AX25.Frack = 3
 	}
 	if cfg.AX25.N2Retry < 1 {
 		// n2_retry <= 0 makes a connect give up after the first T1 (one SABM,
