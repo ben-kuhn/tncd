@@ -125,6 +125,36 @@ gateway can raise `[ax25] frack`; a run at 5 connected in 4.1s with a single
 SABM. Do not raise the default on this evidence alone — it would slow every
 genuinely unreachable connect for everyone.
 
+**Better: fix the gateway, not tncd.** The turnaround was not the radio and
+not tncd — it was the gateway's own KISS channel-access parameters. BPQ sends
+these to its TNC and they override whatever `direwolf.conf` says, so the
+numbers that matter live in `bpq32.cfg`, not the modem config. KU0HN-10's
+`PORTNUM=2` was still on BPQ's conservative defaults while its other ports had
+long since been tuned:
+
+| | Was | Now | Why |
+|---|---|---|---|
+| `TXDELAY` | 500 ms | 250 ms | The radio is a Kenwood TK-790 keyed by CM108 GPIO — T/R attack well under 50 ms. 250 ms is still ~37 flag bytes at 1200 baud, comfortably above what AFSK modems need to sync. |
+| `PERSIST` | 63 (25 %/slot) | 160 (63 %/slot) | Matches the value already trusted on port 3. Cuts both the mean wait and, more importantly, the variance tail. |
+| `TXTAIL` | 300 ms | 50 ms | Matches port 3. Stops holding the channel after the frame. |
+
+Measured over the same test, 5 connects before and 4 after:
+
+| | Before | After |
+|---|---|---|
+| Median SABM→UA | 2.090s | **1.567s** |
+| Mean | 2.331s | **1.770s** |
+| Worst | **3.308s** | **2.671s** |
+| Connect time | 3.6–4.6s | **2.9–3.9s** |
+| Redundant SABMs | 1 in 5 runs | **0 in 4 runs** |
+
+The worst case now sits under the 3s T1 with margin, so the race is gone
+rather than merely less likely — and every Winlink user on 145.670 gets
+~0.8s off each connect and 250 ms less held channel per transmission.
+
+**`PERSIST` accepts 0–255** (`config.c`: `if (n >= 0 && n <= 255)`). 63 is
+Dire Wolf's *default*, not a ceiling.
+
 **PASSED 2026-09-29.** Decoded by an independent TS-2000 + Dire Wolf on the
 same frequency — not read off tncd's own `tx` counter:
 
