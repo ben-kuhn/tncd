@@ -29,14 +29,37 @@ apart.
 Bluetooth TNC, `rx_wedge_timeout` at its default of 20. Call a station with no
 path — an out-of-range callsign, or a dummy load / antenna disconnected.
 
-- [ ] At most **3** `RX wedged ... relinking` lines appear for the attempt
-- [ ] The 3rd is the escalated `relinking has restored no traffic; last relink`
+- [x] At most **3** `RX wedged ... relinking` lines appear for the attempt
+- [x] The 3rd is the escalated `relinking has restored no traffic; last relink`
       line, and **no further relink lines** follow for the rest of the attempt
-- [ ] The Bluetooth link stays up after the 3rd relink — no further
+- [x] The Bluetooth link stays up after the 3rd relink — no further
       disconnect/reconnect churn in the log or on the TNC's own indicator
-- [ ] The connect attempt ends in a clean `connect failed` to the client
+- [x] The connect attempt ends in a clean `connect failed` to the client
       (PAT reports failure) rather than hanging indefinitely
-- [ ] Attempt duration is ~30s, not ~130s (N2=10 × 3s, not × 13s)
+- [x] Attempt duration is ~30s, not ~130s (N2=10 × 3s, not × 13s)
+
+**PASSED 2026-09-29**, BTech UV-PRO over Bluetooth SPP, calling `KU0HN-15`
+(own callsign, unused SSID, so nothing can answer). Binary `b1843fa`.
+
+At the default `rx_wedge_timeout = 20` the attempt produced only **2** relinks
+and ended cleanly at **33.1s** with `connect to KU0HN-15 timed out (no
+response)`. Worth knowing: the setup-T1 fix shortens the attempt so much that
+the budget's hard stop usually never engages — at 3s retries, N2=10 fits in
+~33s, which is barely more than one wedge timeout. To exercise the cap itself,
+re-run with `rx_wedge_timeout = 5`; that produced exactly 3 relinks, 3
+`RequestDisconnection` calls, the escalated last-relink line, and then **four
+more SABMs over 11s with zero further Bluetooth churn**.
+
+A controlled before/after fell out of running the wrong binary first, on the
+same radio and frequency minutes apart — worth recording since it is the
+comparison this checklist exists to make:
+
+| | pre-fix build | `b1843fa` |
+|---|---|---|
+| Relinks | 1,2,3,4,5,6… unbounded | 2 (or exactly 3 when forced) |
+| Setup retry spacing | ~13s | 3.0s |
+| Attempt length | ~130s | 33.1s |
+| Outcome | still cycling | clean connect-failed |
 
 ### B. A genuine UV-PRO wedge must still be recovered (the regression risk)
 
@@ -56,8 +79,24 @@ exact shape the watchdog exists for. Run against a station that IS reachable.
 Watch with an independent Dire Wolf monitor (CLAUDE.md: `tx` counters mean
 "handed to the transport", not "transmitted").
 
-- [ ] Unanswered SABME/SABM retransmits are ~**3s** apart at 1200 baud, not ~13s
-- [ ] The SABME→SABM downgrade still happens after 3 SABMEs (`maxV22 = N2/3`)
+- [x] Unanswered SABME/SABM retransmits are ~**3s** apart at 1200 baud, not ~13s
+- [x] The SABME→SABM downgrade still happens after 3 SABMEs (`maxV22 = N2/3`)
+
+**PASSED 2026-09-29.** Decoded by an independent TS-2000 + Dire Wolf on the
+same frequency — not read off tncd's own `tx` counter:
+
+```
+      1:Fm KU0HN To KU0HN-15 <SABME P=1 >[12:17:39]
++3.0s 1:Fm KU0HN To KU0HN-15 <SABM  P=1 >[12:17:51]
++3.0s 1:Fm KU0HN To KU0HN-15 <SABM  P=1 >[12:17:54]
++3.0s 1:Fm KU0HN To KU0HN-15 <SABM  P=1 >[12:17:57]
++3.0s 1:Fm KU0HN To KU0HN-15 <SABM  P=1 >[12:18:00]
+```
+
+tncd's own log shows the same 3.0s cadence for all 11 setup frames, with the
+downgrade after exactly 3 SABMEs. The receiver missed some intermediate frames
+(half-duplex DCD), which is why the first gap above reads 12s — the spacing of
+what it *did* decode is what matters here.
 - [ ] Faster retries do **not** cause channel congestion or collisions with the
       peer's reply on a half-duplex link — if the peer's UA is being stepped on,
       raise `[ax25] frack` and note the working value below
