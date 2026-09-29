@@ -15,8 +15,11 @@ import (
 // benshi.Decoder's Feed is deliberately a black box (whole frames in, whole
 // frames out) and exposing that partial-frame state would serve no consumer
 // but this one; a kiss -> benshi import for five small integers was judged
-// not worth that dependency. benshi/frame.go remains the source of truth
-// these constants must stay in sync with.
+// not worth that dependency in PRODUCTION code. benshi/frame.go remains the
+// source of truth these must stay in sync with, and they can no longer drift
+// unnoticed: TestGaiaConstantsMatchBenshi asserts the two copies agree,
+// importing benshi from a _test.go file so the production import graph is
+// unchanged.
 const (
 	gaiaStart        = 0xFF
 	gaiaVersion      = 0x01

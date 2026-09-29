@@ -27,6 +27,23 @@ const (
 	maxFrameData = 255 + msgHeaderLen
 )
 
+// The framing constants above, exported for consumers that must stay in step
+// with this wire format.
+//
+// kiss/demux.go is the one that matters: it re-declares these because the
+// demultiplexer needs byte-level visibility into a frame that is only
+// PARTIALLY accumulated -- "how many more bytes belong to this frame" -- which
+// Decoder deliberately does not expose, and a production kiss -> benshi
+// dependency for five integers was judged not worth it. Exporting them lets a
+// TEST there assert the two copies agree, so a firmware change that moves the
+// header breaks a test instead of silently desynchronising the two.
+const (
+	FrameStart     = frameStart
+	FrameVersion   = frameVersion
+	FrameHeaderLen = frameHeaderLen
+	MsgHeaderLen   = msgHeaderLen
+)
+
 // Frame is one GaiaFrame: FF 01 <flags> <n> <data> [checksum].
 //
 // Data holds the complete message (its 4-byte header plus body). The wire

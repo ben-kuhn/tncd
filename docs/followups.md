@@ -48,14 +48,17 @@ internal/rig, internal/frontend/rigctl, internal/bridge and internal/app.
 synchronisation) and was not touched here — no Windows box was available to test against.
 Same fix, same reasoning, when someone is on that VM.
 
-### 3. Benshi framing constants are duplicated with no compile-time link
-`kiss/demux.go` mirrors five constants from `benshi/frame.go` (`gaiaStart`, `gaiaVersion`,
-`gaiaHeaderLen`, `gaiaMsgHeaderLen`, `gaiaFlagChecksum`) because `benshi` does not export the
-internals the demultiplexer needs. They were verified identical when written, and the
-length/resync arithmetic is line-for-line equivalent to `benshi.Decoder.Feed`.
+### 3. Benshi framing constants are duplicated — LINKED 2026-09-29
+`kiss/demux.go` still mirrors five constants from `benshi/frame.go`, and still should: the
+demultiplexer needs byte-level visibility into a partially accumulated frame that
+`benshi.Decoder` deliberately does not expose, and a production `kiss -> benshi` dependency
+for five integers is not worth it.
 
-Nothing links them, so a firmware change that moves the frame header would need both edited.
-Either export the needed pieces from `benshi` or add a test that asserts the two agree.
+What was missing was any link between the copies. `benshi` now exports `FrameStart`,
+`FrameVersion`, `FrameHeaderLen` and `MsgHeaderLen` (`FlagChecksum` already was), and
+`TestGaiaConstantsMatchBenshi` asserts the demux's values against them. The import is
+test-only, so the production import graph is unchanged, but a firmware change that moves the
+frame header now breaks a test instead of silently desynchronising the two.
 
 ### 4. CI's fuzz smoke step fails intermittently — FIXED 2026-09-25
 `.github/workflows/test.yml` ran six fuzz targets at `-fuzztime=10s` and failed twice on
