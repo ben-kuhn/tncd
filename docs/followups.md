@@ -251,11 +251,19 @@ stop/start), the radio stopped accepting SPP altogether:
 - `bluetoothctl disconnect` HANGS rather than returning
 - `sudo hciconfig hci0 reset` completes but changes nothing — the radio still refuses
 
-So the flap report's advice ("reset the Bluetooth adapter **or** power-cycle the TNC")
-overstates the first option: the adapter reset is not an equivalent recovery, because the
-wedge is on the radio side. Only a power-cycle clears this. Worth correcting wherever that
-advice appears, including `bridge.go`'s escalated relink message, which currently offers
-both as if interchangeable.
+The adapter reset is not an equivalent recovery: the wedge is on the radio side, so
+resetting the host controller changes nothing. The flap report's advice ("reset the
+Bluetooth adapter **or** power-cycle the TNC") offers the two as interchangeable, and
+`bridge.go`'s escalated relink message repeats that. Worth correcting.
+
+**But a power-cycle is not required either — it self-clears.** Corrected same day: after
+roughly ten minutes with nothing touching the radio, SPP accepted a connection again with no
+power-cycle and no adapter reset, and the link was genuinely healthy (a UI frame through it
+was decoded off air by an independent receiver, and a full connect to a BPQ gateway
+followed). So the real recovery is **wait**, and the useful operator advice is to stop
+hammering it: every reconnect attempt during the wedge appears to hold it open. That also
+reframes the CarKit storm — tncd relinking every 20s may have been the thing preventing
+recovery, which is a further argument for the relink budget.
 
 This is also the same signature as the CarKit DB-50B flap (§6) reproducing on a different
 Benshi radio, which is evidence the SDP/SPP fault is a family trait rather than one unit.

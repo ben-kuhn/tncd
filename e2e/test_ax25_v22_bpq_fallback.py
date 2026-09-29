@@ -16,6 +16,22 @@ Both Dire Wolf instances run as *dumb KISS modems* (KISSPORT, not AGWPORT) so th
 AX.25 connected-mode L2 is done by tncd on one side and BPQ on the other — BPQ is
 the station that FRMRs the SABME.
 
+VALIDATED OVER THE AIR 2026-09-29 against the real KU0HN-10, which is what this
+test emulates locally. tncd -> UV-PRO -> RF -> KU0HN-10, with an independent
+TS-2000 + Dire Wolf witnessing every frame:
+
+    14:26:24  KU0HN    -> KU0HN-10  SABME P=1
+    14:26:26  KU0HN-10 -> KU0HN     FRMR  F=1
+    14:26:28  KU0HN    -> KU0HN-10  SABM  P=1
+    14:26:29  KU0HN-10 -> KU0HN     UA    F=1
+    14:26:30  KU0HN-10 -> KU0HN     I "Trying ec2-100-50-94-91.compute-1..."
+
+That covers all five assertions below, including reaches-CMS -- the I-frame is
+the RMS application dialing Winlink. So a skip here does NOT mean the fallback
+is unverified; it means this LOCAL reproduction is unverified. Re-run it when
+credentials are available, since the point of the local version is to catch a
+regression without needing RF or a live gateway.
+
 LOCAL-ONLY. Skipped unless ALL of the following are present:
   - direwolf, pw-link on PATH (like the rest of the e2e suite)
   - linbpq resolvable (TNCD_LINBPQ env var, or `linbpq` on PATH)
