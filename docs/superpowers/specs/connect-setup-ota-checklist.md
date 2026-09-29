@@ -93,6 +93,38 @@ Watch with an independent Dire Wolf monitor (CLAUDE.md: `tx` counters mean
 - [x] Unanswered SABME/SABM retransmits are ~**3s** apart at 1200 baud, not ~13s
 - [x] The SABME→SABM downgrade still happens after 3 SABMEs (`maxV22 = N2/3`)
 
+**Margin measured 2026-09-29 — keep frack = 3, but know the headroom.**
+Five connects to KU0HN-10 (a BPQ CMS gateway) through Dire Wolf + TS-2000,
+i.e. a known-good radio driving the same L2, measuring the gateway's own
+SABM -> UA turnaround:
+
+| Turnaround | SABMs sent |
+|---|---|
+| 3.308s | 2 (redundant retransmit) |
+| 2.310s | 1 |
+| 2.090s | 1 |
+| 2.090s | 1 |
+| 1.857s | 1 |
+
+Typical is ~2.1s, leaving ~0.9s of headroom against the 3s T1, but the tail
+goes past it: one run in five exceeded 3s and tncd retransmitted 0.297s
+before the UA landed. That is not a defect — 3s is Dire Wolf's own
+`AX25_T1V_FRACK_DEFAULT` and normal practice at 1200 baud, and every connect
+still succeeded in 3.6-4.6s. The old 13s value was the anomaly.
+
+**It matters on half-duplex.** A redundant SABM is one wasted frame on a
+full-duplex-ish path, but on a half-duplex radio the retransmit keys the
+transmitter over the very UA it is waiting for. That is exactly what was seen
+the same day on the UV-PRO: a slow-turnaround excursion, tncd retransmitted,
+the radio went deaf to the incoming UA, and the connect needed two further
+SABMs. So the cost of the excursion scales with how deaf the radio goes while
+transmitting.
+
+Operators seeing repeated setup retransmits against a consistently slow
+gateway can raise `[ax25] frack`; a run at 5 connected in 4.1s with a single
+SABM. Do not raise the default on this evidence alone — it would slow every
+genuinely unreachable connect for everyone.
+
 **PASSED 2026-09-29.** Decoded by an independent TS-2000 + Dire Wolf on the
 same frequency — not read off tncd's own `tx` counter:
 
