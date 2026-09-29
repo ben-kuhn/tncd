@@ -69,6 +69,17 @@ exact shape the watchdog exists for. Run against a station that IS reachable.
 
 - [ ] When the link wedges mid-setup, the first relink restores TX and the
       SABM/SABME reaches the air
+      **2026-09-29, one negative observation — NOT a pass or a fail.** A
+      mid-setup TX wedge occurred spontaneously on the UV-PRO: tncd handed 9
+      SABME/SABM frames to the transport over 45s and an independent Dire
+      Wolf decoded **zero**. All three relinks fired and TX was never
+      restored; the frames had still not flushed 65s after tncd stopped.
+      That is consistent with the known UV-PRO failure where the radio
+      buffers frames internally (see docs/followups.md) — a wedge a fresh
+      SPP link genuinely cannot clear, which is the case that motivated the
+      budget in the first place. So this does not disprove the criterion; it
+      says this particular wedge was not the recoverable kind. The criterion
+      still needs an instance where a relink DOES restore TX.
 - [ ] Once any frame is received, the relink counter resets (a later wedge in
       the same session gets a fresh budget of 3 — confirm by wedging twice in
       one session if it can be provoked)
