@@ -241,6 +241,25 @@ with tncd's own unmodified AGWPE path after it had worked minutes earlier.
 Belongs in the OTA checklist: **if KISS goes silent after repeated reconnects, power-cycle
 the radio before debugging tncd.**
 
+**2026-09-29 — a second, worse shape of this, and the adapter reset does NOT clear it.**
+After a day of heavy churn (OTA criterion A runs, raw-framing captures, repeated service
+stop/start), the radio stopped accepting SPP altogether:
+
+- `bluetoothctl info` reports `Connected: yes` while `ConnectProfile` answers
+  `br-connection-refused`, and bluez logs
+  `Unable to get Serial Port SDP record: Host is down`
+- `bluetoothctl disconnect` HANGS rather than returning
+- `sudo hciconfig hci0 reset` completes but changes nothing — the radio still refuses
+
+So the flap report's advice ("reset the Bluetooth adapter **or** power-cycle the TNC")
+overstates the first option: the adapter reset is not an equivalent recovery, because the
+wedge is on the radio side. Only a power-cycle clears this. Worth correcting wherever that
+advice appears, including `bridge.go`'s escalated relink message, which currently offers
+both as if interchangeable.
+
+This is also the same signature as the CarKit DB-50B flap (§6) reproducing on a different
+Benshi radio, which is evidence the SDP/SPP fault is a family trait rather than one unit.
+
 ### 12. BLE KISS does not pass traffic on the UV-PRO
 With a genuine LE link (MTU negotiated 155, GATT resolved, notifications subscribed), writes
 to the BLE KISS characteristic either time out (write-with-response) or succeed and vanish
