@@ -4,6 +4,7 @@ package kiss
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,7 +58,17 @@ const profilePath = dbus.ObjectPath("/org/tncd/spp")
 // bluetoothTransport implements Transport for a Bluetooth SPP KISS TNC via
 // BlueZ D-Bus on Linux.
 type bluetoothTransport struct {
-	cfg  BluetoothConfig
+	cfg BluetoothConfig
+
+	// mu guards file only. It is NOT held across the actual Read/Write
+	// syscalls: those block for as long as the radio takes, and holding a
+	// mutex across them would make Close() -- whose whole job is to
+	// interrupt a blocked I/O -- wait for the very operation it is trying
+	// to unblock. Taking a reference under the lock and then using it
+	// unlocked is safe because *os.File is itself concurrency-safe and
+	// handles being closed underneath an in-flight call, returning
+	// os.ErrClosed rather than touching a reused fd.
+	mu   sync.Mutex
 	file *os.File // raw OS file wrapping the socket fd
 
 	// txStall tracks how long the socket send queue has been backed up.
@@ -96,6 +107,20 @@ func (bt *bluetoothTransport) Open() error {
 
 	devicePath, err := bdaddrToPath(bt.cfg.BDAddr)
 	if err != nil {
+		return err
+	}
+
+	// Refuse early if the device is not paired, rather than discovering it
+	// from a ConnectProfile that cannot possibly work.
+	//
+	// An unpaired or absent device answers ConnectProfile with
+	// `Method "ConnectProfile" ... doesn't exist`, which says nothing about
+	// the actual problem, and the reconnect loop then repeats it forever. A
+	// field log had two such ports emitting that plus BlueZ "Host is down"
+	// SDP noise every 60s for over an hour, burying the one port that was
+	// genuinely misbehaving. ErrNotPaired lets the bridge treat this as the
+	// configuration error it is -- see its once-per-port logging.
+	if err := checkPaired(conn, devicePath, bt.cfg.BDAddr); err != nil {
 		return err
 	}
 
@@ -150,7 +175,9 @@ func (bt *bluetoothTransport) Open() error {
 	select {
 	case fd := <-fdCh:
 		// NewConnection has already dup'd or taken ownership; wrap as *os.File.
+		bt.mu.Lock()
 		bt.file = os.NewFile(uintptr(fd), fmt.Sprintf("bt-spp-%s", bt.cfg.BDAddr))
+		bt.mu.Unlock()
 		// Fresh socket, fresh queue: clear any stall clock left from a previous
 		// link so a reopened transport cannot trip on the old one's backlog.
 		bt.txStall = txStallDetector{}
@@ -194,10 +221,19 @@ func (bt *bluetoothTransport) Open() error {
 // routing 0xC0 to the KISS decoder and 0xFF 0x01 to the rig layer) in front
 // of both consumers. Built in kiss/demux.go.
 func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
-	if bt.file == nil {
+	if bt.handle() == nil {
 		return nil, fmt.Errorf("bluetooth: not open")
 	}
 	return &selfControlChannel{ReadWriteCloser: bt}, nil
+}
+
+// handle returns the current socket file, or nil when the transport is not
+// open. Callers use the returned value rather than re-reading bt.file, so a
+// concurrent Close cannot nil it out between the check and the use.
+func (bt *bluetoothTransport) handle() *os.File {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	return bt.file
 }
 
 // bluetoothReconnectSettle is how long Open waits after disconnecting a stale
@@ -231,10 +267,11 @@ func disconnectAudioProfiles(deviceObj dbus.BusObject, bdaddr string) {
 }
 
 func (bt *bluetoothTransport) Read(b []byte) (int, error) {
-	if bt.file == nil {
+	f := bt.handle()
+	if f == nil {
 		return 0, fmt.Errorf("bluetooth: not open")
 	}
-	return bt.file.Read(b)
+	return f.Read(b)
 }
 
 // What this detector can and cannot see
@@ -304,7 +341,11 @@ func (d *txStallDetector) observe(depth int, now time.Time) time.Duration {
 // descriptor into blocking mode and removes it from the runtime poller, which
 // would change how every subsequent read and write behaves.
 func (bt *bluetoothTransport) txQueueDepth() (int, error) {
-	rc, err := bt.file.SyscallConn()
+	f := bt.handle()
+	if f == nil {
+		return 0, fmt.Errorf("bluetooth: not open")
+	}
+	rc, err := f.SyscallConn()
 	if err != nil {
 		return 0, err
 	}
@@ -361,7 +402,8 @@ func (bt *bluetoothTransport) checkTXDrain() error {
 }
 
 func (bt *bluetoothTransport) Write(b []byte) (int, error) {
-	if bt.file == nil {
+	f := bt.handle()
+	if f == nil {
 		return 0, fmt.Errorf("bluetooth: not open")
 	}
 	// Check the backlog before adding to it: a write "succeeding" here only
@@ -374,16 +416,22 @@ func (bt *bluetoothTransport) Write(b []byte) (int, error) {
 		return 0, err
 	}
 
-	return bt.file.Write(b)
+	return f.Write(b)
 }
 
 func (bt *bluetoothTransport) Close() error {
-	if bt.file != nil {
-		err := bt.file.Close()
-		bt.file = nil
-		return err
+	bt.mu.Lock()
+	f := bt.file
+	bt.file = nil
+	bt.mu.Unlock()
+	if f == nil {
+		return nil
 	}
-	return nil
+	// Closed outside the lock, deliberately: closing interrupts any Read or
+	// Write currently blocked in a syscall on this fd (Go's runtime poller
+	// does this for pollable fds), and those calls are holding no lock, so
+	// there is nothing for this to contend with.
+	return f.Close()
 }
 
 // EnterKISS is a no-op: Bluetooth SPP TNCs (Mobilinkd) are always in KISS mode.
@@ -592,4 +640,36 @@ func isBenignConnectError(err error) bool {
 // closeFD closes a raw file descriptor.
 func closeFD(fd int) error {
 	return syscall.Close(fd)
+}
+
+// ErrNotPaired reports a configured Bluetooth device that BlueZ does not know
+// about, or knows about but has not paired. It is a configuration problem,
+// not a transient one: retrying cannot fix it without a human pairing the
+// radio, so callers should say so once rather than every retry.
+var ErrNotPaired = errors.New("bluetooth: device is not paired")
+
+// checkPaired reports whether BlueZ has this device and considers it paired.
+//
+// A missing device object and an unpaired one are reported the same way on
+// purpose: both mean "pair this radio before tncd can use it", and both
+// otherwise surface as the same unhelpful ConnectProfile error.
+func checkPaired(conn *dbus.Conn, devicePath dbus.ObjectPath, addr string) error {
+	obj := conn.Object("org.bluez", devicePath)
+	v, err := obj.GetProperty("org.bluez.Device1.Paired")
+	if err != nil {
+		return fmt.Errorf("%w: BlueZ has no device object for %s "+
+			"(pair it first, e.g. `bluetoothctl pair %s`, or remove the port from the config): %v",
+			ErrNotPaired, addr, addr, err)
+	}
+	paired, ok := v.Value().(bool)
+	if !ok {
+		// Unexpected property type: don't block the connect over it.
+		return nil
+	}
+	if !paired {
+		return fmt.Errorf("%w: %s is known to BlueZ but not paired "+
+			"(run `bluetoothctl pair %s`, or remove the port from the config)",
+			ErrNotPaired, addr, addr)
+	}
+	return nil
 }

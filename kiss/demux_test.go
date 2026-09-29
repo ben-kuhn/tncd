@@ -323,3 +323,30 @@ func TestDemuxFullControlChannelDoesNotBlock(t *testing.T) {
 		t.Fatal("Feed blocked on a full/unread control channel")
 	}
 }
+
+// TestDemuxFreshPortResyncsToFirstFEND documents why followup #8 ("a relinked
+// socket is not resynchronised, so it delivers garbage") is not a real defect.
+//
+// A reconnect builds a whole new kiss.Port (bridge.go calls kiss.NewPort on
+// the reconnect path), so it gets a zero-value demux whose kissDec is a fresh
+// Decoder. framing.go's Decoder discards every byte until it sees its first
+// FEND, so the tail of a torn stream is dropped, not parsed. The CarKit flap
+// report's 5-byte "frame too short" line is therefore NOT a failure to
+// resync: those bytes must have arrived BETWEEN two FENDs, i.e. a genuinely
+// corrupt short frame, which is a different problem with a different fix.
+func TestDemuxFreshPortResyncsToFirstFEND(t *testing.T) {
+	d := &demux{} // exactly what a reconnect produces
+
+	// Mid-frame garbage, as if we attached to a stream already in progress,
+	// followed by a clean frame.
+	torn := []byte{0xb2, 0xbd, 0x7d, 0x8f, 0xe9}
+	good := WrapData(0, []byte("clean"))
+
+	frames := d.Feed(append(append([]byte{}, torn...), good...))
+	if len(frames) != 1 {
+		t.Fatalf("got %d frames, want 1 -- the torn prefix must be discarded, not parsed", len(frames))
+	}
+	if got := string(frames[0][1:]); got != "clean" {
+		t.Errorf("frame payload = %q, want %q", got, "clean")
+	}
+}

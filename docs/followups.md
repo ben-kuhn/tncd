@@ -35,11 +35,18 @@ does an explicit `shutdown(SHUT_RDWR)` before close for the same reason. So no t
 the tree leaves such a goroutine truly unkillable, and a fail-the-port response should
 actually reclaim it rather than accumulating leaks.
 
-### 2. `bluetoothTransport`'s open/closed guards are lockless
-`Read`/`Write` check `bt.file == nil` (Linux) or `bt.fd == InvalidHandle` (Windows) with no
-synchronisation against a concurrent `Close()`. In practice the guards make the failure
-benign (a clean "not open" error rather than a use-after-close), but it is a data race by
-Go's memory model and `-race` would flag it under the right interleaving.
+### 2. `bluetoothTransport`'s open/closed guards are lockless — FIXED 2026-09-29
+~~`Read`/`Write` check `bt.file == nil` with no synchronisation against a concurrent
+`Close()`.~~ Linux now guards `file` with a mutex and hands callers a reference via
+`handle()`, so a concurrent `Close` cannot nil it between the check and the use. The lock
+is deliberately NOT held across the Read/Write syscalls: those block for as long as the
+radio takes, and holding it there would make `Close` — whose job is to interrupt a blocked
+I/O — wait on the very call it is unblocking. Verified with `-race -count=2` across kiss,
+internal/rig, internal/frontend/rigctl, internal/bridge and internal/app.
+
+**Windows still has the same shape** (`bt.fd == InvalidHandle` checked without
+synchronisation) and was not touched here — no Windows box was available to test against.
+Same fix, same reasoning, when someone is on that VM.
 
 ### 3. Benshi framing constants are duplicated with no compile-time link
 `kiss/demux.go` mirrors five constants from `benshi/frame.go` (`gaiaStart`, `gaiaVersion`,
@@ -98,22 +105,42 @@ back a live fd that carries no traffic, and later a torn stream (a 5-byte fragme
 reporting it to the vendor. Note the radio also advertises Handsfree and Handsfree Audio
 Gateway, which is unusual for a TNC.
 
-### 7. Unpaired ports are probed forever and spam the log
-Same report: two configured ports were not paired on that host, and tncd called
-`ConnectProfile` on them every 60s for over an hour, logging
-`Method "ConnectProfile" ... doesn't exist` each time, plus bluez `Host is down` SDP noise.
-tncd should gate on the bluez device object actually being present and paired, or support an
-explicit per-port disable, so an unprovisioned port does not bury the log that matters.
+### 7. Unpaired ports are probed forever and spam the log — FIXED 2026-09-29
+~~Two configured ports were not paired on that host, and tncd called `ConnectProfile` on
+them every 60s for over an hour.~~ Fixed at both ends:
 
-### 8. A relinked socket is not resynchronised, so it delivers garbage
-Same report: 7s after a fresh SPP connect, the socket produced
-`failed to parse AX.25 frame: frame too short (5 bytes) raw=b2bd7d8fe9` — the tail of a torn
-stream. A newly established transport should discard bytes until a KISS frame boundary
-(FEND) rather than parsing whatever arrives first.
+- `kiss/bluetooth_linux.go` checks the BlueZ `Device1.Paired` property before calling
+  `ConnectProfile`, and returns `ErrNotPaired` naming the radio and the `bluetoothctl pair`
+  command. A missing device object and an unpaired one report identically on purpose —
+  both mean "pair this radio first", and both otherwise surfaced as the same unhelpful
+  `Method "ConnectProfile" ... doesn't exist`.
+- `internal/bridge` collapses an unchanging reconnect error into one line plus an hourly
+  reminder (`reconnectLogRepeatEvery`). That helps every repeating cause, not just this
+  one. A changed error is always reported immediately.
 
-Note the parse failure returns BEFORE the relink counter is reset in `handleFrame`, so
-corrupt bytes do not currently reset the futile-relink budget. That is the correct behaviour
-and worth preserving if this is fixed.
+An explicit per-port disable was not added: a port that cannot connect now costs one log
+line, which is the actual complaint, and a config key would be a second way to express
+"don't use this radio" alongside deleting the section.
+
+### 8. A relinked socket is not resynchronised — NOT A DEFECT (checked 2026-09-29)
+The original claim was that a relinked socket parses the tail of a torn stream, based on
+the CarKit flap report's `failed to parse AX.25 frame: frame too short (5 bytes)
+raw=b2bd7d8fe9` arriving 7s after a fresh connect.
+
+**It resynchronises already.** A reconnect builds a whole new `kiss.Port` (`bridge.go`
+calls `kiss.NewPort` on the reconnect path), so it gets a zero-value `demux` holding a
+fresh `Decoder`, and `framing.go`'s decoder discards every byte until it sees its first
+FEND. The torn prefix is dropped, not parsed. Proven by
+`TestDemuxFreshPortResyncsToFirstFEND`, which feeds exactly those five bytes followed by a
+clean frame and gets one frame out.
+
+So those five bytes must have arrived BETWEEN two FENDs — a genuinely corrupt short frame,
+not a framing failure. That is consistent with the addendum's conclusion that the relinked
+socket was carrying bytes that did not parse as KISS, and it points back at #6 (BlueZ
+resolving the wrong RFCOMM channel) rather than at any resync logic.
+
+Worth keeping: the parse failure returns before the relink counter is reset, so corrupt
+bytes do not refresh the futile-relink budget. That is correct and load-bearing.
 
 ### 9. The demux does not handle compact (shared-FEND) KISS framing
 `kiss/demux.go` enters a KISS frame only on its own opening FEND and leaves on

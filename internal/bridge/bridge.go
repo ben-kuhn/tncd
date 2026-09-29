@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ben-kuhn/tncd/v2/ax25"
@@ -99,6 +100,13 @@ type Bridge struct {
 	// traffic >= 1: hex dump of raw KISS RX/TX bytes.
 	verbose int
 	traffic int
+
+	// reconnectLog* collapse a repeating reconnect failure into one line.
+	// Guarded by their own mutex: logReconnectError runs on the reconnect
+	// goroutine, not the engine loop. See logReconnectError.
+	reconnectLogMu    sync.Mutex
+	reconnectLogLast  map[int]string
+	reconnectLogCount map[int]int
 
 	// newTransport builds a kiss.Transport from a port config. Defaults to
 	// buildTransport; overridable in tests to inject a fake transport.
@@ -296,6 +304,50 @@ func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
 	}
 	return r, nil
 }
+
+// logReconnectError reports a failed reconnect, collapsing an unchanging
+// error into a single line plus periodic reminders.
+//
+// A port that cannot possibly connect -- a Bluetooth radio that was never
+// paired, say -- otherwise repeats the identical message on every retry
+// forever. A field log had two such ports emitting ~2 lines a minute for over
+// an hour, which buried the one port that was genuinely misbehaving. The
+// point of a log line is to tell the operator something they do not already
+// know, and the hundredth copy of "not paired" does not.
+//
+// Safe off the engine loop: this runs on the reconnect goroutine, so the
+// bookkeeping has its own mutex rather than relying on engine serialisation.
+func (b *Bridge) logReconnectError(port int, err error) {
+	msg := err.Error()
+
+	b.reconnectLogMu.Lock()
+	if b.reconnectLogLast == nil {
+		b.reconnectLogLast = make(map[int]string)
+		b.reconnectLogCount = make(map[int]int)
+	}
+	same := b.reconnectLogLast[port] == msg
+	if same {
+		b.reconnectLogCount[port]++
+	} else {
+		b.reconnectLogLast[port] = msg
+		b.reconnectLogCount[port] = 1
+	}
+	n := b.reconnectLogCount[port]
+	b.reconnectLogMu.Unlock()
+
+	switch {
+	case !same:
+		log.Printf("bridge: port %d reconnect error: %v", port, err)
+	case n%reconnectLogRepeatEvery == 0:
+		log.Printf("bridge: port %d reconnect error (unchanged, %d attempts): %v", port, n, err)
+	}
+}
+
+// reconnectLogRepeatEvery is how many identical consecutive reconnect
+// failures pass before the message is repeated. At the 60s max backoff that
+// is roughly hourly -- often enough to show the problem persists, rare enough
+// not to drown everything else.
+const reconnectLogRepeatEvery = 60
 
 // invalidateRig closes and drops any rig cached for port. Rig.Close detaches
 // the control-channel consumer (kiss.Port.ControlChannel's single-consumer
@@ -778,7 +830,7 @@ func (b *Bridge) connectPortWithBackoff(idx int, pc config.Port, nextDelay float
 	)
 
 	if err := port.Start(); err != nil {
-		log.Printf("bridge: port %d reconnect error: %v", idx, err)
+		b.logReconnectError(idx, err)
 		b.eng.Do(func() { b.scheduleReconnect(idx, pc, nextDelay) })
 		return
 	}

@@ -1,6 +1,10 @@
 package bridge
 
 import (
+	"bytes"
+	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -831,5 +835,48 @@ func TestRelinkCounterResetsWhenNothingAwaitsReply(t *testing.T) {
 	})
 	if after != 0 {
 		t.Errorf("relinks[0] = %d after a sweep with no session awaiting a reply, want 0", after)
+	}
+}
+
+// TestLogReconnectErrorCollapsesRepeats covers the log-spam fix: a port that
+// cannot possibly connect (an unpaired Bluetooth radio, say) must not repeat
+// the identical message on every retry forever. A field log had two such
+// ports emitting ~2 lines a minute for over an hour, burying the port that
+// was actually misbehaving.
+func TestLogReconnectErrorCollapsesRepeats(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	b := &Bridge{}
+	same := errors.New("bluetooth: device is not paired")
+
+	for i := 0; i < reconnectLogRepeatEvery; i++ {
+		b.logReconnectError(0, same)
+	}
+	lines := strings.Count(buf.String(), "port 0 reconnect error")
+	// One for the first occurrence, one for the periodic reminder at the
+	// repeat interval.
+	if lines != 2 {
+		t.Errorf("logged %d lines for %d identical failures, want 2", lines, reconnectLogRepeatEvery)
+	}
+	if !strings.Contains(buf.String(), "unchanged") {
+		t.Error("the periodic reminder does not say the error is unchanged")
+	}
+
+	// A DIFFERENT error must always be reported immediately -- collapsing is
+	// about repetition, not about suppressing news.
+	buf.Reset()
+	b.logReconnectError(0, errors.New("connection timed out"))
+	if !strings.Contains(buf.String(), "connection timed out") {
+		t.Error("a changed error was suppressed")
+	}
+
+	// Ports are tracked independently.
+	buf.Reset()
+	b.logReconnectError(1, same)
+	if !strings.Contains(buf.String(), "port 1 reconnect error") {
+		t.Error("port 1's first failure was suppressed by port 0's history")
 	}
 }
