@@ -57,29 +57,32 @@ length/resync arithmetic is line-for-line equivalent to `benshi.Decoder.Feed`.
 Nothing links them, so a firmware change that moves the frame header would need both edited.
 Either export the needed pieces from `benshi` or add a test that asserts the two agree.
 
-### 4. CI's fuzz smoke step fails intermittently, and the failure looks like a real finding
-`.github/workflows/test.yml` runs six fuzz targets at `-fuzztime=10s` each on every push.
-On 2026-09-24 the `main` build failed with:
+### 4. CI's fuzz smoke step fails intermittently — FIXED 2026-09-25
+`.github/workflows/test.yml` ran six fuzz targets at `-fuzztime=10s` and failed twice on
+commits that changed no Go code, both times as:
 
-    --- FAIL: FuzzParseXID (11.00s)
-        context deadline exceeded
+    context deadline exceeded
 
-That is Go's fuzz COORDINATOR timing out waiting on a worker, not a crasher. Re-running the
-identical commit with no changes passed. Evidence it was never a code defect: `ax25` was
-untouched by that merge; `ParseXID`'s loop is O(n) with every length bounds-checked, so
-there is no pathological input to find; a local 30s run did 5.1M execs clean; and the CI log
-shows throughput collapsing from 62,217/sec to 19,694/sec in the final seconds — runner
-contention.
+That is Go's fuzz COORDINATOR timing out, not a crasher — and it writes nothing to
+`testdata/fuzz/`, so it is reported exactly like a genuine finding. It would have trained
+people to re-run red builds without looking, which is how a real crasher gets missed.
 
-Why it matters: a deadline-exceeded result is reported exactly like a genuine fuzz failure,
-and writes nothing to `testdata/fuzz/`, so there is no artifact distinguishing "flake" from
-"found a crasher" without reading the log carefully. It will keep failing pushes and will
-train people to re-run red builds without looking — which is how a real crasher gets missed.
+**Root cause: CI had no fuzz corpus cache**, so every run started from the seeds. From cold,
+`FuzzParseModulo` discovers ~47 new interesting inputs inside the 10s budget, and every new
+input triggers minimisation; when the deadline lands during that work the coordinator's
+context expires. Reproduced locally by running with an empty `GOCACHE` — identical counts to
+the CI log (47 new, total 53). It passed locally otherwise only because a warm corpus finds
+nothing new, and because this box does 180k execs/sec on 12 workers where the runner does
+70k on 4, so the runner loses the boundary race far more often.
 
-Raising `-fuzztime` makes the step slower without making it more robust. Better options: tell
-the two apart and only fail on an actual crasher, or move fuzzing to a scheduled run rather
-than per-push, keeping the seed-corpus regression tests (which are deterministic and fast) in
-the per-push job.
+Fixed by caching `~/.cache/go-build/fuzz` across runs (per-commit key, prefix restore) plus
+`-fuzzminimizetime=2s`. A warm corpus finds ~0 new inputs, so there is nothing to minimise
+at the boundary, and fuzzing becomes cumulative across pushes instead of restarting from the
+seeds every time — strictly better coverage for the same 10 seconds. A genuine find still
+fails the step loudly, since it writes a crasher and prints the input.
+
+All twelve `Fuzz*` targets in the tree are now listed in that step; five had never been
+fuzzed in CI at all, only replaying their seed corpus under plain `go test`.
 
 ### 5. `kiss.Port.ControlChannel()` does not validate the radio speaks Benshi
 Enabling `[rigctl.N]` on a port whose radio is not a Benshi device binds a listener that
