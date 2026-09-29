@@ -144,6 +144,32 @@ Benshi port every control frame starts `0xFF`, so "anything else after a
 closing FEND is KISS content" may in fact be safe there, and the test's raw
 `0xBB` stand-in for a control write does not reflect the real Gaia framing.
 
+`kiss/rawdump_test.go` (`TestRawDumpBluetooth`, skipped unless
+`TNCD_HW_BDADDR` is set) is the capture tool, and `analyseKISSFraming` in it
+does the counting. For a TCP/serial TNC, dump the socket instead -- the point
+is only to see the delimiters, which every decoder above the transport
+consumes.
+
+**Progress 2026-09-29 — Dire Wolf is CLEAR.** Four UI frames sent from a
+UV-PRO and received off air by Dire Wolf, read raw off its KISS TCP port:
+
+```
+FEND run lengths: [1, 2, 2, 2, 1]
+interior single FENDs with data on both sides: 0
+```
+
+Every frame carries its own opening and closing FEND, so each interior
+boundary is a doubled `C0 C0`. Dire Wolf -- the reference implementation and
+by far the most likely peer -- does **not** use the compact form, and the
+demux is correct for it. That removes most of the practical risk here, though
+it does not close the item.
+
+Still unknown: the **UV-PRO's own** framing, and the serial TNCs. Measuring
+the UV-PRO needs it to RECEIVE, and on the bench 2026-09-29 it decoded nothing
+from a TS-2000 transmitting on its frequency, while the reverse direction
+worked fine all session -- see the operational note below. The serial TNCs
+(KPC-3+, PK-232, TS-2000 internal) need someone to plug them in.
+
 ### 10. A stray `0xFF 0x01` can swallow a run of bytes on any port
 Same file: `scan` starts a Gaia candidate on `0xFF` regardless of whether a rig
 consumer is attached, and `deliverGaia` only checks for a consumer after the
@@ -158,6 +184,20 @@ as frame content and fabricates a spurious KISS frame, which is worse, and it
 would hit a real Benshi port whenever rig control happened to be detached.
 
 ## Radio / operational (not tncd bugs, but they cost hours)
+
+### The bench UV-PRO does not decode the TS-2000 (one direction only)
+2026-09-29: with both radios on 145.670 and a metre apart, Dire Wolf/TS-2000
+transmitted four UI frames (confirmed sent -- they appear in Dire Wolf's own
+TX echo) and the UV-PRO's KISS stream stayed completely empty across two
+45-second captures. The reverse direction works reliably and has all session:
+UV-PRO transmissions are decoded off air by the TS-2000 every time.
+
+So this is receive-side, UV-PRO only. Most likely front-end desense from a
+strong signal at close range (the same shape as the TH-D7 dual-RX desense
+noted elsewhere), or a squelch/deviation mismatch. Not investigated -- it
+blocks measuring the UV-PRO's KISS framing for item #9, but nothing else, and
+it is a bench-geometry problem rather than a tncd one. Worth ruling out with
+an attenuator or more separation before reading anything into it.
 
 ### 11. The UV-PRO's TNC wedges after heavy connect/disconnect churn
 Reproducible: after dozens of Bluetooth connect/disconnect cycles, KISS frames stop reaching
