@@ -216,6 +216,18 @@ reverted. Skipping recognition feeds the Gaia frame's bytes to the KISS decoder
 as frame content and fabricates a spurious KISS frame, which is worse, and it
 would hit a real Benshi port whenever rig control happened to be detached.
 
+### 15. `tncd rig` cannot run while tncd is running, and says the wrong thing
+The one-shot CLI fails with:
+
+    rig: port 0: transport open failed: bluetooth: RegisterProfile: UUID already registered
+
+because a running tncd already holds the SPP profile registration at
+`/org/tncd/spp`. Two processes genuinely cannot share the Bluetooth link, so refusing is
+correct -- but the message describes a D-Bus implementation detail rather than the cause,
+and gives the operator nothing to act on. It should say that another tncd instance is using
+this port, and point at the rigctl listener (`[rigctl.N]`) as the way to reach a radio that
+is already in use. Hit repeatedly while running the rig-control OTA checklist 2026-09-29.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
 ### The bench UV-PRO does not decode the TS-2000 (one direction only)

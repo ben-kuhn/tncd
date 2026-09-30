@@ -53,12 +53,18 @@ not just an `RPRT 0`.
 
 ### A. Basic frequency control
 
-- [ ] `tncd rig probe` succeeds and identifies the radio (`GET_DEV_INFO`)
-- [ ] `tncd rig get-freq` returns a value matching the radio's own display
-- [ ] `tncd rig set-freq <hz>` retunes the radio and the display follows,
-      within a couple of seconds
-- [ ] Repeated `set-freq` calls (simulating a Doppler-tracking client)
-      continue to retune correctly, not just the first call
+- [x] `tncd rig probe` succeeds (`GET_DEV_INFO`) — 2026-09-29. Note it does
+      **not** identify the radio: it checks the reply status and prints the
+      literal `radio answered`. Nothing decodes the device info. The wording
+      here and in README overstated it.
+- [x] `tncd rig get-freq` returns a value matching the radio's own display —
+      2026-09-29, confirmed against the front panel by the operator
+- [x] `tncd rig set-freq <hz>` retunes the radio and the display follows —
+      2026-09-29, confirmed against the front panel in both directions
+      (145.670 -> 145.030 -> 145.670)
+- [x] Repeated `set-freq` calls (simulating a Doppler-tracking client)
+      continue to retune correctly — 2026-09-29, four consecutive retunes
+      (145.030, 145.050, 145.070, 145.670) each read back correctly
 - [ ] With the radio on a **named stored memory channel**, `tncd rig get-freq`
       still returns that channel's frequency — `GetFreq` always reads the
       active VFO's channel record (`READ_SETTINGS` → `GET_HT_STATUS` →
@@ -84,8 +90,18 @@ Do NOT expect an "exit VFO mode" command to exist. The spec originally claimed
 an all-zero `FREQ_MODE_SET_PAR` payload does that; on real firmware it clamps
 the radio to 136.000 MHz, the bottom of its tuning range. tncd never sends it.
 
-- [ ] Through a rigctl client: `set_freq`, then drop the connection, and the
-      radio returns to the **frequency it was on beforehand**, not 136.000 MHz
+- [x] Through a rigctl client: `set_freq`, then drop the connection —
+      **this item was written wrong and is corrected here.** tncd does NOT
+      restore on disconnect, deliberately: `internal/rig`'s package doc says
+      so ("rigctld leaves a radio wherever it was last tuned on disconnect,
+      so restore-on-exit was never a requirement here, and this package does
+      not fake one"), and nothing in `internal/frontend/rigctl` calls
+      `Teardown`. Verified 2026-09-29: after `F 145670000` and dropping the
+      connection, the radio stayed on 145.670.
+      **The client owns the restore, and PAT does it** — see section D, where
+      PAT emitted `QSX ax25+agwpe: 145670.000` after its session and the radio
+      followed. So the design is right and matches real rigctld; what needed
+      fixing was this checklist.
 - [ ] `tncd rig teardown` on its own prints that there is nothing to restore,
       rather than silently doing nothing or claiming success
 - [ ] After a **power cycle**, the VFO holds whatever it was last set to and
@@ -99,23 +115,49 @@ This is the demultiplexer's actual proof, not the frequency math: KISS 0xC0
 frames and Benshi 0xFF 0x01 frames share one RFCOMM/BLE link and must not
 corrupt each other.
 
-- [ ] Run a KISS round-trip (e.g. a Winlink CMS connect, or a simple AX.25
-      UI-frame beacon watched on an independent monitor) with rig control
-      **idle** — baseline, packet works with the rigctl listener merely
-      running
-- [ ] Issue a `set-freq` QSY mid-session
-- [ ] Run a second KISS round-trip on the new frequency and confirm it
-      completes cleanly, with both round-trips visible on the air on an
-      independent Dire Wolf monitor (CLAUDE.md: tncd's own counters mean
-      "handed to the transport", not "transmitted")
-- [ ] No KISS frame corruption, dropped I-frames, or spurious retransmits
-      attributable to interleaving during the QSY
+- [x] Baseline round-trip with rig control idle — 2026-09-29
+- [x] `set-freq` QSY mid-session — via the rigctl port, `RPRT 0`, read back
+- [x] Second round-trip on the new frequency, both seen on the air by an
+      independent Dire Wolf/TS-2000 (retuned to follow)
+- [x] No corruption, dropped frames or spurious retransmits
+
+**PASSED 2026-09-29.** Both beacons decoded off air by the independent
+receiver, with a rigctl QSY between them:
+
+```
+145.670   "SECC-BASE on 145.670"   <- decoded off air
+F 145030000 -> RPRT 0, get_freq reads 145030000
+145.030   "SECC-QSY on 145.030"    <- decoded off air
+```
+
+tncd's log over the whole run: zero parse failures, zero oversize drops, zero
+retransmits, zero wedges. This is the demultiplexer's real proof — KISS
+`0xC0` frames and Benshi `0xFF 0x01` frames shared one RFCOMM link across a
+live QSY without corrupting each other.
 
 ### D. PAT / rigctld integration
 
-- [ ] PAT (configured to use `rigctld` at the `[rigctl.N]` `listen_host:listen_port`)
-      QSYs successfully before a connect attempt
-- [ ] `dump_caps` / the initial PAT handshake does not hang or error
+- [x] PAT QSYs successfully before a connect attempt — 2026-09-29
+- [x] The initial PAT handshake does not hang or error
+
+**PASSED 2026-09-29.** PAT pointed at `127.0.0.1:4534` via `hamlib_rigs`,
+with `ax25.rig` set to that entry (note: it is the **transport's** `rig` key
+that matters, not `agwpe.rig` — setting only the latter gives
+`Unable to QSY: hamlib rig '<other>' not loaded`, which is a confusing way to
+learn that):
+
+```
+UV-PRO ready. Dial frequency is 145.670.00 MHz.
+AGWPE TNC (2.0) initialized
+QSY ax25+agwpe: 145030
+Connecting to KU0HN-15 (ax25+agwpe)...
+Unable to establish connection to remote: *** connect to KU0HN-15 timed out
+QSX ax25+agwpe: 145670.000
+```
+
+The connect failure is expected (`KU0HN-15` does not exist). What matters is
+the QSY, the clean handshake, and the `QSX` restore afterwards — the radio was
+confirmed back on 145.670 via `get_freq`.
 
 ### E. PTT (only if testing `allow_ptt = true`)
 

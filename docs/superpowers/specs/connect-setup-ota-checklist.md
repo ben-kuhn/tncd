@@ -173,13 +173,21 @@ what it *did* decode is what matters here.
 - [ ] Faster retries do **not** cause channel congestion or collisions with the
       peer's reply on a half-duplex link — if the peer's UA is being stepped on,
       raise `[ax25] frack` and note the working value below
-- [ ] Via a digipeater: retries are ~9s apart for a 1-hop path (`2m+1`)
+- [x] Via a digipeater: retries are ~9s apart for a 1-hop path (`2m+1`)
+      **PASSED 2026-09-29.** AGWPE `'v'` connect to an unreachable call via
+      one digipeater, measured 9.004, 9.001, 9.008 and 9.015s apart —
+      `frack(3) x (2*1+1) = 9s` exactly. The SABME->SABM downgrade still
+      happened after 3 SABMEs. A direct connect minutes earlier on the same
+      link was 3.012s apart, so the scaling is doing the work, not the path.
 
 ### D. No regression in the normal path
 
 - [ ] Full Winlink CMS round-trip still passes on at least one serial TNC and
       one Bluetooth TNC (per `TESTING.md`)
-- [ ] A normal DISC/UA teardown still completes (DISC also uses the setup timer)
+- [x] A normal DISC/UA teardown still completes (DISC also uses the setup timer)
+      **PASSED 2026-09-29.** DISC retransmit gaps of 3.012s and 3.001s across
+      several teardowns against KU0HN-10, each answered with a UA — DISC is
+      using the setup timer, not the data-phase T1.
 
 ## Results
 
