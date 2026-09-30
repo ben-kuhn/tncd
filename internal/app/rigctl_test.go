@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -368,4 +369,70 @@ func TestRigCtlStartFailureDoesNotDeadlockNew(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("DEADLOCK: New did not return within 5s on the rigctl start-failure cleanup path")
 	}
+}
+
+// TestRigCtlGateDisablesListenerOnNonBenshiRadio covers followup #5's actual
+// requirement: a port with rig control enabled whose radio does not speak the
+// protocol must end up with rig control DISABLED and the operator warned --
+// not a listener that accepts clients and answers RPRT -5 forever.
+//
+// The port here is a TCP transport pointed at a listener that accepts and
+// then says nothing, which is exactly what a non-Benshi TNC looks like to a
+// Gaia request: the link is healthy, the command is simply never answered.
+func TestRigCtlGateDisablesListenerOnNonBenshiRadio(t *testing.T) {
+	// A silent "TNC": accepts the connection, never replies.
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer silent.Close()
+	go func() {
+		for {
+			c, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			// Hold it open and stay mute.
+			go func() { io.Copy(io.Discard, c) }()
+		}
+	}()
+	_, portStr, _ := net.SplitHostPort(silent.Addr().String())
+	tncPort, _ := strconv.Atoi(portStr)
+
+	cfg := minimalConfig(t)
+	cfg.Ports[0].TCPPort = tncPort
+	cfg.RigCtl[0].Enabled = true
+	cfg.RigCtl[0].ListenPort = 0
+
+	// Shorten the gate so the test does not wait on production timings.
+	origPoll, origTO := rigGatePollIntervalVar, rigGateTimeoutVar
+	rigGatePollIntervalVar = 100 * time.Millisecond
+	rigGateTimeoutVar = 20 * time.Second
+	defer func() { rigGatePollIntervalVar, rigGateTimeoutVar = origPoll, origTO }()
+
+	rt, err := New(cfg, 0, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	done := make(chan struct{})
+	go func() { rt.Wait(); close(done) }()
+	defer func() { rt.Shutdown(); <-done }()
+
+	addr := rt.rigSrvs[0].Addr()
+	if addr == "" {
+		t.Fatal("no rigctl listener address")
+	}
+
+	// The gate must withdraw the listener once the probe fails.
+	deadline := time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+		if err != nil {
+			return // listener withdrawn: rig control disabled, as required
+		}
+		c.Close()
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Error("rigctl listener was still accepting connections after the radio failed to " +
+		"identify -- clients will get RPRT -5 forever with nothing explaining why")
 }

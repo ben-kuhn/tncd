@@ -78,9 +78,31 @@ fails the step loudly, since it writes a crasher and prints the input.
 All twelve `Fuzz*` targets in the tree are now listed in that step; five had never been
 fuzzed in CI at all, only replaying their seed corpus under plain `go test`.
 
-### 5. Detecting whether a radio speaks Benshi — RESOLVED 2026-09-30
-Enabling `[rigctl.N]` on a non-Benshi port used to bind a listener that answered
-`RPRT -5` to everything, with no way to tell why.
+### 5. Rig control enabled on a radio that does not support it — FIXED 2026-09-30
+Enabling `[rigctl.N]` on a non-Benshi port bound a listener that accepted clients and
+answered `RPRT -5` to everything, forever, with nothing saying why.
+
+**Now: rig control is disabled for that port and the operator is warned.** A first pass
+added the detection but never wired it in -- `Identify()` had no callers and the behaviour
+was unchanged -- which is recorded here because "the mechanism exists" is not the same as
+"the problem is fixed".
+
+`Runtime.gateRigCtl` runs per enabled port: it waits for the port to come online, probes
+once, and on `ErrNotBenshi` closes that rigctl listener and logs a warning naming the port
+and both possible causes. It deliberately does NOT stop tncd or touch the KISS bridge,
+which is the function people actually depend on. A transient failure (port offline
+mid-probe, one slow round trip) is retried rather than condemning the radio.
+
+The gate runs in the background rather than at bind time because at bind time the answer is
+not knowable: ports connect asynchronously, so probing then would reject a good radio for
+not having finished dialling. The listener therefore exists for a few seconds before being
+withdrawn -- the honest trade against refusing to start tncd at all over a radio that might
+be fine.
+
+Verified both ways: a TCP port pointed at a listener that accepts and stays mute (exactly
+what a non-Benshi TNC looks like to a Gaia request) has its listener withdrawn with the
+warning above, and a real UV-PRO is identified (`vendor 6, product 260, hw 1, firmware
+146`) with the listener left serving.
 
 **The detection is `GET_DEV_INFO`** -- already sent by `Probe()`, which was throwing the
 reply body away. `benshi.DecodeDevInfo` now decodes it, `(*Rig).Identify` caches it for the

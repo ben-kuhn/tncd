@@ -5,11 +5,15 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"reflect"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
@@ -34,6 +38,12 @@ type Runtime struct {
 	// true -- zero, one, or several, matching cfg.RigCtl by construction
 	// order in New. Nil/empty when rig control is not configured anywhere.
 	rigSrvs []*rigctl.Server
+
+	// stopCh is closed by Shutdown so the rig-control gates (see
+	// gateRigCtl) stop waiting on a port that is never going to arrive.
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	gatesDone sync.WaitGroup
 }
 
 // New builds the engine and bridge, starts the AGWPE server, and starts the
@@ -58,7 +68,7 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 		return nil, fmt.Errorf("agwpe server: %w", err)
 	}
 
-	r := &Runtime{eng: eng, bridge: b, agwpeLn: ln}
+	r := &Runtime{eng: eng, bridge: b, agwpeLn: ln, stopCh: make(chan struct{})}
 
 	if cfg.KISSTCP.Enabled {
 		warnIfExposed("kisstcp", cfg.KISSTCP.ListenHost, cfg.KISSTCP.ListenPort, cfg.KISSTCP.AllowedSubnets)
@@ -111,6 +121,13 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 		}
 		r.rigSrvs = append(r.rigSrvs, srv)
 		slog.Info("rigctl listener started", "port", port, "listen", srv.Addr())
+
+		// Whether the radio actually speaks Benshi cannot be known yet: the
+		// port is still connecting (Bluetooth dials asynchronously), so a
+		// probe here would fail for a perfectly good radio. Gate it in the
+		// background instead -- see gateRigCtl.
+		r.gatesDone.Add(1)
+		go r.gateRigCtl(port, srv)
 	}
 
 	return r, nil
@@ -221,7 +238,102 @@ func (r *Runtime) Wait() { r.eng.Run() }
 //     work it alone is responsible for draining, forever.
 //
 // Safe to call from any goroutine.
+// rigGatePollInterval is how often gateRigCtl re-checks whether the port has
+// come online. Short enough that a healthy radio is confirmed within a few
+// seconds of connecting, long enough not to spin.
+var rigGatePollIntervalVar = 2 * time.Second
+
+// rigGateTimeout bounds how long a gate waits for its port to come online
+// before giving up. A port that never connects is a different problem with
+// its own logging (see the bridge's reconnect handling), and holding a
+// rigctl listener open forever waiting on it helps nobody.
+var rigGateTimeoutVar = 5 * time.Minute
+
+// gateRigCtl confirms the radio on this port actually speaks Benshi, and
+// shuts the rigctl listener down if it does not.
+//
+// Without this, enabling [rigctl.N] on a port whose radio is not a Benshi
+// device bound a listener that accepted clients and answered RPRT -5 to
+// every command forever: the operator saw a working-looking listener and a
+// rig that never responded, with nothing anywhere saying why.
+//
+// It runs in the background rather than at bind time because at bind time
+// the answer is not knowable -- ports connect asynchronously, so probing
+// then would reject a good radio for not having finished dialling. The
+// listener therefore exists for a few seconds before being withdrawn, which
+// is the honest trade: the alternative is refusing to start tncd at all over
+// a radio that might be fine.
+//
+// A probe failure is reported as a warning and disables rig control for the
+// port; it does NOT stop tncd or touch the KISS bridge, which is the
+// function people actually depend on.
+func (r *Runtime) gateRigCtl(port int, srv *rigctl.Server) {
+	defer r.gatesDone.Done()
+
+	deadline := time.After(rigGateTimeoutVar)
+	tick := time.NewTicker(rigGatePollIntervalVar)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-r.stopCh:
+			return
+		case <-deadline:
+			slog.Warn("rig control: port never came online, giving up on identifying the radio; "+
+				"the rigctl listener stays up but will answer errors until the port connects",
+				"port", port, "waited", rigGateTimeoutVar)
+			return
+		case <-tick.C:
+		}
+
+		rg, err := r.rigForPort(port)
+		if err != nil || rigIsNilIface(rg) {
+			continue // not online yet
+		}
+		// Identify is not on the rigctl.Rig interface on purpose -- that
+		// interface is the narrow surface the rigctl server needs, and
+		// widening it for one caller would leak rig-layer concerns into it.
+		concrete, ok := rg.(*rig.Rig)
+		if !ok {
+			return // a test double or future implementation; nothing to gate
+		}
+		ident, err := concrete.Identify()
+		if err == nil {
+			slog.Info("rig control: radio identified", "port", port, "radio", ident.String())
+			return
+		}
+		if errors.Is(err, rig.ErrNotBenshi) {
+			slog.Warn("rig control DISABLED for this port: the radio did not answer GET_DEV_INFO, "+
+				"so it is either not a Benshi-protocol radio or its control link is not passing data. "+
+				"The KISS bridge on this port is unaffected. Remove [rigctl.N] enabled = true to "+
+				"silence this.",
+				"port", port, "listen", srv.Addr(), "err", err)
+			srv.Close()
+			return
+		}
+		// Transient (port went offline mid-probe, timeout on a busy link):
+		// keep waiting rather than condemning the radio on one bad round trip.
+	}
+}
+
+// rigIsNilIface reports whether the provider handed back a nil rig, which it
+// does while a port is offline. Mirrors rigctl.rigIsNil, kept here so app
+// does not depend on an unexported helper.
+func rigIsNilIface(rg rigctl.Rig) bool {
+	if rg == nil {
+		return true
+	}
+	v := reflect.ValueOf(rg)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return v.IsNil()
+	}
+	return false
+}
+
 func (r *Runtime) Shutdown() {
+	r.stopOnce.Do(func() { close(r.stopCh) })
+	r.gatesDone.Wait()
 	r.closeRigServers()
 
 	r.eng.Do(func() {
