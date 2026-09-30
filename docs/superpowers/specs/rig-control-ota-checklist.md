@@ -167,8 +167,12 @@ Confirmed two independent ways: its own `is_in_tx` bit stays 0, and a TS-2000
 on the same frequency stayed at its -54 noise floor — the same meter having
 peaked at +60 for a known-good UI frame minutes earlier, so the instrument was
 working. `button_id` 0-3 and 15 were swept with LOW_TO_HIGH/HIGH_TO_LOW; all
-accepted, all silent. The remaining explanation is that this firmware does not
-expose remote keying, which is a defensible thing for a handheld to refuse.
+accepted, all silent.
+
+**The firmware is not the limitation** -- the operator keys this radio from the
+vendor's own app. The unexplored leads are the radio's lock state (`UNLOCK` is
+command 65) and the possibility that the vendor app keys by opening an audio
+stream rather than sending a command. See `docs/followups.md` #17.
 
 The probing did fix two real bugs — see the commit: tncd was sending a
 malformed one-byte body that the radio REJECTED with status 5 every time, and

@@ -247,15 +247,33 @@ own `is_in_tx` bit stays 0, and a TS-2000 on the same frequency stayed at its
 minutes earlier.
 
 Swept `button_id` 0-3 and 15 with LOW_TO_HIGH/HIGH_TO_LOW actions: every
-combination accepted (reply status 0), every one silent. So the body format is
-right and something else gates it. The most likely explanation is that this
-firmware simply does not expose remote keying -- a reasonable thing for a
-handheld to refuse -- but a different command or an unlock step cannot be
-ruled out. `UNLOCK = 65` exists in the command set and has not been explored.
+combination accepted (reply status 0), every one silent.
 
-**`allow_ptt` should therefore be treated as non-functional on this radio**,
-not merely experimental. The refusal path (`allow_ptt = false` -> `RPRT -4`)
-does work and is validated.
+**The firmware DOES support remote keying** -- the operator keys this radio
+from the vendor's own app. An earlier version of this note concluded otherwise
+and was wrong; it is recorded because "the hardware cannot do it" is exactly
+the conclusion that stops anyone looking.
+
+The body format is settled. Every ONE-byte body is rejected with status 5
+whatever the effect (tested: 13, 14, 15, 18, 21, 22) and every TWO-byte body
+is accepted with status 0. Note HTCommander sends one byte, so its
+`doProgFunc` would not work on this firmware either -- and it never uses it
+for PTT, only `toggleAbCh`.
+
+Two leads remain:
+
+1. **Lock state.** HTCommander guards every `doProgFunc` with
+   `if (_lockState?.isLocked == true) return;`, and `UNLOCK` is command 65.
+   A locked radio accepting commands and ignoring them would fit exactly what
+   was measured.
+2. **Audio-path keying.** The vendor app is a voice app: holding its PTT may
+   simply open an audio stream, with the radio keying because data is
+   arriving, not because a discrete command was sent.
+
+**Lower stakes than it looks.** tncd already keys this radio for every packet
+frame -- the radio transmits when given data. Discrete PTT only matters for
+tune-up or CW, not for the AX.25 path anyone actually uses tncd for. The
+refusal path (`allow_ptt = false` -> `RPRT -4`) works and is validated.
 
 Two real bugs fell out of the investigation and are fixed: the body was
 malformed (one byte instead of the two-byte PF record), and `SetPTT`

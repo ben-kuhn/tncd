@@ -353,10 +353,13 @@ const htStatusTXBit = 0x40
 // now well-formed (the radio answers status 0) and a non-zero status is
 // returned as an error.
 //
-// It still does not transmit. button_id 0-3 and 15 were swept with
-// LOW_TO_HIGH/HIGH_TO_LOW and all were accepted and all were silent, so the
-// remaining explanation is that this firmware simply does not expose remote
-// keying through this command -- a defensible thing for a handheld to refuse.
+// It still does not transmit, and the reason is NOT that the firmware lacks
+// remote keying -- the operator keys this radio from the vendor's own app.
+// button_id 0-3 and 15 were swept with LOW_TO_HIGH/HIGH_TO_LOW; all accepted,
+// all silent. Two leads remain unexplored: the radio's lock state (HTCommander
+// guards every doProgFunc with `if (_lockState?.isLocked) return`, and UNLOCK
+// is command 65), and the possibility that the vendor app keys by opening an
+// audio stream rather than by any discrete command. See docs/followups.md.
 //
 // PFActionType's LOW_TO_HIGH/HIGH_TO_LOW are used for on/off, which means
 // the protocol does have distinct press and release rather than the toggle
