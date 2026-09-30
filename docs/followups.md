@@ -204,6 +204,19 @@ already registered because another tncd is running and holding the radio, and po
 the `[rigctl.N]` listener as the way to reach a radio already in use. Refusing is still
 correct -- two processes cannot share one Bluetooth link.
 
+### 16. `go test -c` binaries need their fixtures staged alongside
+Cross-platform validation runs the suite as `go test -c` binaries copied to a VM, since
+neither the Windows nor the FreeBSD test box has a Go toolchain. Three packages then fail
+for a reason that has nothing to do with the platform: they read fixtures by relative path
+and the source tree is not there.
+
+- `agwpe` and `ax25` want `testdata/frames.json` in the working directory
+- `internal/config` wants `../../tncd.ini`
+
+Recreate the paths and they pass. Worth knowing before reading a cross-platform run as a
+portability failure -- on both Windows and FreeBSD the same three failed identically, which
+is itself the clue that it is the harness and not the platform.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
 ### The bench UV-PRO does not decode the TS-2000 (one direction only)
