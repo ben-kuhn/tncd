@@ -11,8 +11,9 @@ the duration of a connected-mode session, and put it back afterwards.
 Two radio features actively break packet, and both are on by default for a
 radio someone also uses for voice:
 
-- **Dual watch** (`Settings.double_channel`). The radio splits attention
-  between two VFOs, so traffic on the other channel deafens it mid-frame.
+- **Dual watch** (field NOT yet confirmed -- see below). The radio splits
+  attention between two VFOs, so traffic on the other channel deafens it
+  mid-frame.
 - **APRS / position beaconing.** The radio transmits on its own schedule,
   colliding with a session in progress.
 
@@ -142,6 +143,27 @@ Benshi variant.
 
 Proposed: `[client.N] manage_session_settings = false`.
 
+## Open: which field is dual watch
+
+Two candidates, and the evidence is suggestive rather than conclusive.
+
+Measured on a UV-PRO 2026-09-29: `channel_a = 252`, `channel_b = 1`,
+`double_channel = 0`. So `channel_b` pointed at a real memory ("MN Pack")
+while `double_channel` read OFF. If `channel_b` being set were what enables
+dual watch, that radio would have been dual-watching at the time.
+
+That points at `double_channel` as the switch and `channel_b` as merely what
+the B VFO is tuned to, persisting whether or not dual watch is active.
+
+**Not proven.** The front-panel state at the moment of that capture was not
+recorded, and in the `Status` record `double_channel` is documented as which
+channel is currently ACTIVE in dual watch -- a different thing from the
+setting that enables it. Same field name, possibly different meaning in the
+two records.
+
+Settled by the same diff as APRS: toggle dual watch on the panel, read
+settings before and after, diff the raw bytes.
+
 ## Open: what APRS actually is
 
 `double_channel` is known. **APRS is not.** The plausible fields are
@@ -153,10 +175,19 @@ is a guess.
 `channel_count` reads 30 on a radio whose VFO is channel 252 — the field names
 in this protocol mislead, repeatedly.
 
-**The measurement**: read `READ_SETTINGS`, toggle APRS on the radio's front
-panel, read again, diff the raw bytes. Repeat for dual watch to confirm
-`double_channel`, and the diff will also catch anything else the radio moves
-that nobody thought to look for. Five minutes at the bench.
+**The measurement**, covering every open field at once: capture
+`READ_SETTINGS` after each front-panel change and diff the raw bytes.
+
+| Toggle on the panel | Settles |
+|---|---|
+| APRS on -> off | which fields APRS actually drives |
+| dual watch on -> off | `double_channel` vs `channel_b` |
+| memory -> VFO mode | that `channel_a` really is the mode switch |
+
+The diff also catches anything else the radio moves that nobody thought to
+look for, which is the real value -- every field-name guess this week has been
+wrong. Five minutes at the bench, and `tncd rig` already has the plumbing to
+dump the record.
 
 Until that exists, the dual-watch half is implementable and the APRS half is
 not.
