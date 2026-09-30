@@ -70,12 +70,68 @@ same reason: re-serialising from a partial model silently zeroes every field
 it failed to represent. On a settings record that means wiping someone's
 squelch, mic gain, VOX and screen timeout.
 
+## Memory mode -> VFO mode -> memory mode
+
+The same mechanism covers the case the QSY guard currently refuses: a radio
+sitting on a NAMED memory channel.
+
+`Settings.channel_a` is the index of the record the active VFO points at. So
+"switch to VFO mode" is just another managed settings field:
+
+```
+operator on a memory:   channel_a = 1    ("MN Pack")
+tncd switches to VFO:   channel_a = 252  (the unnamed scratch record)
+tncd restores:          channel_a = 1
+```
+
+**Ordering is load-bearing.** `SetFreq` rewrites whatever record the active
+VFO points at, so the mode switch MUST precede it. Reversed, the QSY writes
+the operator's voice memory -- precisely the outcome the name guard exists to
+prevent.
+
+On release, restore both: the VFO scratch record's frequency (the existing
+`Teardown` path) and `channel_a` back to the memory.
+
+The name-based refusal in `SetFreq` REMAINS for the unmanaged case. With
+`manage_session_settings = false` tncd has no mandate to move the operator off
+their memory, so refusing is still the right answer there.
+
+## Scope: the tricky part
+
+Dual watch and APRS are bounded by the AX.25 session. **The VFO/memory switch
+is not** -- it has to happen at QSY time, which PRECEDES the session:
+
+```
+PAT:  rigctl connect -> set_freq -> AX.25 connect -> transfer -> disconnect -> QSX -> rigctl drop
+                        ^^^^^^^^                                              ^^^^^
+                        needs VFO mode here            ... and holds until at least here
+```
+
+So a single "session" boundary does not fit both. Proposed:
+
+- **Acquire** managed state on the first QSY *or* the first connected-mode
+  session, whichever comes first.
+- **Release** when there is no active session AND no rigctl client connected.
+
+That covers PAT's flow (the rigctl connection outlives the AX.25 session) and
+the `tncd rig` CLI's one-shot flow (each invocation is its own session, as
+`Teardown` already establishes). A QSY with no session and no client left
+connected therefore still releases, rather than pinning the radio forever.
+
 ## Interaction with the QSY guard
 
-`SetFreq` currently REFUSES when the radio is in dual watch, because which VFO
-transmits is not derivable. Once tncd manages dual watch for a session, that
-refusal can become "turn it off, do the work, put it back" — the guard stops
-being a dead end. The refusal must remain for the unmanaged case.
+`SetFreq` currently REFUSES in three cases that managed state can turn into
+transitions instead:
+
+| Refusal | Managed behaviour |
+|---|---|
+| radio in dual watch | turn it off, do the work, put it back |
+| radio on a named memory | switch `channel_a` to the VFO record, restore after |
+| settings/status disagree | still refuse -- this is a state tncd does not model |
+
+All three refusals REMAIN when `manage_session_settings = false`. The split is
+deliberate: unmanaged, tncd has no mandate to move the operator's radio, so
+refusing is correct; managed, the operator has asked for exactly that.
 
 ## Configuration
 
@@ -111,6 +167,10 @@ not.
   asserting every unmodified byte survives.
 - A fuzz target on any new parser.
 - Refcount tests: two overlapping sessions apply once and restore once.
+- Ordering test: the VFO-mode switch precedes the QSY write, so a radio on a
+  named memory never has that memory rewritten.
+- Scope test: a QSY with no AX.25 session still releases once the rigctl
+  client disconnects.
 - A test that restore is skipped for a field the operator changed underneath.
 - OTA: confirm writes are volatile (write, power cycle, verify reverted), and
   that a session actually behaves better with dual watch off.
