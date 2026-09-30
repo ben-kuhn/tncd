@@ -171,6 +171,9 @@ settings before and after, diff the raw bytes.
 `positioning_system`, and which combination the radio's own APRS toggle drives
 is a guess.
 
+`SET_APRS_PATH` (71) / `GET_APRS_PATH` (72) are NOT the lever -- they set the
+digipeater path (`WIDE2-1` and so on), not whether APRS is enabled.
+
 **Do not guess.** `support_vfo` reads 0 on a radio operating in VFO mode and
 `channel_count` reads 30 on a radio whose VFO is channel 252 — the field names
 in this protocol mislead, repeatedly.

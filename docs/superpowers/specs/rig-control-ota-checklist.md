@@ -161,9 +161,25 @@ confirmed back on 145.670 via `get_freq`.
 
 ### E. PTT (only if testing `allow_ptt = true`)
 
-- [ ] With `allow_ptt = false` (the default), `\set_ptt 1` against the
+**PTT DOES NOT WORK on BTech UV-PRO firmware 146 (measured 2026-09-30).**
+The radio accepts a well-formed `DO_PROG_FUNC(MAIN_PTT)` and never transmits.
+Confirmed two independent ways: its own `is_in_tx` bit stays 0, and a TS-2000
+on the same frequency stayed at its -54 noise floor — the same meter having
+peaked at +60 for a known-good UI frame minutes earlier, so the instrument was
+working. `button_id` 0-3 and 15 were swept with LOW_TO_HIGH/HIGH_TO_LOW; all
+accepted, all silent. The remaining explanation is that this firmware does not
+expose remote keying, which is a defensible thing for a handheld to refuse.
+
+The probing did fix two real bugs — see the commit: tncd was sending a
+malformed one-byte body that the radio REJECTED with status 5 every time, and
+`SetPTT` discarded the reply so the rejection was invisible.
+
+Items below are kept for a radio or firmware that does support it.
+
+- [x] With `allow_ptt = false` (the default), `\set_ptt 1` against the
       rigctl port returns `RPRT -4` (not implemented) — confirms the refusal
-      path, not just that PTT "does nothing"
+      path, not just that PTT "does nothing". **PASSED 2026-09-30**, both
+      `\set_ptt 1` and the short form `T 1`.
 - [ ] With `allow_ptt = true`, **radio connected to a dummy load**:
       `\set_ptt 1` keys the transmitter (confirm on a separate receiver or
       power meter, not just by trusting the reply)

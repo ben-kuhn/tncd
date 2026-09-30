@@ -335,23 +335,60 @@ func (r *Rig) Teardown() (bool, error) {
 // is_radio -- so is_in_tx is bit 6.
 const htStatusTXBit = 0x40
 
-// SetPTT keys or unkeys the transmitter via DO_PROG_FUNC(MAIN_PTT).
+// SetPTT asks the radio to key or unkey via DO_PROG_FUNC(MAIN_PTT).
 //
-// DO_PROG_FUNC's body is a single effect byte -- the protocol defines no
-// press/release parameter for it, so this sends the exact same wire bytes
-// (PFEffectMainPTT) regardless of on. HTCommander, the reference
-// implementation this protocol was reverse-engineered against, SPECULATES
-// that some effects have distinct LOW_TO_HIGH/HIGH_TO_LOW edge actions that
-// amount to a press and a release, but its own source does not establish
-// that for MAIN_PTT, and nothing here has been bench-verified to hold a key
-// open on real hardware. A nil return means only "the radio accepted the
-// command" -- it is NOT proof the transmitter is now in the requested
-// state. Callers must not assume a remote key can be held, and must enforce
-// their own maximum key time (see internal/frontend/rigctl's PTTTimeout).
+// **This does not work on the firmware it has been tested against, and the
+// error it returns now says so.** Measured on a BTech UV-PRO (firmware 146)
+// 2026-09-30: the radio accepts the command and never transmits. Confirmed
+// two independent ways -- its own is_in_tx bit stays 0, and a TS-2000 on the
+// same frequency stayed at its -54 noise floor, the same meter having peaked
+// at +60 for a known-good UI frame minutes earlier.
+//
+// What the probing did settle is the body format. DO_PROG_FUNC's payload is
+// benlink's PF record -- button_id(4) | action(4), then effect(8), two bytes.
+// tncd previously sent ONE byte (the effect alone) and the radio REJECTED it
+// with reply status 5 every time. Nobody noticed because this function
+// discarded the reply body and reported only the transport error, so a
+// rejected command looked like a success. Both are fixed here: the body is
+// now well-formed (the radio answers status 0) and a non-zero status is
+// returned as an error.
+//
+// It still does not transmit. button_id 0-3 and 15 were swept with
+// LOW_TO_HIGH/HIGH_TO_LOW and all were accepted and all were silent, so the
+// remaining explanation is that this firmware simply does not expose remote
+// keying through this command -- a defensible thing for a handheld to refuse.
+//
+// PFActionType's LOW_TO_HIGH/HIGH_TO_LOW are used for on/off, which means
+// the protocol does have distinct press and release rather than the toggle
+// this code previously assumed. That assumption cannot be retested until
+// something keys, so internal/frontend/rigctl keeps its toggle-safe
+// bookkeeping: pessimistic there costs a redundant un-key, optimistic costs
+// a stuck transmitter.
 func (r *Rig) SetPTT(on bool) error {
-	_, err := r.request(benshi.CmdDoProgFunc, []byte{byte(benshi.PFEffectMainPTT)})
-	return err
+	action := byte(pfActionHighToLow)
+	if on {
+		action = pfActionLowToHigh
+	}
+	body, err := r.request(benshi.CmdDoProgFunc, []byte{action, byte(benshi.PFEffectMainPTT)})
+	if err != nil {
+		return err
+	}
+	if len(body) < 1 {
+		return benshi.ErrShortBody
+	}
+	if body[0] != 0 {
+		return fmt.Errorf("%w (DO_PROG_FUNC status %d)", benshi.ErrRadioRejected, body[0])
+	}
+	return nil
 }
+
+// PF action codes, the low nibble of DO_PROG_FUNC's first body byte. The high
+// nibble is button_id, which measurably does not matter here -- 0-3 and 15
+// were all accepted identically -- so it is left at 0.
+const (
+	pfActionLowToHigh = 0x06 // press
+	pfActionHighToLow = 0x07 // release
+)
 
 // GetPTT reports whether the radio is currently transmitting.
 func (r *Rig) GetPTT() (bool, error) {

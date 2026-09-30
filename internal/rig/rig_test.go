@@ -426,43 +426,73 @@ func TestGetPTTReadsTXBit(t *testing.T) {
 // -- the only thing this package can prove is that it sends DO_PROG_FUNC
 // with the MAIN_PTT effect byte, both for on and for off, since the wire
 // message is identical either way.
-func TestSetPTTSendsDoProgFuncMainPTT(t *testing.T) {
-	for _, on := range []bool{true, false} {
+// TestSetPTTSendsWellFormedProgFunc pins the DO_PROG_FUNC body format and the
+// distinct press/release actions.
+//
+// tncd used to send a single effect byte. Hardware rejected that with reply
+// status 5 on every call (BTech UV-PRO, firmware 146, 2026-09-30) while
+// SetPTT discarded the reply body and reported success. The payload is
+// benlink's PF record -- button_id(4)|action(4), then effect(8) -- and the
+// two-byte form is accepted. button_id is left 0 because sweeping 0-3 and 15
+// changed nothing.
+func TestSetPTTSendsWellFormedProgFunc(t *testing.T) {
+	for _, tc := range []struct {
+		on     bool
+		action byte
+	}{
+		{true, pfActionLowToHigh},
+		{false, pfActionHighToLow},
+	} {
 		ch := newFakeChannel()
 		r := New(ch, time.Second, 0)
 
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			ch.awaitWrite(t, 1)
 			ch.reply(benshi.CmdDoProgFunc, []byte{0x00})
 		}()
 
-		if err := r.SetPTT(on); err != nil {
-			t.Fatalf("SetPTT(%v): %v", on, err)
+		if err := r.SetPTT(tc.on); err != nil {
+			t.Fatalf("SetPTT(%v): %v", tc.on, err)
 		}
+		writes := ch.writes()
 		r.Close()
 
-		writes := ch.writes()
 		if len(writes) != 1 {
-			t.Fatalf("SetPTT(%v) wrote %d frames, want 1", on, len(writes))
+			t.Fatalf("SetPTT(%v) wrote %d frames, want 1", tc.on, len(writes))
 		}
-		dec := benshi.NewDecoder()
-		frames, err := dec.Feed(writes[0])
-		if err != nil {
-			t.Fatalf("Feed: %v", err)
-		}
-		if len(frames) != 1 {
-			t.Fatalf("Feed decoded %d frames, want 1", len(frames))
-		}
-		msg, err := benshi.DecodeMessage(frames[0].Data)
+		msg, err := benshi.DecodeMessage(writes[0][4:])
 		if err != nil {
 			t.Fatalf("DecodeMessage: %v", err)
 		}
 		if msg.Command != benshi.CmdDoProgFunc {
-			t.Errorf("SetPTT(%v) command = %v, want CmdDoProgFunc", on, msg.Command)
+			t.Errorf("command = %d, want CmdDoProgFunc", msg.Command)
 		}
-		if len(msg.Body) != 1 || msg.Body[0] != byte(benshi.PFEffectMainPTT) {
-			t.Errorf("SetPTT(%v) body = %v, want [%d] (PFEffectMainPTT)", on, msg.Body, benshi.PFEffectMainPTT)
+		want := []byte{tc.action, byte(benshi.PFEffectMainPTT)}
+		if !bytes.Equal(msg.Body, want) {
+			t.Errorf("SetPTT(%v) body = % x, want % x", tc.on, msg.Body, want)
 		}
+	}
+}
+
+// A radio that REJECTS the key must not be reported as success. This is the
+// bug that hid the malformed body: SetPTT discarded the reply entirely, so
+// status 5 on every call looked like a working transmitter.
+func TestSetPTTReportsRadioRejection(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second, 0)
+	defer r.Close()
+
+	go func() {
+		ch.awaitWrite(t, 1)
+		ch.reply(benshi.CmdDoProgFunc, []byte{0x05}) // what the 1-byte body used to get
+	}()
+
+	err := r.SetPTT(true)
+	if err == nil {
+		t.Fatal("SetPTT reported success for a command the radio rejected")
+	}
+	if !errors.Is(err, benshi.ErrRadioRejected) {
+		t.Errorf("err = %v, want ErrRadioRejected", err)
 	}
 }
 

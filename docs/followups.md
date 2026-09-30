@@ -239,6 +239,28 @@ Recreate the paths and they pass. Worth knowing before reading a cross-platform 
 portability failure -- on both Windows and FreeBSD the same three failed identically, which
 is itself the clue that it is the harness and not the platform.
 
+### 17. Remote PTT does not work on UV-PRO firmware 146
+`DO_PROG_FUNC(MAIN_PTT)` is accepted by the radio and never keys the
+transmitter. Measured 2026-09-30, confirmed two independent ways: the radio's
+own `is_in_tx` bit stays 0, and a TS-2000 on the same frequency stayed at its
+-54 noise floor while the same meter peaked at +60 for a known-good UI frame
+minutes earlier.
+
+Swept `button_id` 0-3 and 15 with LOW_TO_HIGH/HIGH_TO_LOW actions: every
+combination accepted (reply status 0), every one silent. So the body format is
+right and something else gates it. The most likely explanation is that this
+firmware simply does not expose remote keying -- a reasonable thing for a
+handheld to refuse -- but a different command or an unlock step cannot be
+ruled out. `UNLOCK = 65` exists in the command set and has not been explored.
+
+**`allow_ptt` should therefore be treated as non-functional on this radio**,
+not merely experimental. The refusal path (`allow_ptt = false` -> `RPRT -4`)
+does work and is validated.
+
+Two real bugs fell out of the investigation and are fixed: the body was
+malformed (one byte instead of the two-byte PF record), and `SetPTT`
+discarded the reply status so the radio's rejection was invisible.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
 ### The bench UV-PRO does not decode the TS-2000 (one direction only)
