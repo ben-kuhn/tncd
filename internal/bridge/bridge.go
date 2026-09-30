@@ -1145,7 +1145,9 @@ func (b *Bridge) checkRXWedge(now time.Time) {
 			// operator to reset the adapter is wrong advice in the second case.
 			log.Printf("bridge: port %d still wedged after %d relinks -- relinking has restored no traffic; "+
 				"last relink (check the path to the station, then the TNC link: "+
-				"reset the Bluetooth adapter or power-cycle the TNC)",
+				"power-cycle the TNC, or just leave it alone for a few minutes -- "+
+				"a wedged Benshi SPP link has been seen to clear on its own, and "+
+				"resetting the host Bluetooth adapter does NOT help)",
 				port, b.relinks[port])
 		} else {
 			log.Printf("bridge: port %d RX wedged -- %.0fs silence with unacked TX; relinking (keeping session)",

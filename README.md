@@ -444,7 +444,7 @@ there is no unit ambiguity to resolve.
 without a rigctl client:
 
 ```bash
-tncd rig -c tncd.ini --port 0 probe          # confirm the radio answers the protocol
+tncd rig -c tncd.ini --port 0 probe          # identify the radio (vendor/product/hw/firmware)
 tncd rig -c tncd.ini --port 0 get-freq       # current frequency, Hz
 tncd rig -c tncd.ini --port 0 set-freq 145030000
 tncd rig -c tncd.ini --port 0 teardown       # undo a QSY made earlier in the SAME process

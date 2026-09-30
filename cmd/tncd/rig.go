@@ -142,10 +142,15 @@ func runRig(cfgPath string, port int, args []string) error {
 				"(use set-freq to tune the radio back by hand)")
 		}
 	case "probe":
-		if err := r.Probe(); err != nil {
-			return fmt.Errorf("rig: port %d: probe: radio did not answer: %w", port, err)
+		// Report what actually answered, not just that something did. The
+		// old version printed a bare "radio answered" while README claimed
+		// the command identifies the radio -- GET_DEV_INFO carries the
+		// identification, it was simply being discarded.
+		info, err := r.Probe()
+		if err != nil {
+			return fmt.Errorf("rig: port %d: probe: %w", port, err)
 		}
-		fmt.Println("radio answered")
+		fmt.Printf("radio answered: %s\n", info)
 	}
 	return nil
 }

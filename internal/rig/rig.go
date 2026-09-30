@@ -92,8 +92,13 @@ type Rig struct {
 
 	// orig is the channel record the first SetFreq of this session
 	// displaced, kept so Teardown can restore it verbatim.
-	orig      benshi.RFCh
-	origOK    bool
+	orig   benshi.RFCh
+	origOK bool
+
+	// ident caches the one-time GET_DEV_INFO answer. See Identify.
+	ident   benshi.DevInfo
+	identOK bool
+
 	closed    bool
 	closeErr  error
 	closeOnce sync.Once
@@ -412,15 +417,57 @@ const getDevInfoRequestByte = 0x03
 
 // Probe confirms the radio answers the protocol at all, so callers can fail
 // with a clear message rather than a timeout on every later command.
-func (r *Rig) Probe() error {
+func (r *Rig) Probe() (benshi.DevInfo, error) {
 	body, err := r.request(benshi.CmdGetDevInfo, []byte{getDevInfoRequestByte})
 	if err != nil {
-		return err
+		return benshi.DevInfo{}, err
 	}
-	if len(body) < 1 || body[0] != 0 {
-		return fmt.Errorf("rig: radio rejected GET_DEV_INFO")
+	return benshi.DecodeDevInfo(body)
+}
+
+// ErrNotBenshi reports a control channel that did not answer GET_DEV_INFO.
+//
+// It deliberately does NOT claim the radio is definitely not a Benshi one.
+// The only symptom available is silence, and a wedged link is silent too --
+// this project has bench-confirmed Bluetooth links that accept writes while
+// nothing reaches the radio. Callers should say both things.
+var ErrNotBenshi = errors.New("rig: radio did not answer GET_DEV_INFO")
+
+// Identify probes the radio once and caches the answer for the life of this
+// Rig, so repeated callers cost one round trip rather than one each.
+//
+// A capability-bit check was considered and rejected. GET_DEV_INFO carries
+// support_vfo and channel_count, and neither means what its name suggests:
+//
+//   - support_vfo reads 0 on a UV-PRO (firmware 146) that operates in VFO
+//     mode perfectly well. Gating on it would refuse a working radio.
+//   - channel_count reads 30 on a radio whose VFO record is channel 252.
+//     What it actually counts is unclear -- it is about the number the
+//     operator has programmed, and also about the size of one bank, and
+//     nothing here distinguishes those. What IS clear is that it is ~30
+//     while the VFO sits at 252, so it cannot derive a VFO floor under any
+//     of those readings, and a floor taken from it would sit far below the
+//     memories it is supposed to protect.
+//
+// Answering the command at all is the only trustworthy signal.
+func (r *Rig) Identify() (benshi.DevInfo, error) {
+	r.mu.Lock()
+	if r.identOK {
+		d := r.ident
+		r.mu.Unlock()
+		return d, nil
 	}
-	return nil
+	r.mu.Unlock()
+
+	d, err := r.Probe()
+	if err != nil {
+		return benshi.DevInfo{}, fmt.Errorf("%w (either this is not a Benshi radio, "+
+			"or its control link is not passing data): %v", ErrNotBenshi, err)
+	}
+	r.mu.Lock()
+	r.ident, r.identOK = d, true
+	r.mu.Unlock()
+	return d, nil
 }
 
 // request sends one command and waits for its reply.

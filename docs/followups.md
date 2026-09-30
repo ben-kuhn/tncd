@@ -87,16 +87,33 @@ fails the step loudly, since it writes a crasher and prints the input.
 All twelve `Fuzz*` targets in the tree are now listed in that step; five had never been
 fuzzed in CI at all, only replaying their seed corpus under plain `go test`.
 
-### 5. `kiss.Port.ControlChannel()` does not validate the radio speaks Benshi
-Enabling `[rigctl.N]` on a port whose radio is not a Benshi device binds a listener that
-accepts clients and answers `RPRT -5` (timeout) to every command, rather than failing at
-startup with a clear message. The operator sees a working-looking listener and a rig that
-never responds.
+### 5. Detecting whether a radio speaks Benshi — RESOLVED 2026-09-30
+Enabling `[rigctl.N]` on a non-Benshi port used to bind a listener that answered
+`RPRT -5` to everything, with no way to tell why.
 
-A startup probe (`GET_DEV_INFO`, which we know the radio answers) would let tncd refuse or
-warn at config time. Deferred because it needs a decision about whether a non-answering
-radio should be a hard config error — which would break startup for anyone who enables the
-key optimistically — or a logged warning.
+**The detection is `GET_DEV_INFO`** -- already sent by `Probe()`, which was throwing the
+reply body away. `benshi.DecodeDevInfo` now decodes it, `(*Rig).Identify` caches it for the
+life of the link, and `ErrNotBenshi` reports failure naming **both** possible causes,
+because silence genuinely cannot distinguish them: this project has bench-confirmed
+Bluetooth links that accept writes while delivering nothing. A timeout means "not a Benshi
+radio, OR the control link is not passing data", and claiming otherwise would be a guess.
+
+`tncd rig probe` now prints the identification (`vendor 6, product 260, hw 1, firmware
+146` from a UV-PRO) instead of a bare "radio answered" -- which also fixes a README claim
+that the command identifies the radio when it did not.
+
+**Capability bits were considered and rejected -- they lie.** `GET_DEV_INFO` carries
+`support_vfo` and `channel_count`, measured on a UV-PRO (firmware 146) as:
+
+- `support_vfo = 0` on a radio that had been operating in VFO mode all day. Gating on it
+  would refuse a working radio outright.
+- `channel_count = 30` on a radio whose VFO record is channel 252. Whether that counts
+  programmed channels or the size of one bank is unclear and nothing here distinguishes
+  them -- but under every reading it is ~30 while the VFO is at 252, so it cannot derive a
+  VFO floor, and a floor taken from it would sit far below the memories it is meant to
+  protect. `vfo_channel_min` keeps its conservative 251 default.
+
+Answering the command at all remains the only trustworthy signal.
 
 ### 6. bluez cannot parse the DB-50B's SDP record
 From the CarKit flap report (`docs/2026-09-24-bluetooth-flap-report.md` on main):
@@ -216,17 +233,12 @@ reverted. Skipping recognition feeds the Gaia frame's bytes to the KISS decoder
 as frame content and fabricates a spurious KISS frame, which is worse, and it
 would hit a real Benshi port whenever rig control happened to be detached.
 
-### 15. `tncd rig` cannot run while tncd is running, and says the wrong thing
-The one-shot CLI fails with:
-
-    rig: port 0: transport open failed: bluetooth: RegisterProfile: UUID already registered
-
-because a running tncd already holds the SPP profile registration at
-`/org/tncd/spp`. Two processes genuinely cannot share the Bluetooth link, so refusing is
-correct -- but the message describes a D-Bus implementation detail rather than the cause,
-and gives the operator nothing to act on. It should say that another tncd instance is using
-this port, and point at the rigctl listener (`[rigctl.N]`) as the way to reach a radio that
-is already in use. Hit repeatedly while running the rig-control OTA checklist 2026-09-29.
+### 15. `tncd rig` error when tncd is running — FIXED 2026-09-30
+~~The one-shot CLI failed with `bluetooth: RegisterProfile: UUID already registered`~~,
+which described a D-Bus detail rather than the cause. It now says the SPP profile is
+already registered because another tncd is running and holding the radio, and points at
+the `[rigctl.N]` listener as the way to reach a radio already in use. Refusing is still
+correct -- two processes cannot share one Bluetooth link.
 
 ## Radio / operational (not tncd bugs, but they cost hours)
 

@@ -543,6 +543,25 @@ func registerProfileOnce() error {
 			profilePath, sppUUID, opts,
 		); err != nil {
 			conn.Close()
+			// "Already Exists" means another process on this machine has
+			// already registered the SPP profile at this path -- almost
+			// always a running tncd. Saying so beats reporting a D-Bus
+			// detail the operator cannot act on: two processes genuinely
+			// cannot share one Bluetooth link, so the answer is to stop the
+			// other instance, or to reach the radio through its rigctl
+			// listener instead of the one-shot CLI.
+			// BlueZ reports this as org.bluez.Error.AlreadyExists with the
+			// message "UUID already registered"; match both shapes rather
+			// than one, since the wording is not API.
+			low := strings.ToLower(err.Error())
+			if strings.Contains(low, "alreadyexists") ||
+				strings.Contains(low, "already exists") ||
+				strings.Contains(low, "already registered") {
+				return fmt.Errorf("bluetooth: the SPP profile at %s is already registered, "+
+					"which means another tncd is running and holding this radio -- "+
+					"stop it first, or use its [rigctl.N] listener to reach the radio: %w",
+					profilePath, err)
+			}
 			return fmt.Errorf("bluetooth: RegisterProfile: %w", err)
 		}
 

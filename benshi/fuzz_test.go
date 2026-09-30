@@ -111,3 +111,17 @@ func FuzzDecodeSettings(f *testing.F) {
 		}
 	})
 }
+
+// FuzzDecodeDevInfo covers the device-info parser, whose input is
+// radio-sourced bytes.
+func FuzzDecodeDevInfo(f *testing.F) {
+	f.Add(goldenDevInfo)
+	f.Add([]byte{0x00})
+	f.Add([]byte{0x05, 1, 2, 3})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if _, err := DecodeDevInfo(data); err == nil && len(data) < 1+devInfoLen {
+			t.Fatalf("accepted a %d-byte body, shorter than the fixed payload", len(data))
+		}
+	})
+}

@@ -476,7 +476,7 @@ func TestProbeRejectsFailureStatus(t *testing.T) {
 		ch.reply(benshi.CmdGetDevInfo, []byte{0x01})
 	}()
 
-	if err := r.Probe(); err == nil {
+	if _, err := r.Probe(); err == nil {
 		t.Error("Probe must fail when the radio reports a failure status")
 	}
 }
@@ -807,7 +807,7 @@ func TestWriteTimeoutPoisonsAllSubsequentCalls(t *testing.T) {
 	if _, err := r.GetFreq(); !errors.Is(err, ErrClosed) {
 		t.Errorf("GetFreq after write-timeout poisoning = %v, want ErrClosed", err)
 	}
-	if err := r.Probe(); !errors.Is(err, ErrClosed) {
+	if _, err := r.Probe(); !errors.Is(err, ErrClosed) {
 		t.Errorf("Probe after write-timeout poisoning = %v, want ErrClosed", err)
 	}
 
@@ -838,7 +838,7 @@ func TestProbeEmitsBenlinkMatchingFrame(t *testing.T) {
 		})
 	}()
 
-	if err := r.Probe(); err != nil {
+	if _, err := r.Probe(); err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
 	w := ch.writes()
@@ -1032,4 +1032,74 @@ func TestReaderExitClosesRig(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Error("reader loop exited without closing the rig -- every later command would burn timeout + quiet period")
+}
+
+// TestProbeReturnsIdentification covers the fix for a README claim that was
+// false: `tncd rig probe` said it identified the radio while the CLI printed
+// a bare "radio answered" and threw the device info away.
+func TestProbeReturnsIdentification(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second, 0)
+	defer r.Close()
+
+	go func() {
+		ch.awaitWrite(t, 1)
+		ch.reply(benshi.CmdGetDevInfo, goldenDevInfoReply)
+	}()
+
+	info, err := r.Probe()
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if info.VendorID != 6 || info.ProductID != 260 || info.SoftVer != 146 {
+		t.Errorf("Probe = %+v, want vendor 6 product 260 firmware 146", info)
+	}
+}
+
+// Identify must cache: a second call costs no extra round trip, so a caller
+// checking "does this radio speak Benshi" per request does not add one.
+func TestIdentifyCachesAfterFirstProbe(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, time.Second, 0)
+	defer r.Close()
+
+	go func() {
+		ch.awaitWrite(t, 1)
+		ch.reply(benshi.CmdGetDevInfo, goldenDevInfoReply)
+	}()
+	if _, err := r.Identify(); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+	before := len(ch.writes())
+	if _, err := r.Identify(); err != nil {
+		t.Fatalf("second Identify: %v", err)
+	}
+	if got := len(ch.writes()); got != before {
+		t.Errorf("second Identify sent %d more frames, want 0 (it must be cached)", got-before)
+	}
+}
+
+// A radio that never answers must produce an error naming BOTH possibilities.
+// Silence cannot distinguish "not a Benshi radio" from "the link is wedged",
+// and this project has bench-confirmed links that accept writes while
+// delivering nothing.
+func TestIdentifyOnSilenceNamesBothCauses(t *testing.T) {
+	ch := newFakeChannel()
+	r := New(ch, 30*time.Millisecond, 0)
+	defer r.Close()
+
+	_, err := r.Identify()
+	if !errors.Is(err, ErrNotBenshi) {
+		t.Fatalf("err = %v, want ErrNotBenshi", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "not a Benshi radio") || !strings.Contains(msg, "not passing data") {
+		t.Errorf("error does not name both causes: %v", err)
+	}
+}
+
+// goldenDevInfoReply is the GET_DEV_INFO reply captured from a BTech UV-PRO
+// on 2026-09-29.
+var goldenDevInfoReply = []byte{
+	0x00, 0x06, 0x01, 0x04, 0x01, 0x00, 0x92, 0xd0, 0x68, 0x1e, 0x54,
 }
