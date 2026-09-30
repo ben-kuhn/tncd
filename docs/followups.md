@@ -6,34 +6,25 @@ become "forgotten".
 
 ## Code
 
-### 1. `writerLoop`'s KISS write path has no deadline
-`kiss/port.go`'s writer loop calls the transport's `Write` with no timeout. On Linux
-Bluetooth there is no `SetWriteDeadline` anywhere in `kiss/bluetooth_linux.go` (zero grep
-hits), and `checkTXDrain` samples the queue depth *before* each write, so it cannot abort a
-write already blocked inside the syscall.
+### 1. `writerLoop`'s KISS write path has no deadline — FIXED 2026-09-30
+~~`kiss/port.go`'s writer loop called the transport's `Write` with no timeout.~~ On Linux
+Bluetooth there is no `SetWriteDeadline`, and `checkTXDrain` samples the send queue
+*before* each write, so it could not abort one already blocked inside the syscall. A wedged
+radio therefore parked the writer loop indefinitely, the 64-deep TX queue filled, and every
+later frame was dropped while the port still reported healthy.
 
-A wedged radio can therefore block KISS TX indefinitely: the writer loop parks in the
-syscall, the 64-deep TX queue fills, and every subsequent frame is dropped. This project has
-bench-confirmed Bluetooth links that accept writes while nothing reaches the radio, so this
-is a demonstrated failure mode rather than a theoretical one.
+Bounded by `txWriteTimeout` (10s, matching `ctrlWriteTimeout` and Windows' `btSendTimeout`,
+so every write path in the tree is bounded the same way). On expiry the response is to
+**fail the port**, not merely error the frame: an abandoned mid-flight write leaves the byte
+stream in an unknown state, so reconnecting is the only honest recovery — the same
+conclusion `internal/rig` and the control-write path reached independently.
 
-Found while bounding the *rig-control* write path (which now has a 10s deadline and fails
-the port on expiry). The KISS path deliberately was not changed in that work because it is a
-much larger blast radius. Windows is already bounded via `btSendTimeout` (10s SO_SNDTIMEO);
-Linux is the gap.
+The abandoned goroutine keeps the tx slot until `Close` releases it, which is correct:
+nothing else may write while its bytes might still land. It is reclaimed when the fd
+closes, since Go's runtime poller interrupts in-flight I/O on close for pollable fds.
 
-Worth noting the fix is not simply "add a deadline": an abandoned mid-flight write leaves the
-byte stream in an unknown state, so the honest response to a timeout is to fail the port and
-reconnect, as both `internal/rig` and the rig-control write path concluded independently.
-
-One useful data point for whoever takes this on: a reviewer tested whether an abandoned
-blocked write actually leaks forever, using an `os.Pipe` against a real `bluetoothTransport`
-(its `file` is an `os.NewFile`-wrapped socket fd, so the proxy is faithful). `Close()` DOES
-unblock the blocked `Write` promptly — Go's runtime poller interrupts in-flight I/O on close
-for pollable fds. Windows already bounds its writes with a 10s `SO_SNDTIMEO`, and FreeBSD
-does an explicit `shutdown(SHUT_RDWR)` before close for the same reason. So no transport in
-the tree leaves such a goroutine truly unkillable, and a fail-the-port response should
-actually reclaim it rather than accumulating leaks.
+`TestTXWriteTimeoutFailsPortCleanly` covers it, and was confirmed to hang against the old
+code — which is precisely the bug.
 
 ### 2. `bluetoothTransport`'s open/closed guards are lockless — FIXED 2026-09-29
 ~~`Read`/`Write` check `bt.file == nil` with no synchronisation against a concurrent
@@ -165,60 +156,33 @@ resolving the wrong RFCOMM channel) rather than at any resync logic.
 Worth keeping: the parse failure returns before the relink counter is reset, so corrupt
 bytes do not refresh the futile-relink budget. That is correct and load-bearing.
 
-### 9. The demux does not handle compact (shared-FEND) KISS framing
-`kiss/demux.go` enters a KISS frame only on its own opening FEND and leaves on
-its own closing FEND. `framing.go`'s `Decoder` additionally treats a FEND seen
-while already in-frame as closing one frame AND opening the next -- the compact
-single-delimiter form -- and stays in-frame through it. So a peer emitting
-`C0 <f1> C0 <f2> C0` loses `f2`: after the middle FEND the demux is out of
-KISS, and `f2`'s first byte hits `scan`'s noise branch and is dropped, byte by
-byte, until the next FEND. Silent, with no counter.
+### 9. Compact (shared-FEND) KISS framing — FIXED 2026-09-30
+~~`kiss/demux.go` entered a KISS frame only on its own opening FEND and left on its own
+closing FEND~~, so a peer emitting `C0 <f1> C0 <f2> C0` lost `f2`: after the middle FEND the
+demux was out of KISS, and the next frame's first byte hit the noise branch and was dropped
+until the following FEND. Silent, with no counter, on every port.
 
-The demux is wired into EVERY port, so this would affect serial and TCP users
-who have nothing to do with Benshi radios.
+The first attempt at this was reverted because it broke
+`TestPortControlChannelKISSTXWriteNotCorruptedByConcurrentControlWrites`, which guards
+mixed KISS/control interleaving — a behaviour verified on air. **That test's premise was
+the problem, not the fix.** It used a raw `0xBB` byte run as a stand-in for a control
+write, and control writes are never raw bytes: they are always Gaia frames from
+`internal/rig`, self-identifying by their `0xFF 0x01` lead.
 
-**Not fixed, deliberately.** The obvious fix -- treat a byte following a
-closing FEND as the next frame's content -- breaks
-`TestPortControlChannelKISSTXWriteNotCorruptedByConcurrentControlWrites`, which
-guards mixed KISS/control interleaving on one stream. That interleaving is
-verified on air (two KISS frames plus a Gaia reply, confirmed by an independent
-Dire Wolf receiver); compact-form framing is **not** verified to be emitted by
-any TNC in the supported matrix. Trading a confirmed guarantee for a
-hypothetical one is the wrong way round.
+So the fix is now safe by construction:
 
-**What would settle it:** capture raw bytes from each supported TNC (KPC-3+,
-PK-232, TS-2000, Mobilinkd TNC4, UV-PRO) and check whether any emits
-`C0 <f1> C0 <f2> C0` rather than `C0 <f1> C0 C0 <f2> C0`. If one does, the
-demux needs real disambiguation rather than a blanket rule -- note that on a
-Benshi port every control frame starts `0xFF`, so "anything else after a
-closing FEND is KISS content" may in fact be safe there, and the test's raw
-`0xBB` stand-in for a control write does not reflect the real Gaia framing.
+- `portControlChannel.Write` **enforces** that a control write is a Gaia frame, turning the
+  convention the demux relies on into a checked invariant rather than an assumption.
+- `demux` carries a `sharedFEND` state across `Feed` calls; the byte after a closing FEND
+  decides. `0xFF` means a control frame, anything else means the FEND also opened the next
+  KISS frame — which is exactly what `framing.go`'s Decoder does ("this FEND is both the
+  closer and the opener").
+- The interleaving test now uses a real Gaia frame, so it tests what actually happens.
 
-`kiss/rawdump_test.go` (`TestRawDumpBluetooth`, skipped unless
-`TNCD_HW_BDADDR` is set) is the capture tool, and `analyseKISSFraming` in it
-does the counting. For a TCP/serial TNC, dump the socket instead -- the point
-is only to see the delimiters, which every decoder above the transport
-consumes.
-
-**Progress 2026-09-29 — Dire Wolf is CLEAR.** Four UI frames sent from a
-UV-PRO and received off air by Dire Wolf, read raw off its KISS TCP port:
-
-```
-FEND run lengths: [1, 2, 2, 2, 1]
-interior single FENDs with data on both sides: 0
-```
-
-Every frame carries its own opening and closing FEND, so each interior
-boundary is a doubled `C0 C0`. Dire Wolf -- the reference implementation and
-by far the most likely peer -- does **not** use the compact form, and the
-demux is correct for it. That removes most of the practical risk here, though
-it does not close the item.
-
-Still unknown: the **UV-PRO's own** framing, and the serial TNCs. Measuring
-the UV-PRO needs it to RECEIVE, and on the bench 2026-09-29 it decoded nothing
-from a TS-2000 transmitting on its frequency, while the reverse direction
-worked fine all session -- see the operational note below. The serial TNCs
-(KPC-3+, PK-232, TS-2000 internal) need someone to plug them in.
+Covered by `TestDemuxCompactSharedFENDFraming` and
+`TestDemuxGaiaAfterClosingFENDStillRouted`. Dire Wolf was separately measured as NOT using
+the compact form (FEND runs `[1,2,2,2,1]`), so this was never affecting the most likely
+peer — but it is a correctness fix for any TNC that does.
 
 ### 10. A stray `0xFF 0x01` can swallow a run of bytes on any port
 Same file: `scan` starts a Gaia candidate on `0xFF` regardless of whether a rig

@@ -213,11 +213,47 @@ func (p *Port) writerLoop() {
 				// up without blocking on a slot that may never free.
 				return
 			}
-			err := writeAll(p.tr, frame)
-			p.releaseTxSem()
-			if err != nil {
-				log.Printf("kiss: port %d TX write failed (%v) -- taking port offline", p.num, err)
+			// Bound the write. Transport.Write has no deadline of its own on
+			// Linux Bluetooth (no SetWriteDeadline anywhere in
+			// bluetooth_linux.go), and checkTXDrain samples the send queue
+			// BEFORE each write, so it cannot abort one already blocked
+			// inside the syscall. Without this a wedged radio parks the
+			// writer loop indefinitely, the 64-deep txCh fills, and every
+			// later frame is dropped while the port still reports healthy --
+			// a documented failure mode on this hardware, not a theoretical
+			// one. Windows already bounds its sends via SO_SNDTIMEO; this
+			// closes the Linux gap. Mirrors portControlChannel.Write.
+			result := make(chan error, 1) // buffered: never block reporting to an abandoned caller
+			go func() {
+				err := writeAll(p.tr, frame)
+				p.releaseTxSem()
+				result <- err
+			}()
+
+			timer := time.NewTimer(txWriteTimeout)
+			select {
+			case err := <-result:
+				timer.Stop()
+				if err != nil {
+					log.Printf("kiss: port %d TX write failed (%v) -- taking port offline", p.num, err)
+					p.failTX()
+					return
+				}
+			case <-timer.C:
+				// Do NOT retry or carry on: an abandoned mid-flight write
+				// leaves the byte stream in an unknown state, so the only
+				// honest response is to fail the port and let the bridge
+				// reconnect. The abandoned goroutine is reclaimed when
+				// Close closes the fd -- Go's runtime poller interrupts
+				// in-flight I/O on close for pollable fds -- and it holds
+				// the tx slot until then, which is correct: nothing else
+				// may write while its bytes might still land.
+				log.Printf("kiss: port %d TX write did not complete within %s -- "+
+					"failing port (transport state unknown)", p.num, txWriteTimeout)
 				p.failTX()
+				return
+			case <-p.stopCh:
+				timer.Stop()
 				return
 			}
 		case <-p.stopCh:
@@ -398,6 +434,15 @@ func (c *portControlChannel) Read(b []byte) (int, error) {
 // the real 10s -- see TestPortControlChannelWriteTimeoutFailsPortCleanly.
 var ctrlWriteTimeout = 10 * time.Second
 
+// txWriteTimeout bounds a single KISS TX write to the transport, for the
+// same reason ctrlWriteTimeout bounds a control write: on Linux Bluetooth
+// there is no write deadline, and a wedged radio would otherwise park the
+// writer loop forever. Matched to ctrlWriteTimeout and to Windows'
+// btSendTimeout so every write path in the tree is bounded the same way.
+//
+// A var, not a const, solely so tests can shorten it.
+var txWriteTimeout = 10 * time.Second
+
 // Write sends b (a caller-encoded Gaia frame) straight to the transport,
 // holding the tx slot for the duration so it cannot interleave with a
 // concurrent KISS TX write. It is synchronous -- it blocks until the
@@ -430,6 +475,18 @@ func (c *portControlChannel) Write(b []byte) (int, error) {
 		return 0, fmt.Errorf("kiss: port closed")
 	default:
 	}
+	// Enforce what the demultiplexer now relies on: every control write is a
+	// Gaia frame, so it is self-identifying on the wire by its 0xFF 0x01
+	// lead. demux uses that to tell a control frame from KISS content
+	// following a shared FEND; raw bytes here would be indistinguishable
+	// from the next KISS frame's payload and would corrupt it. internal/rig
+	// only ever sends encoded frames, so this cannot fire in practice -- it
+	// is here so the invariant is checked rather than assumed.
+	if len(b) < 2 || b[0] != gaiaStart || b[1] != gaiaVersion {
+		return 0, fmt.Errorf("kiss: control write must be a Gaia frame (leading %#02x %#02x), got % x",
+			gaiaStart, gaiaVersion, b[:min(len(b), 4)])
+	}
+
 	if !c.p.acquireTxSem() {
 		return 0, fmt.Errorf("kiss: port closed")
 	}

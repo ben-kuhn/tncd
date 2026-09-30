@@ -350,3 +350,69 @@ func TestDemuxFreshPortResyncsToFirstFEND(t *testing.T) {
 		t.Errorf("frame payload = %q, want %q", got, "clean")
 	}
 }
+
+// TestDemuxCompactSharedFENDFraming covers followup #9: a peer emitting the
+// compact single-delimiter form `C0 <f1> C0 <f2> C0`, where one FEND both
+// closes a frame and opens the next.
+//
+// framing.go's Decoder implements that form explicitly ("this FEND is both
+// the closer and the opener") and stays in-frame through it, so it is legal
+// KISS. The demux used to leave KISS on the closing FEND and then drop the
+// next frame's first byte as noise, byte by byte, until the following FEND --
+// silently losing every second frame, on every port, since the demux is
+// wired into all of them.
+func TestDemuxCompactSharedFENDFraming(t *testing.T) {
+	d := &demux{}
+
+	// Compact form: a single FEND between the two frames.
+	one := append([]byte{0x00}, []byte("one")...)
+	two := append([]byte{0x00}, []byte("two")...)
+	var raw []byte
+	raw = append(raw, FEND)
+	raw = append(raw, one...)
+	raw = append(raw, FEND) // closes "one" AND opens "two"
+	raw = append(raw, two...)
+	raw = append(raw, FEND)
+
+	frames := d.Feed(raw)
+	if len(frames) != 2 {
+		t.Fatalf("got %d frames from a compact-form stream, want 2 -- the second was dropped", len(frames))
+	}
+	if got := string(frames[0][1:]); got != "one" {
+		t.Errorf("frame 0 = %q, want %q", got, "one")
+	}
+	if got := string(frames[1][1:]); got != "two" {
+		t.Errorf("frame 1 = %q, want %q", got, "two")
+	}
+}
+
+// A Gaia frame following a closing FEND must still be recognised as control
+// traffic, not swallowed as compact-form KISS content. This is the
+// disambiguation the shared-FEND handling depends on, and why
+// portControlChannel.Write enforces that control writes are Gaia frames.
+func TestDemuxGaiaAfterClosingFENDStillRouted(t *testing.T) {
+	d := &demux{}
+	ctrl := make(chan []byte, 1)
+	if !d.attach(ctrl) {
+		t.Fatal("attach failed")
+	}
+	defer d.detach(ctrl)
+
+	raw := append([]byte{}, WrapData(0, []byte("kiss"))...)
+	raw = append(raw, gaiaFrame(0x00)...)
+	raw = append(raw, WrapData(0, []byte("more"))...)
+
+	frames := d.Feed(raw)
+	if len(frames) != 2 {
+		t.Fatalf("got %d KISS frames, want 2", len(frames))
+	}
+	select {
+	case got := <-ctrl:
+		if len(got) == 0 || got[0] != gaiaStart {
+			t.Errorf("control consumer got %x, want a Gaia frame", got)
+		}
+	default:
+		t.Error("the Gaia frame was not routed to the control consumer -- " +
+			"shared-FEND handling swallowed it as KISS content")
+	}
+}

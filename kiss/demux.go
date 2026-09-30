@@ -61,6 +61,14 @@ type demux struct {
 	gaiaBuf   []byte
 	gaiaTotal int // total length of gaiaBuf once its header is read; 0 until then
 
+	// sharedFEND is true immediately after a KISS frame's closing FEND,
+	// while it is still undecided whether that FEND also OPENED the next
+	// frame (the compact single-delimiter form framing.go's Decoder
+	// implements) or merely closed one. The byte that follows decides, and
+	// it may arrive in a later Feed, so the state is carried across calls
+	// rather than peeked at. See scan.
+	sharedFEND bool
+
 	mu   sync.Mutex
 	ctrl chan []byte // non-nil while a control consumer is attached
 }
@@ -108,6 +116,9 @@ func (d *demux) Feed(p []byte) [][]byte {
 
 // scan looks at one byte outside any open frame and decides what it starts.
 func (d *demux) scan(p []byte, i int) (int, [][]byte) {
+	shared := d.sharedFEND
+	d.sharedFEND = false
+
 	switch p[i] {
 	case FEND:
 		d.inKISS = true
@@ -116,6 +127,22 @@ func (d *demux) scan(p []byte, i int) (int, [][]byte) {
 		d.gaiaBuf = []byte{gaiaStart}
 		return i + 1, nil
 	default:
+		if shared {
+			// The preceding FEND closed a frame AND opens this one.
+			// framing.go's Decoder documents exactly that ("this FEND is
+			// both the closer and the opener") and stays in-frame through
+			// it, so the compact single-delimiter form is legal KISS.
+			// Dropping this byte -- what this demux used to do -- silently
+			// lost every second frame from such a peer, on every port.
+			//
+			// Safe because a control frame cannot be mistaken for KISS
+			// content here: every control write is a Gaia frame leading
+			// 0xFF 0x01 (enforced in portControlChannel.Write), and 0xFF is
+			// handled by the case above. kissDec is already in-frame from
+			// that FEND, so resuming the run is all that is needed.
+			d.inKISS = true
+			return d.feedKISSRun(p, i)
+		}
 		// Neither a KISS delimiter nor a plausible Gaia start: stray noise,
 		// dropped. It must NOT be handed to kissDec: framing.go's Decoder
 		// never resets its inFrame flag once the first FEND is seen (only an
@@ -135,6 +162,9 @@ func (d *demux) feedKISSRun(p []byte, i int) (int, [][]byte) {
 		if p[j] == FEND {
 			j++
 			d.inKISS = false
+			// Undecided: this FEND may also open the next frame. scan
+			// resolves it from the byte that follows, whenever it arrives.
+			d.sharedFEND = true
 			break
 		}
 		j++

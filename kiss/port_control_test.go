@@ -306,7 +306,13 @@ func TestPortControlChannelKISSTXWriteNotCorruptedByConcurrentControlWrites(t *t
 
 	const rounds = 50
 	kissPayload := bytes.Repeat([]byte{0xAA}, 20)
-	ctrlPayload := bytes.Repeat([]byte{0xBB}, 12)
+	// A REAL Gaia frame, not a raw byte run. Control writes are always
+	// encoded frames from internal/rig -- portControlChannel.Write now
+	// enforces that -- and the distinction matters: the demux tells a
+	// control frame from KISS content following a shared FEND by its
+	// 0xFF 0x01 lead. A raw 0xBB run was never something this code could
+	// emit, and testing against one made a correct fix look unsafe.
+	ctrlPayload := gaiaFrame(0x00)
 	kissFrame := WrapData(0, kissPayload)
 
 	// Drain the far end and reconstruct with a demux, not a bare Decoder:
@@ -334,7 +340,7 @@ func TestPortControlChannelKISSTXWriteNotCorruptedByConcurrentControlWrites(t *t
 			if n > 0 {
 				total += n
 				for _, bb := range buf[:n] {
-					if bb != 0xAA && bb != 0xBB && bb != FEND && bb != 0x00 {
+					if bb != 0xAA && bb != FEND && bb != 0x00 && !inGaia(ctrlPayload, bb) {
 						t.Errorf("unexpected byte %#x on the wire (neither KISS nor control payload)", bb)
 					}
 				}
@@ -374,4 +380,16 @@ func TestPortControlChannelKISSTXWriteNotCorruptedByConcurrentControlWrites(t *t
 	if ctrlRuns != rounds {
 		t.Fatalf("sent %d control writes, want %d", ctrlRuns, rounds)
 	}
+}
+
+// inGaia reports whether b is a byte of the control frame under test, so the
+// reconstruction loop can tell "a control byte, correctly routed away" from
+// "an unexpected byte on the wire".
+func inGaia(frame []byte, b byte) bool {
+	for _, f := range frame {
+		if f == b {
+			return true
+		}
+	}
+	return false
 }

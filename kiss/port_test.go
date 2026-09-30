@@ -457,3 +457,47 @@ func TestWriterZeroProgressTakesPortOffline(t *testing.T) {
 		t.Fatal("zero-progress writer did not take the port offline")
 	}
 }
+
+// TestTXWriteTimeoutFailsPortCleanly covers followup #1: a KISS TX write that
+// never returns must not park the writer loop forever.
+//
+// Transport.Write has no deadline on Linux Bluetooth, and checkTXDrain
+// samples the send queue BEFORE each write, so it cannot abort one already
+// blocked in the syscall. Without a bound, a wedged radio silently fills the
+// 64-deep TX queue and every later frame is dropped while the port still
+// reports healthy -- a documented failure mode on this hardware.
+//
+// The correct response is to fail the PORT, not just error the frame: an
+// abandoned mid-flight write leaves the byte stream in an unknown state, so
+// reconnecting is the only honest recovery.
+func TestTXWriteTimeoutFailsPortCleanly(t *testing.T) {
+	orig := txWriteTimeout
+	txWriteTimeout = 50 * time.Millisecond
+	defer func() { txWriteTimeout = orig }()
+
+	tr := newBlockingWriteTransport()
+	defer close(tr.unblock) // release the parked goroutine so it does not outlive the test
+
+	off := make(chan int, 1)
+	p := NewPort(0, tr, Params{}, func(RXFrame) {}, func(n int) { off <- n })
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Close()
+
+	p.Send([]byte{0x00, 0xAA, 0xBB})
+
+	select {
+	case n := <-off:
+		if n != 0 {
+			t.Errorf("port %d reported offline, want port 0", n)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a blocked TX write never failed the port -- the writer loop is parked forever " +
+			"and the TX queue will fill silently")
+	}
+
+	if p.Online() {
+		t.Error("port still reports Online after its write timed out")
+	}
+}
