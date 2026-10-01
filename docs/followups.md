@@ -260,15 +260,43 @@ is accepted with status 0. Note HTCommander sends one byte, so its
 `doProgFunc` would not work on this firmware either -- and it never uses it
 for PTT, only `toggleAbCh`.
 
-Two leads remain:
+**The mechanism is audio streaming, not a command.** HTCommander's voice PTT
+does not use the Gaia protocol at all:
 
-1. **Lock state.** HTCommander guards every `doProgFunc` with
-   `if (_lockState?.isLocked == true) return;`, and `UNLOCK` is command 65.
-   A locked radio accepting commands and ignoring them would fit exactly what
-   was measured.
-2. **Audio-path keying.** The vendor app is a voice app: holding its PTT may
-   simply open an audio stream, with the radio keying because data is
-   arriving, not because a discrete command was sent.
+```dart
+Future<void> _sendAudio(Uint8List data) async {
+  await BluetoothClassicMacOS.instance.sendAudio(macAddress, data);
+}
+```
+
+It streams PCM over a separate Bluetooth audio channel, and the radio keys
+because audio is arriving. That is why HTCommander enumerates `mainPtt` and
+never calls it.
+
+tncd's own logs confirm the radio offers that path, on every single connect:
+
+```
+bluetooth: ... dropped audio profile 0000111e  (Handsfree)
+bluetooth: ... dropped audio profile 0000111f  (Handsfree Audio Gateway)
+```
+
+tncd deliberately discards both. So the consistent picture is:
+
+| path | how it keys |
+|---|---|
+| vendor app / HTCommander voice | stream audio -> radio keys |
+| tncd packet TX (works today) | send KISS data -> radio keys |
+| `DO_PROG_FUNC(MAIN_PTT)` | accepted (SUCCESS), does nothing |
+
+**The radio keys when given something to transmit.** There is no "key with
+nothing to send", which is exactly what `rigctl set_ptt 1` asks for. Supporting
+it would mean tncd holding open an HFP audio channel and streaming silence --
+a different kind of program from a KISS bridge, and it would fight the audio
+profiles tncd currently drops on purpose.
+
+`UNLOCK` (65) and the lock state remain untested and could still turn out to
+gate `DO_PROG_FUNC`, but the audio finding makes that a less likely
+explanation than "this command is enumerated and not implemented".
 
 **Lower stakes than it looks.** tncd already keys this radio for every packet
 frame -- the radio transmits when given data. Discrete PTT only matters for

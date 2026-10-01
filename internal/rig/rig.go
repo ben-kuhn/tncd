@@ -353,13 +353,19 @@ const htStatusTXBit = 0x40
 // now well-formed (the radio answers status 0) and a non-zero status is
 // returned as an error.
 //
-// It still does not transmit, and the reason is NOT that the firmware lacks
-// remote keying -- the operator keys this radio from the vendor's own app.
-// button_id 0-3 and 15 were swept with LOW_TO_HIGH/HIGH_TO_LOW; all accepted,
-// all silent. Two leads remain unexplored: the radio's lock state (HTCommander
-// guards every doProgFunc with `if (_lockState?.isLocked) return`, and UNLOCK
-// is command 65), and the possibility that the vendor app keys by opening an
-// audio stream rather than by any discrete command. See docs/followups.md.
+// It still does not transmit, and the reason is not that the radio cannot be
+// keyed remotely -- it is that keying is not a command on this protocol.
+// HTCommander's voice PTT streams PCM over a separate Bluetooth audio channel
+// (`BluetoothClassicMacOS.instance.sendAudio`), which is why it enumerates
+// mainPtt and never calls it; the radio keys because audio is arriving. tncd
+// sees the same path advertised and drops it on every connect ("dropped audio
+// profile 0000111e/0000111f" -- Handsfree and Handsfree AG).
+//
+// So the radio keys when given something to transmit, and tncd's packet TX
+// already relies on exactly that. What has no mechanism here is "key with
+// nothing to send", which is what rigctl's set_ptt asks for. Supporting it
+// would mean holding an HFP channel open and streaming silence. See
+// docs/followups.md #17.
 //
 // PFActionType's LOW_TO_HIGH/HIGH_TO_LOW are used for on/off, which means
 // the protocol does have distinct press and release rather than the toggle
