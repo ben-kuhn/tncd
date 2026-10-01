@@ -20,11 +20,24 @@ import (
 // the wrong band -- so ParseUint (not ParseFloat) is the whole guard.
 func parseRigArgs(args []string) (string, uint32, error) {
 	if len(args) == 0 {
-		return "", 0, fmt.Errorf("rig: need one of get-freq, set-freq <hz>, teardown, probe")
+		return "", 0, fmt.Errorf("rig: need one of get-freq, set-freq <hz>, teardown, probe, session-hold [seconds]")
 	}
 	switch args[0] {
 	case "get-freq", "teardown", "probe":
 		return args[0], 0, nil
+	case "session-hold":
+		// Optional hold time in seconds. A session cannot span two
+		// invocations -- what to restore lives in memory, by design, since a
+		// state file could go stale or outlive the config that produced it --
+		// so acquire, hold, and release all happen here.
+		if len(args) < 2 {
+			return "session-hold", defaultSessionHoldSeconds, nil
+		}
+		secs, err := strconv.ParseUint(args[1], 10, 16)
+		if err != nil || secs == 0 {
+			return "", 0, fmt.Errorf("rig session-hold: %q is not a number of seconds", args[1])
+		}
+		return "session-hold", uint32(secs), nil
 	case "set-freq":
 		if len(args) < 2 {
 			return "", 0, fmt.Errorf("rig set-freq: need a frequency in Hz")
@@ -141,6 +154,10 @@ func runRig(cfgPath string, port int, args []string) error {
 			fmt.Println("nothing to restore: no frequency was changed in this invocation " +
 				"(use set-freq to tune the radio back by hand)")
 		}
+	case "session-hold":
+		if err := runSessionHold(r, port, time.Duration(hz)*time.Second); err != nil {
+			return err
+		}
 	case "probe":
 		// Report what actually answered, not just that something did. The
 		// old version printed a bare "radio answered" while README claimed
@@ -155,6 +172,40 @@ func runRig(cfgPath string, port int, args []string) error {
 	return nil
 }
 
+// defaultSessionHoldSeconds is long enough to read the radio's front panel and
+// see what changed, which is the point of the command.
+const defaultSessionHoldSeconds = 15
+
+// runSessionHold acquires managed session settings, holds them so the operator
+// can see the radio change, and releases them.
+//
+// Acquire and release have to happen in ONE invocation: what to put back is held
+// in memory by deliberate design, so a separate `session-release` process would
+// have nothing to restore from. Holding in between is what makes this testable
+// against real firmware -- the operator watches dual watch go off, the radio
+// switch to VFO mode and APRS stop, then watches all three come back.
+func runSessionHold(r *rig.Rig, port int, hold time.Duration) error {
+	if err := r.AcquireSession(); err != nil {
+		return fmt.Errorf("rig: port %d: session-hold: acquire: %w", port, err)
+	}
+	if hz, err := r.GetFreq(); err == nil {
+		fmt.Printf("session acquired; radio on %d Hz -- holding %s\n", hz, hold)
+	} else {
+		fmt.Printf("session acquired -- holding %s\n", hold)
+	}
+	time.Sleep(hold)
+
+	// Release even if the operator interrupts the wait, and report a failure
+	// loudly: writes reach the radio's NVRAM, so an unreleased session leaves
+	// the radio reconfigured until something puts it back.
+	if err := r.ReleaseSession(); err != nil {
+		return fmt.Errorf("rig: port %d: session-hold: release FAILED, the radio is still "+
+			"in packet configuration: %w", port, err)
+	}
+	fmt.Println("session released; radio restored")
+	return nil
+}
+
 // runRigCommand implements the "rig" subcommand: parse -c/--port and the verb,
 // run it, and report failures with an exit code. It stays a thin wrapper
 // around runRig so runRig itself -- the part with actual behavior -- takes
@@ -165,7 +216,7 @@ func runRigCommand(args []string) int {
 	fs.String("config", "", "Configuration file (INI format) (long form of -c)")
 	port := fs.Int("port", 0, "Port number to control (index into [client.N] sections, default 0)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: tncd rig -c FILE [--port N] get-freq|set-freq HZ|teardown|probe\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tncd rig -c FILE [--port N] get-freq|set-freq HZ|teardown|probe|session-hold [seconds]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

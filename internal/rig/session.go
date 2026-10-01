@@ -93,7 +93,7 @@ func (r *Rig) AcquireSession() error {
 	case err != nil:
 		return err
 	case !usable:
-		vfo, err := r.findVFOChannel()
+		vfo, err := r.findVFOChannel(set.ChannelB)
 		if err != nil {
 			return err
 		}
@@ -244,26 +244,50 @@ func (r *Rig) channelIsTunable(id byte) (bool, error) {
 }
 
 // findVFOChannel locates the unnamed scratch record the radio uses for frequency
-// mode, by scanning from the VFO floor upward and taking the first record SetFreq
-// would accept.
+// mode, scanning from the VFO floor upward.
 //
 // Discovering it beats hardcoding 252: the floor is already configurable because
 // other Benshi variants are not confirmed to number their VFOs the same way, and
-// a record found by SetFreq's own criteria is one SetFreq will then accept. A
-// record the radio refuses to read is skipped rather than treated as fatal --
-// unprogrammed slots in this range are expected.
-func (r *Rig) findVFOChannel() (byte, error) {
+// a record accepted by SetFreq's own three guards is one SetFreq will then
+// accept. A record the radio refuses to read is skipped rather than treated as
+// fatal -- unprogrammed slots in this range are expected.
+//
+// Among usable records it PREFERS one already holding a frequency. A UV-PRO
+// offers two: 251, unnamed and simplex but reading 0 Hz, and 252, which holds a
+// real frequency and is the record the radio's frequency mode demonstrably
+// operates on -- it tracked the front-panel dial while a separate frequency-mode
+// register went stale. Taking the first match in id order would pick 251: legal,
+// but it points the VFO at an uninitialised record instead of the live one, which
+// the operator would see as the radio briefly showing 0 MHz.
+//
+// The record the B VFO points at is excluded, so managing A never silently makes
+// the two VFOs share one record.
+func (r *Rig) findVFOChannel(excludeB byte) (byte, error) {
+	var fallback byte
+	haveFallback := false
 	for id := r.vfoMin; id <= 255; id++ {
-		ok, err := r.channelIsTunable(byte(id))
+		if byte(id) == excludeB {
+			continue
+		}
+		ch, err := r.readChannel(byte(id))
 		if err != nil {
 			if errors.Is(err, benshi.ErrRadioRejected) {
 				continue
 			}
 			return 0, err
 		}
-		if ok {
+		if ch.Name() != "" || ch.TXFreqHz() != ch.RXFreqHz() {
+			continue
+		}
+		if ch.RXFreqHz() != 0 {
 			return byte(id), nil
 		}
+		if !haveFallback {
+			fallback, haveFallback = byte(id), true
+		}
+	}
+	if haveFallback {
+		return fallback, nil
 	}
 	return 0, fmt.Errorf("%w at or above channel %d -- every record there is named, split, "+
 		"or unreadable, so the radio cannot be moved off its memory channel; "+
@@ -329,4 +353,47 @@ func status(body []byte) byte {
 		return 255
 	}
 	return body[0]
+}
+
+// SessionState is everything a release needs: what AcquireSession displaced and
+// what SetFreq displaced. It is a value so it can OUTLIVE the Rig that produced
+// it.
+//
+// That matters because a rig is rebuilt whenever its port reconnects. Without
+// this, a port that dropped mid-session would come back with a fresh Rig holding
+// no record of the operator's dual-watch setting or memory channel -- and since
+// these writes reach NVRAM, re-acquiring on the new rig would capture tncd's own
+// packet settings as the "original" and strand the radio off their memory
+// permanently. Carrying the state across the swap is the difference between a
+// restore and a silent loss.
+type SessionState struct {
+	sess   session
+	orig   benshi.RFCh
+	origOK bool
+}
+
+// Held reports whether this state has anything to put back.
+func (s SessionState) Held() bool { return s.sess.held || s.origOK }
+
+// SessionState captures what this rig has displaced, for handing to a
+// replacement rig after a reconnect.
+func (r *Rig) SessionState() SessionState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return SessionState{sess: r.sess, orig: r.orig, origOK: r.origOK}
+}
+
+// AdoptSession takes over responsibility for restoring what another rig
+// displaced. It is a no-op if this rig has already displaced something itself,
+// so a mid-session reconnect cannot overwrite live state with stale state.
+func (r *Rig) AdoptSession(s SessionState) {
+	if !s.Held() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sess.held || r.origOK {
+		return
+	}
+	r.sess, r.orig, r.origOK = s.sess, s.orig, s.origOK
 }

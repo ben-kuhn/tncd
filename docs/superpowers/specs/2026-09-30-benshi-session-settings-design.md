@@ -1,7 +1,11 @@
 # Benshi session settings — design
 
-**Status**: designed 2026-09-30, NOT implemented. One question is blocked on a
-bench measurement (see "Open: what APRS actually is").
+**Status**: designed 2026-09-30. Record patchers, acquire/release and the
+`tncd rig session-hold` diagnostic are IMPLEMENTED and validated on a UV-PRO
+(2026-10-01): a full acquire-hold-release cycle left all five readable records
+byte-identical to the pre-session baseline. Every measurement the design was
+blocked on is done. **Remaining: the automatic trigger points** -- refcounting
+AX.25 sessions and rigctl clients so acquire/release happen without the CLI.
 
 **Goal**: put a Benshi radio into a state where AX.25 packet actually works for
 the duration of a connected-mode session, and put it back afterwards.

@@ -289,6 +289,16 @@ func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
 	// Either nothing cached yet, or the cached entry belonged to a port
 	// instance this one has replaced (a reconnect) -- either way, drop
 	// whatever's there before attaching a new consumer.
+	//
+	// Carry any displaced session state across the swap first. Rig control's
+	// writes reach the radio's NVRAM, so a port that dropped mid-session must
+	// not come back with a rig that has forgotten what to put back: a fresh
+	// acquire would then capture tncd's own packet settings as the
+	// "original" and strand the operator off their memory channel for good.
+	var carried rig.SessionState
+	if port < len(b.rigs) && b.rigs[port].r != nil {
+		carried = b.rigs[port].r.SessionState()
+	}
 	b.invalidateRig(port)
 	ch, err := kp.ControlChannel()
 	if err != nil {
@@ -299,6 +309,7 @@ func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
 		vfoMin = b.cfg.Ports[port].VFOChannelMin
 	}
 	r := rig.New(ch, rigRequestTimeout, vfoMin)
+	r.AdoptSession(carried)
 	if port < len(b.rigs) {
 		b.rigs[port] = rigSlot{kp: kp, r: r}
 	}

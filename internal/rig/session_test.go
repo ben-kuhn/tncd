@@ -26,6 +26,10 @@ type fakeRadio struct {
 	// testing that a best-effort restore carries on past a failure.
 	rejectWrite map[benshi.Command]bool
 	writes      map[benshi.Command]int
+	// seen is how many of the CURRENT channel's writes have been answered. A
+	// swap resets it, so a replacement rig's first request is served rather
+	// than skipped as already-seen.
+	seen int
 
 	done chan struct{}
 }
@@ -50,67 +54,91 @@ func newFakeRadio(t *testing.T, settings, bss []byte, chans map[byte][]byte) *fa
 
 func (fr *fakeRadio) stop() { close(fr.done) }
 
+// swapChannel replaces the control channel while keeping the radio's state,
+// which is what a port reconnect looks like from the rig's side: same radio,
+// brand new channel and a brand new Rig attached to it.
+func (fr *fakeRadio) swapChannel() *fakeChannel {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	fr.ch = newFakeChannel()
+	fr.seen = 0
+	return fr.ch
+}
+
+func (fr *fakeRadio) channel() *fakeChannel {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	return fr.ch
+}
+
 func (fr *fakeRadio) serve() {
-	seen := 0
 	for {
 		select {
 		case <-fr.done:
 			return
 		default:
 		}
-		w := fr.ch.writes()
+		fr.mu.Lock()
+		ch, seen := fr.ch, fr.seen
+		fr.mu.Unlock()
+
+		w := ch.writes()
 		if len(w) <= seen {
 			time.Sleep(time.Millisecond)
 			continue
 		}
 		m, err := benshi.DecodeMessage(w[seen][4:])
-		seen++
+		fr.mu.Lock()
+		if fr.ch == ch {
+			fr.seen = seen + 1
+		}
+		fr.mu.Unlock()
 		if err != nil {
 			continue
 		}
-		fr.handle(m)
+		fr.handle(ch, m)
 	}
 }
 
-func (fr *fakeRadio) handle(m benshi.Message) {
+func (fr *fakeRadio) handle(ch *fakeChannel, m benshi.Message) {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 	ok := []byte{0x00}
 	rejected := []byte{0x05} // INVALID_PARAMETER
 	switch m.Command {
 	case benshi.CmdReadSettings:
-		fr.ch.reply(m.Command, append(ok, fr.settings...))
+		ch.reply(m.Command, append(ok, fr.settings...))
 	case benshi.CmdWriteSettings:
 		fr.writes[m.Command]++
 		if fr.rejectWrite[m.Command] {
-			fr.ch.reply(m.Command, rejected)
+			ch.reply(m.Command, rejected)
 			return
 		}
 		fr.settings = append([]byte{}, m.Body...)
-		fr.ch.reply(m.Command, ok)
+		ch.reply(m.Command, ok)
 	case benshi.CmdReadBSSSettings:
-		fr.ch.reply(m.Command, append(ok, fr.bss...))
+		ch.reply(m.Command, append(ok, fr.bss...))
 	case benshi.CmdWriteBSSSettings:
 		fr.writes[m.Command]++
 		if fr.rejectWrite[m.Command] {
-			fr.ch.reply(m.Command, rejected)
+			ch.reply(m.Command, rejected)
 			return
 		}
 		fr.bss = append([]byte{}, m.Body...)
-		fr.ch.reply(m.Command, ok)
+		ch.reply(m.Command, ok)
 	case benshi.CmdReadRFCh:
 		rec, found := fr.chans[m.Body[0]]
 		if !found {
-			fr.ch.reply(m.Command, rejected)
+			ch.reply(m.Command, rejected)
 			return
 		}
-		fr.ch.reply(m.Command, append(ok, rec...))
+		ch.reply(m.Command, append(ok, rec...))
 	case benshi.CmdWriteRFCh:
 		fr.writes[m.Command]++
 		fr.chans[m.Body[0]] = append([]byte{}, m.Body...)
-		fr.ch.reply(m.Command, []byte{0x00, m.Body[0]})
+		ch.reply(m.Command, []byte{0x00, m.Body[0]})
 	default:
-		fr.ch.reply(m.Command, rejected)
+		ch.reply(m.Command, rejected)
 	}
 }
 
@@ -462,4 +490,146 @@ func TestAcquireSessionOrdersTheModeSwitchBeforeAnyQSY(t *testing.T) {
 		t.Errorf("the operator's memory channel was written:\n got  %s\n want %s",
 			hex.EncodeToString(mem), hex.EncodeToString(fakeNamedRecord))
 	}
+}
+
+// emptyVFORecord is an unnamed, simplex record reading 0 Hz -- what a UV-PRO's
+// channel 251 actually contains next to the live VFO at 252.
+var emptyVFORecord = []byte{
+	0xfb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x14, 0x00,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+}
+
+// TestFindVFOChannelPrefersTheLiveRecord: a UV-PRO offers 251 (unnamed, simplex,
+// 0 Hz) and 252 (holding a real frequency, and the record the radio's frequency
+// mode actually operates on). Taking the first match in id order picks 251, which
+// points the VFO at an uninitialised record -- the operator sees the radio
+// briefly show 0 MHz.
+func TestFindVFOChannelPrefersTheLiveRecord(t *testing.T) {
+	fr := newFakeRadio(t, mustSettings(t, 5, benshi.DoubleChannelOff), mustBSSFixture(t, false),
+		map[byte][]byte{
+			5:   append([]byte{}, fakeNamedRecord...),
+			251: append([]byte{}, emptyVFORecord...),
+			252: append([]byte{}, fakeVFORecord...),
+		})
+	r := New(fr.ch, 2*time.Second, 0)
+	t.Cleanup(func() { r.Close(); fr.stop() })
+
+	if err := r.AcquireSession(); err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	if got := fr.currentSettings(t).ChannelA; got != 252 {
+		t.Errorf("channel_a = %d, want 252 (the record holding a frequency), not an empty one", got)
+	}
+}
+
+// TestFindVFOChannelFallsBackToAnEmptyRecord: preferring a live record must not
+// become a requirement for one. A radio whose only scratch record reads 0 Hz is
+// still usable -- the QSY is about to write a frequency into it anyway.
+func TestFindVFOChannelFallsBackToAnEmptyRecord(t *testing.T) {
+	fr := newFakeRadio(t, mustSettings(t, 5, benshi.DoubleChannelOff), mustBSSFixture(t, false),
+		map[byte][]byte{
+			5:   append([]byte{}, fakeNamedRecord...),
+			251: append([]byte{}, emptyVFORecord...),
+		})
+	r := New(fr.ch, 2*time.Second, 0)
+	t.Cleanup(func() { r.Close(); fr.stop() })
+
+	if err := r.AcquireSession(); err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	if got := fr.currentSettings(t).ChannelA; got != 251 {
+		t.Errorf("channel_a = %d, want the empty-but-usable record 251", got)
+	}
+}
+
+// TestFindVFOChannelSkipsTheBVFOsRecord: managing A must never silently point
+// both VFOs at one record. Here the only record holding a frequency is the one B
+// is already using, so A has to take the other one.
+func TestFindVFOChannelSkipsTheBVFOsRecord(t *testing.T) {
+	settings := mustSettings(t, 5, benshi.DoubleChannelOff)
+	rec, err := benshi.ParseSettingsRec(append([]byte{0x00}, settings...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Point B at 252, the live VFO record.
+	bOn252 := rec.WithChannelA(5).Bytes()
+	bOn252[0] = (bOn252[0] & 0xF0) | 0x0C // channel_b low nibble = 12
+	bOn252[9] = (bOn252[9] & 0xF0) | 0x0F // channel_b high nibble = 15
+	parsed, err := benshi.ParseSettingsRec(append([]byte{0x00}, bOn252...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Settings().ChannelB; got != 252 {
+		t.Fatalf("fixture setup: channel_b = %d, want 252 -- test would prove nothing", got)
+	}
+
+	fr := newFakeRadio(t, bOn252, mustBSSFixture(t, false), map[byte][]byte{
+		5:   append([]byte{}, fakeNamedRecord...),
+		251: append([]byte{}, emptyVFORecord...),
+		252: append([]byte{}, fakeVFORecord...),
+	})
+	r := New(fr.ch, 2*time.Second, 0)
+	t.Cleanup(func() { r.Close(); fr.stop() })
+
+	if err := r.AcquireSession(); err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	if got := fr.currentSettings(t).ChannelA; got != 251 {
+		t.Errorf("channel_a = %d, want 251 -- 252 is the B VFO's record", got)
+	}
+}
+
+// TestAdoptSessionCarriesStateAcrossARigSwap: a rig is rebuilt when its port
+// reconnects, and these writes reach NVRAM. A replacement rig that forgot what to
+// put back would, on the next acquire, capture tncd's own packet settings as the
+// "original" and strand the operator off their memory channel permanently.
+func TestAdoptSessionCarriesStateAcrossARigSwap(t *testing.T) {
+	before := mustSettings(t, 5, benshi.DoubleChannelB)
+	r, fr := newSessionRig(t, before, mustBSSFixture(t, true))
+	if err := r.AcquireSession(); err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	carried := r.SessionState()
+	if !carried.Held() {
+		t.Fatal("SessionState reports nothing held after an acquire that changed three things")
+	}
+
+	// The port reconnects: same radio, brand new Rig on a new control channel.
+	r.Close()
+	r2 := New(fr.swapChannel(), 2*time.Second, 0)
+	t.Cleanup(func() { r2.Close() })
+	r2.AdoptSession(carried)
+	if !r2.SessionHeld() {
+		t.Fatal("the replacement rig does not report the adopted session as held")
+	}
+
+	if err := r2.ReleaseSession(); err != nil {
+		t.Fatalf("ReleaseSession on the replacement rig: %v", err)
+	}
+	if !bytes.Equal(fr.settingsBytes(), before) {
+		t.Errorf("settings not restored across the swap:\n got  %s\n want %s",
+			hex.EncodeToString(fr.settingsBytes()), hex.EncodeToString(before))
+	}
+	if !fr.aprsOn(t) {
+		t.Error("APRS not restored across the swap")
+	}
+}
+
+// TestAdoptSessionDoesNotOverwriteLiveState: a reconnect must not let stale state
+// clobber a session the replacement rig has already started.
+func TestAdoptSessionDoesNotOverwriteLiveState(t *testing.T) {
+	r, fr := newSessionRig(t, mustSettings(t, 5, benshi.DoubleChannelB), mustBSSFixture(t, false))
+	if err := r.AcquireSession(); err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	live := r.SessionState()
+
+	stale := SessionState{sess: session{held: true, setChannelA: true, origChannelA: 99, wantChannelA: 1}}
+	r.AdoptSession(stale)
+	if got := r.SessionState().sess.origChannelA; got != live.sess.origChannelA {
+		t.Errorf("stale state overwrote live state: origChannelA = %d, want %d",
+			got, live.sess.origChannelA)
+	}
+	_ = fr
 }
