@@ -224,6 +224,19 @@ operating in dual watch:
 - Restoring still means re-reading rather than predicting, since the radio
   demonstrably moves `curr_ch_id` when the setting changes.
 
+### The restore design is validated by a round trip
+
+Dual watch was taken off -> A -> B -> off across the captures above. On
+returning to off, **all five records were byte-identical to before the
+sequence** -- settings, BSS, advanced (29), advanced2 (63) and
+`GET_HT_STATUS`. Nothing drifted and nothing was left behind.
+
+That is direct evidence for the central assumption of this design: writing a
+saved value back really does return the radio to its prior state, so a
+restore is faithful rather than approximate. It also means the only field the
+session needs to touch for dual watch is `double_channel`; the radio handles
+the rest, including putting `curr_ch_id` back.
+
 ## APRS: MEASURED 2026-10-01
 
 **APRS is not in `READ_SETTINGS` at all.** The settings record is byte-identical
