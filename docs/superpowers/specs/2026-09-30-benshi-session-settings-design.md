@@ -87,25 +87,25 @@ outlive its config buys nothing.
 frequency in VFO mode instead of the memory they had selected is not a state
 they would have chosen, it is now permanent, and -- unlike the other two -- they
 may not even notice until they next key up expecting their voice channel.
-Options, to be decided before this is implemented:
+**Decision (2026-10-01): manage it anyway, restore best-effort, no state
+file.** No separate opt-in and no snapshot. No other rig-control software is
+this careful about an operator's radio, and a user who has enabled `[rigctl.N]`
+has already asked tncd to retune it -- which already rewrites a channel record.
+A second knob guarding one field of the same feature is ceremony that buys
+nothing.
 
-1. **Do not manage `channel_a` at all.** Keep the `ErrChannelMode` refusal and
-   make the operator switch to VFO mode themselves. Loses the feature; costs
-   nothing; the guard already produces an actionable message naming the memory.
-2. **Separate opt-in.** `manage_session_settings` covers dual watch and APRS;
-   a distinct setting covers the memory->VFO switch, so taking the permanent
-   risk is its own deliberate choice.
-3. **Persist just this one field.** A one-line state file holding the
-   pre-session `channel_a`, restored on next startup if still displaced. The
-   staleness objection is much weaker for a single field with a verifiable
-   current value: tncd can re-read `channel_a`, and only restore if it still
-   equals what tncd wrote.
+So the memory->VFO switch is managed on the same terms as the other two, and
+restore is best-effort: retry while the process lives and the port may come
+back, log loudly at shutdown if the radio is unreachable, and accept that a
+crash or a dead port can leave the radio in VFO mode. The honest consequence is
+recorded here rather than engineered away -- an operator who loses tncd
+mid-session may find their radio off its memory channel, and the log is where
+they will find out why.
 
-Recommendation: **(2) plus (3)** -- the opt-in keeps an operator who has not
-asked for it entirely clear of the risk, and the one-field snapshot is cheap
-precisely because it is checkable against the radio before being applied.
-Deferred to implementation rather than settled here, since it is the one open
-design question left.
+The one thing this does buy is a hard requirement on the restore path: because
+nothing else will fix it, restore must run on **every** exit path the process
+can still act on -- last session ends, port lost, rigctl client disconnect,
+signal handler -- not just the clean one.
 
 ## Read-modify-write, never rebuild
 
