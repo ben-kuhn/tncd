@@ -154,9 +154,10 @@ exactly one named field:
 double_channel   bit 10+2    0 -> 1
 ```
 
-`channel_b` did NOT change (stayed 1) -- so it is what VFO B is tuned to, not
-what enables dual watch. BSS, advanced (29) and advanced2 (63) were all
-byte-identical.
+`channel_b` did NOT change (stayed 1), confirming what it is: **the channel the
+B VFO watches.** It is not the enable -- but it IS the field dual watch exists
+to use, which is why "channel_b is your dual watch" is a fair description of
+it. BSS, advanced (29) and advanced2 (63) were all byte-identical.
 
 ### The important part: the A/B mapping is NOT what the enum names imply
 
@@ -170,6 +171,13 @@ on   00 84 11 00 00    double_channel=1   curr_ch_id =  0<<4|1  =   1  (memory 1
 With `channel_a = 252` and `channel_b = 1`, `double_channel = 1` -- which
 benlink's `ChannelType` calls **A** -- the radio reports its active channel as
 **1**, i.e. `channel_b`'s value.
+
+Read as "the radio switched its active VFO to B when dual watch engaged", that
+is perfectly coherent: the B pointer only matters once dual watch is on, so
+enabling it brings `channel_b` into play. On that reading `double_channel = 1`
+means something like "dual watch on, B current" rather than benlink's "A", and
+the enum's A/B labels are simply mis-transcribed. One observation cannot
+distinguish that from other explanations, but it is the simplest one that fits.
 
 So `Settings.ActiveChannel()`'s rule ("OFF or A means channel_a") is
 contradicted by the radio's own status in dual watch. **`SetFreq`'s blanket
