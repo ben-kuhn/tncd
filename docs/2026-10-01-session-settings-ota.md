@@ -72,10 +72,45 @@ one receiver, time-slicing between two frequencies; traffic on the other side
 eats part or all of an inbound frame. That follows from how the hardware works
 and is not worth bench time. Dual watch off is a requirement, not a hypothesis.
 
+## The automatic path, validated on hardware the same day
+
+The triggers were then wired, and the automatic path tested on the same radio
+from the same baseline (memory 5 "AUS 730", dual watch A, APRS on). The UV-PRO's
+TX bug does not get in the way here: a connect that never completes still
+CREATES a session, which is exactly what should trigger the acquire.
+
+`pat connect KU0HN-10` twice, with no CLI involvement:
+
+```
+rig: turning dual watch off for this session (was A) ...
+rig: switching the A VFO from channel 5 to the VFO record 252 ...
+rig: disabling APRS beaconing for this session ...
+                    ... connect times out (the UV-PRO TX bug) ...
+rig: turning dual watch off for this session (was A) ...
+rig: switching the A VFO from channel 5 to the VFO record 252 ...
+rig: disabling APRS beaconing for this session ...
+```
+
+Each line appeared exactly twice, once per connect. That is the proof that the
+release worked, and it is stronger than a log line saying so would be:
+`AcquireSession` is idempotent while held, so a second acquire that logs at all
+means the first was released. And the second one reports **"was A"** and **"from
+channel 5"** — values it could only read back off the radio if the restore had
+been complete and correct. A partial restore would have had it logging
+`was off` / `from channel 252`, or nothing.
+
+After stopping tncd, every readable record was byte-identical to the baseline
+captured before the first connect.
+
+Note what triggered this: the AX.25 session alone, with no rigctl client
+connected. Both halves of the trigger are therefore exercised across this report
+— the CLI path above, and the connection path here.
+
 **Still open:**
 
-- The automatic trigger points are unwired, so this test drove the session from
-  the CLI rather than from a connect.
+- An on-air session driven by the automatic path, i.e. one that actually
+  completes a transfer rather than timing out. That needs a Benshi radio that
+  transmits.
 
 ## Reproducing the TX isolation
 

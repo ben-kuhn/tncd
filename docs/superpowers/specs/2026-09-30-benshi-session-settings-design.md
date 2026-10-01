@@ -6,9 +6,13 @@
 byte-identical to the pre-session baseline. Every measurement the design was
 blocked on is done. The automatic trigger points are implemented
 too: l2 reports per-port connection counts, rigctl reports connected clients and
-pre-QSY, and a per-port gate reconciles the radio. **Remaining: an on-air test of
-the automatic path**, which needs a Benshi radio that transmits -- the UV-PRO does
-not (see `docs/2026-10-01-session-settings-ota.md`).
+pre-QSY, and a per-port gate reconciles the radio. The automatic path was validated on
+hardware the same day: two `pat connect` attempts each logged a full acquire
+reporting the ORIGINAL state, proving the release in between, and the radio was
+byte-identical to baseline afterwards. **Remaining: an on-air session driven by
+the automatic path that actually completes a transfer**, which needs a Benshi
+radio that transmits -- the UV-PRO does not (see
+`docs/2026-10-01-session-settings-ota.md`).
 
 **Goal**: put a Benshi radio into a state where AX.25 packet actually works for
 the duration of a connected-mode session, and put it back afterwards.
