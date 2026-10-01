@@ -79,6 +79,9 @@ type Bridge struct {
 	// this is cached (not built fresh per call) and how the cache is
 	// invalidated across a reconnect.
 	rigs []rigSlot
+	// rigGates decide when each port's radio is in packet configuration; nil
+	// for ports without rig control. See riggate.go.
+	rigGates []*rigGate
 
 	// portEpoch[port] is bumped every time a connect attempt for the port is
 	// initiated (initial, auto-reconnect, manual relink, wedge relink). A dial
@@ -616,6 +619,9 @@ func InjectPorts(b *Bridge, eng *engine.Engine, params []l2pkg.PortParams, sende
 		IsLocal: func(port int, call string) bool {
 			return b.isLocalCall(port, call)
 		},
+		PortSessions: func(port int, n int) {
+			b.onPortSessions(port, n)
+		},
 	}
 	b.l2 = l2pkg.NewTable(eng, hooks, params)
 	b.ports = senders
@@ -631,6 +637,7 @@ func (b *Bridge) initLastRX() {
 	b.lastRX = make([]time.Time, len(b.ports))
 	b.relinks = make([]int, len(b.ports))
 	b.rigs = make([]rigSlot, len(b.ports))
+	b.initRigGates()
 	now := time.Now()
 	for i := range b.lastRX {
 		b.lastRX[i] = now
@@ -691,6 +698,9 @@ func (b *Bridge) Start() error {
 		},
 		IsLocal: func(port int, call string) bool {
 			return b.isLocalCall(port, call)
+		},
+		PortSessions: func(port int, n int) {
+			b.onPortSessions(port, n)
 		},
 	}
 	b.l2 = l2pkg.NewTable(b.eng, hooks, params)
@@ -870,6 +880,11 @@ func (b *Bridge) Shutdown() {
 	for _, c := range b.clients {
 		c.CloseTransport()
 	}
+	// Put any radio this process reconfigured back BEFORE the rigs and ports
+	// are torn down, because it needs a live rig to do it and because these
+	// writes reach the radio's NVRAM -- if this does not restore the radio,
+	// nothing else will.
+	b.shutdownRigGates()
 	// Drop any cached rigs before the ports themselves close. This is
 	// defensive, not load-bearing for the documented shutdown order: callers
 	// like internal/app close every rigctl server (which force-releases any

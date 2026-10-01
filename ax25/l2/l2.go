@@ -118,6 +118,16 @@ type Hooks struct {
 	// Bridge wires this to engine.Do. When nil, fn is called synchronously
 	// (useful in tests that want predictable ordering without a real loop).
 	Defer func(fn func())
+	// PortSessions reports how many connections a port holds, called whenever
+	// that count changes -- including on a connection created for an outgoing
+	// SABM that never completes.
+	//
+	// Bridge wires this to rig control's session settings, which is why the
+	// hook fires on CREATION rather than on Connected: the radio needs to be
+	// out of dual watch and on the right frequency BEFORE the handshake, not
+	// after the UA. A connection that gives up having never connected still
+	// has to release what it took.
+	PortSessions func(port int, n int)
 	// IsLocal reports whether call is one of our registered callsigns on port.
 	// Bridge wires this to the AGWPE clients' RegisteredCalls sets.
 	// When nil, the permissive default (always true) is used so that all
@@ -195,7 +205,25 @@ func (t *Table) getOrCreate(port int, local, remote string) *Conn {
 	c := newConn(k.port, k.local, k.remote)
 	c.t1Value = t.portParams(port).T1
 	t.conns[k] = c
+	t.notifyPortSessions(port)
 	return c
+}
+
+// notifyPortSessions reports the port's current connection count to the hook.
+// Called from getOrCreate and remove -- the only two places the table changes
+// size -- so a caller cannot miss a transition by taking a different path to
+// creating or dropping a connection.
+func (t *Table) notifyPortSessions(port int) {
+	if t.hooks.PortSessions == nil {
+		return
+	}
+	n := 0
+	for k := range t.conns {
+		if k.port == port {
+			n++
+		}
+	}
+	t.hooks.PortSessions(port, n)
 }
 
 // remove deletes a connection from the table and cancels all its timers.
@@ -210,6 +238,7 @@ func (t *Table) remove(port int, local, remote string) {
 	c.t2 = cancelTimer(c.t2)
 	c.t3 = cancelTimer(c.t3)
 	delete(t.conns, k)
+	t.notifyPortSessions(port)
 }
 
 // removeConn removes by conn pointer (for cases where we already have the conn).

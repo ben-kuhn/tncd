@@ -463,6 +463,12 @@ type Server struct {
 	provider func() (Rig, error)
 	ptt      *pttState
 
+	// onClientConnect/onClientDisconnect are bridge's session-settings hooks;
+	// see SetSessionHooks. Set once before Start, read-only afterwards.
+	onClientConnect    func()
+	onClientDisconnect func()
+	onBeforeQSY        func() error
+
 	// idleTimeout bounds how long a connection may go without sending a
 	// command; see defaultIdleTimeout. A field (not just the constant) so
 	// tests can shrink it instead of waiting 30 real minutes.
@@ -483,6 +489,58 @@ type Server struct {
 // against the very round trip it's waiting on.
 func New(cfg config.RigCtl, provider func() (Rig, error)) *Server {
 	return &Server{cfg: cfg, provider: provider, ptt: &pttState{}, idleTimeout: defaultIdleTimeout}
+}
+
+// SetSessionHooks installs callbacks fired when a rigctl client connects and
+// disconnects, which bridge uses to hold the radio in packet configuration for
+// as long as a client is attached.
+//
+// A connected client -- not an in-progress AX.25 session -- is the right unit
+// here. PAT connects rigctl, QSYs, runs the session, QSXes back, and only then
+// drops the connection, so releasing when the session ended would undo the QSY
+// while PAT is still using the radio.
+//
+// Optional: nil hooks mean no session management, which is what the rigctl tests
+// and any port without a Benshi radio get.
+func (s *Server) SetSessionHooks(onConnect, onDisconnect func(), beforeQSY func() error) {
+	s.onClientConnect, s.onClientDisconnect, s.onBeforeQSY = onConnect, onDisconnect, beforeQSY
+}
+
+// qsyGated wraps a Rig so that a tune holds the radio's session settings first.
+//
+// A wrapper rather than another parameter on handleLine: the ordering belongs
+// immediately before SetFreq, and putting it here means the protocol layer stays
+// a pure function of (line, rig, cfg, ptt) for its table tests.
+type qsyGated struct {
+	Rig
+	before func() error
+}
+
+// SetFreq acquires the session, then tunes.
+//
+// A failed acquire does NOT block the tune. The radio may be perfectly tunable
+// without managed settings -- it is already in VFO mode, say -- and refusing to
+// QSY because dual watch could not be turned off would break a working setup to
+// enforce a preference. SetFreq has its own guards for the cases that actually
+// matter.
+func (q qsyGated) SetFreq(hz uint32) error {
+	if q.before != nil {
+		if err := q.before(); err != nil {
+			log.Printf("rigctl: session settings not applied before tuning (%v); tuning anyway", err)
+		}
+	}
+	return q.Rig.SetFreq(hz)
+}
+
+// rigForLine resolves the rig for one command, wrapped so a QSY triggers the
+// session hook. A nil rig is returned unwrapped: wrapping it would hide the
+// nilness from rigIsNil and turn an offline port into a panic.
+func (s *Server) rigForLine() Rig {
+	r := s.rig()
+	if s.onBeforeQSY == nil || rigIsNil(r) {
+		return r
+	}
+	return qsyGated{Rig: r, before: s.onBeforeQSY}
 }
 
 // Start binds the listener, wraps it in the shared allowlist filter, and
@@ -578,6 +636,17 @@ func (s *Server) rig() Rig {
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.untrackConn(conn)
 	defer conn.Close()
+
+	// Hold the radio in packet configuration for the life of this connection.
+	// Deferred release runs on every exit path -- clean close, read deadline,
+	// write error, server shutdown -- because these settings reach the radio's
+	// NVRAM and nothing else will put them back.
+	if s.onClientConnect != nil {
+		s.onClientConnect()
+	}
+	if s.onClientDisconnect != nil {
+		defer s.onClientDisconnect()
+	}
 	// A dropped TCP connection, a killed client, or a network partition must
 	// not leave the transmitter keyed just because nobody is left to send
 	// set_ptt 0. This is a no-op (see releaseLocked) unless this connection
@@ -605,7 +674,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		if strings.TrimSpace(line) == "q" {
 			return // hamlib's Net rigctl "quit": close, no reply expected
 		}
-		reply := handleLine(line, s.rig(), s.cfg, s.ptt)
+		reply := handleLine(line, s.rigForLine(), s.cfg, s.ptt)
 		if _, err := conn.Write([]byte(reply + "\n")); err != nil {
 			return
 		}

@@ -88,7 +88,7 @@ pip install -r e2e/requirements-test.txt
 pytest -c e2e/pytest.ini e2e/
 ```
 
-Useful subcommands: `tncd version`, `tncd genconfig`, `tncd check -c FILE`, `tncd ports [--json]`, `tncd rig -c FILE [--port N] probe|get-freq|set-freq HZ|teardown`, and (Windows) `tncd service install|uninstall|start|stop` / `tncd install|uninstall`.
+Useful subcommands: `tncd version`, `tncd genconfig`, `tncd check -c FILE`, `tncd ports [--json]`, `tncd rig -c FILE [--port N] probe|get-freq|set-freq HZ|teardown|session-hold [secs]|session-acquire|session-set CH DW APRS`, and (Windows) `tncd service install|uninstall|start|stop` / `tncd install|uninstall`.
 
 ## Architecture
 

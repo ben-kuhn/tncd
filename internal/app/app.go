@@ -108,6 +108,15 @@ func New(cfg *config.Config, verbose, traffic int) (*Runtime, error) {
 		// it to block on the round trip to the loop and back.
 		provider := func() (rigctl.Rig, error) { return r.rigForPort(port) }
 		srv := rigctl.New(rc, provider)
+		// A connected rigctl client holds the radio in packet configuration.
+		// Wired here rather than inside rigctl so that package keeps knowing
+		// nothing about bridge; the gate on the other end is a no-op for ports
+		// without rig control.
+		srv.SetSessionHooks(
+			func() { r.bridge.RigClientConnected(port) },
+			func() { r.bridge.RigClientDisconnected(port) },
+			func() error { return r.bridge.RigAcquireForQSY(port) },
+		)
 		if err := srv.Start(); err != nil {
 			r.closeRigServers()
 			if r.apiSrv != nil {

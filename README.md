@@ -448,6 +448,9 @@ tncd rig -c tncd.ini --port 0 probe          # identify the radio (vendor/produc
 tncd rig -c tncd.ini --port 0 get-freq       # current frequency, Hz
 tncd rig -c tncd.ini --port 0 set-freq 145030000
 tncd rig -c tncd.ini --port 0 teardown       # undo a QSY made earlier in the SAME process
+tncd rig -c tncd.ini --port 0 session-hold 15  # apply packet settings, hold, restore
+tncd rig -c tncd.ini --port 0 session-acquire  # apply them and LEAVE them applied
+tncd rig -c tncd.ini --port 0 session-set 5 1 on   # put them back by hand
 ```
 
 `teardown` restores the record this session's first `set-freq` displaced,
@@ -455,6 +458,35 @@ from a saved copy. Each `tncd rig` invocation is its own session, so running
 `teardown` on its own has nothing to restore and says so — it is there for
 the rigctld server, which keeps one session for the life of the connection.
 To put a radio back by hand, use `set-freq`.
+
+### Session settings
+
+When rig control is enabled on a port, tncd puts the radio into a state where
+packet actually works for the duration of a session, and puts it back
+afterwards:
+
+| setting | why |
+|---|---|
+| dual watch off | one receiver time-slicing two frequencies drops inbound frames |
+| APRS beaconing off | the radio transmits on its own schedule, colliding with a transfer |
+| memory channel → VFO | a radio parked on a named memory cannot be tuned at all |
+
+This happens on the first AX.25 connection or the first QSY — **not** at
+startup, because people leave tncd running for hours while using the radio for
+voice. It is released once no connection and no rigctl client remain. Several
+simultaneous connections on a port share one radio, so it is refcounted.
+
+Restore only puts back fields the radio still holds tncd's value for: if you
+flip dual watch back on from the front panel mid-session, tncd leaves it on.
+
+**These writes reach the radio's NVRAM — a power cycle does not undo them.** So
+if tncd is killed mid-session, or the radio is unreachable when it tries to
+restore, the radio stays in packet configuration and the log says so. The
+`session-set` command above puts it back; `session-acquire` prints the exact
+line to use before it changes anything.
+
+There is no separate setting for this: enabling `[rigctl.N]` is the opt-in, and
+ports without rig control are never touched.
 
 `--port` is the index into `[client.N]` (default 0). See
 `docs/superpowers/specs/rig-control-ota-checklist.md` for the full hardware

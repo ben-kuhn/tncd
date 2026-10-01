@@ -4,8 +4,11 @@
 `tncd rig session-hold` diagnostic are IMPLEMENTED and validated on a UV-PRO
 (2026-10-01): a full acquire-hold-release cycle left all five readable records
 byte-identical to the pre-session baseline. Every measurement the design was
-blocked on is done. **Remaining: the automatic trigger points** -- refcounting
-AX.25 sessions and rigctl clients so acquire/release happen without the CLI.
+blocked on is done. The automatic trigger points are implemented
+too: l2 reports per-port connection counts, rigctl reports connected clients and
+pre-QSY, and a per-port gate reconciles the radio. **Remaining: an on-air test of
+the automatic path**, which needs a Benshi radio that transmits -- the UV-PRO does
+not (see `docs/2026-10-01-session-settings-ota.md`).
 
 **Goal**: put a Benshi radio into a state where AX.25 packet actually works for
 the duration of a connected-mode session, and put it back afterwards.
@@ -29,7 +32,17 @@ mode is mild: leaving them off is what the operator would have done anyway.
 
 ## Trigger points
 
-**Apply on the first connected-mode session; restore when the last one ends.**
+**Apply on the first connected-mode session or the first QSY; restore once no
+session and no rigctl client remain.** (Implemented 2026-10-01 in
+`internal/bridge/riggate.go`.)
+
+The distinction that matters in the implementation: a trigger is not the same as
+a holder. An AX.25 session or a QSY TRIGGERS the acquire; an AX.25 session or a
+connected rigctl client HOLDS it. A rigctl client is a holder but deliberately
+not a trigger -- a monitoring client that connects and polls `get_freq` has no
+business reconfiguring somebody's radio. An earlier revision made a bare client
+connect acquire, which reconfigured the radio for a client that only ever read
+from it.
 
 Settings are per RADIO, but tncd supports several simultaneous AX.25
 connections per port, so this is refcounted on the 0→1 and 1→0 transitions,
@@ -183,14 +196,18 @@ Both remaining refusals REMAIN when `manage_session_settings = false`. The split
 deliberate: unmanaged, tncd has no mandate to move the operator's radio, so
 refusing is correct; managed, the operator has asked for exactly that.
 
-## Configuration
+## Configuration: none — IMPLEMENTED 2026-10-01
 
-Opt-in, per port, default off. Everything else in this area refuses rather
-than clobbers; writing to a radio mid-session is a step beyond that and should
-be a deliberate choice. It also lets this ship before it is proven on every
-Benshi variant.
+An earlier draft proposed `[client.N] manage_session_settings = false`, opt-in
+and default off, on the grounds that writing to a radio mid-session should be a
+deliberate choice.
 
-Proposed: `[client.N] manage_session_settings = false`.
+**No such setting was added.** `[rigctl.N] enabled = true` already is the
+deliberate choice: a user who turns rig control on has asked tncd to retune
+their radio, which already rewrites a channel record. A second knob guarding
+other fields of the same feature is ceremony, and no other rig-control software
+is this careful. Ports without rig control get no gate at all, so nothing
+touches a radio nobody handed over.
 
 ## Dual watch: MEASURED 2026-10-01
 
