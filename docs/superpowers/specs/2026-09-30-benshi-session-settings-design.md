@@ -14,6 +14,8 @@ radio someone also uses for voice:
 - **Dual watch** (field NOT yet confirmed -- see below). The radio splits
   attention between two VFOs, so traffic on the other channel deafens it
   mid-frame.
+- **APRS / position beaconing** -- measured: bit `0x10` of the BSS record's
+  body byte 2, via `WRITE_BSS_SETTINGS`. See below.
 - **APRS / position beaconing.** The radio transmits on its own schedule,
   colliding with a session in progress.
 
@@ -164,36 +166,45 @@ two records.
 Settled by the same diff as APRS: toggle dual watch on the panel, read
 settings before and after, diff the raw bytes.
 
-## Open: what APRS actually is
+## APRS: MEASURED 2026-10-01
 
-`double_channel` is known. **APRS is not.** The plausible fields are
-`auto_share_loc_ch` (+`auto_share_loc_ch_upper`), `gpwpl_upload_en` and
-`positioning_system`, and which combination the radio's own APRS toggle drives
-is a guess.
+**APRS is not in `READ_SETTINGS` at all.** The settings record is byte-identical
+with APRS on and off, which rules out every field guessed at earlier
+(`auto_share_loc_ch`, `gpwpl_upload_en`, `positioning_system`). `SET_APRS_PATH`
+is also not it -- that sets the digipeater path.
 
-`SET_APRS_PATH` (71) / `GET_APRS_PATH` (72) are NOT the lever -- they set the
-digipeater path (`WIDE2-1` and so on), not whether APRS is enabled.
+It lives in the **BSS record** (`READ_BSS_SETTINGS` 33 / `WRITE_BSS_SETTINGS`
+34), which is Benshi's position/beacon subsystem -- the record also carries the
+`"APRS"` destination and the operator's symbol and callsign (`/[KU0HN`).
 
-**Do not guess.** `support_vfo` reads 0 on a radio operating in VFO mode and
-`channel_count` reads 30 on a radio whose VFO is channel 252 — the field names
-in this protocol mislead, repeatedly.
+```
+APRS enable = bit 0x10 of READ_BSS_SETTINGS body byte 2
+              (payload byte 1, i.e. after the reply-status byte)
 
-**The measurement**, covering every open field at once: capture
-`READ_SETTINGS` after each front-panel change and diff the raw bytes.
+on   0x1c = 0001 1100
+off  0x0c = 0000 1100
+```
 
-| Toggle on the panel | Settles |
-|---|---|
-| APRS on -> off | which fields APRS actually drives |
-| dual watch on -> off | `double_channel` vs `channel_b` |
-| memory -> VFO mode | that `channel_a` really is the mode switch |
+Confirmed across two transitions in both directions. **One bit moved and
+nothing else did** -- `settings`, `advanced` (29), `advanced2` (63) and
+`GET_HT_STATUS` were all byte-identical throughout.
 
-The diff also catches anything else the radio moves that nobody thought to
-look for, which is the real value -- every field-name guess this week has been
-wrong. Five minutes at the bench, and `tncd rig` already has the plumbing to
-dump the record.
+Consequences for this design:
 
-Until that exists, the dual-watch half is implementable and the APRS half is
-not.
+- Disabling APRS needs `WRITE_BSS_SETTINGS` (34), **not** `WRITE_SETTINGS`.
+  Two managed records, not one.
+- Read-modify-write matters even more here: the BSS record holds the
+  operator's callsign and symbol, so rebuilding it from a partial model would
+  destroy their APRS identity, not just a preference.
+- The control is labelled "Digital Mode -> Enable" on the radio, so this bit
+  may gate more than position beaconing. What is measured is the bit's
+  correlation with that toggle; its full meaning is inferred from a menu
+  label. Worth understanding before tncd flips it for every session -- if it
+  also disables something wanted during packet, the tradeoff changes.
+
+`kiss/` note: nothing in the capture suggested a separate volatile/stored
+split for BSS, so whether `WRITE_BSS_SETTINGS` persists across a power cycle
+is still unverified, same as `WRITE_SETTINGS`.
 
 ## Testing
 
