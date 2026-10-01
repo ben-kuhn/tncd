@@ -95,6 +95,9 @@ type Rig struct {
 	orig   benshi.RFCh
 	origOK bool
 
+	// sess is what AcquireSession displaced; see session.go.
+	sess session
+
 	// ident caches the one-time GET_DEV_INFO answer. See Identify.
 	ident   benshi.DevInfo
 	identOK bool
@@ -202,14 +205,7 @@ func (r *Rig) activeChannel() (benshi.RFCh, error) {
 			"turn dual watch off for packet operation",
 			dualWatchSideName(set.DoubleChannel))
 	}
-	body, err := r.request(benshi.CmdReadRFCh, []byte{id})
-	if err != nil {
-		return benshi.RFCh{}, err
-	}
-	if len(body) < 1 || body[0] != 0 {
-		return benshi.RFCh{}, fmt.Errorf("rig: radio rejected READ_RF_CH for channel %d", id)
-	}
-	return benshi.ParseRFCh(body[1:])
+	return r.readChannel(id)
 }
 
 // SetFreq tunes the radio's active VFO to hz simplex.
