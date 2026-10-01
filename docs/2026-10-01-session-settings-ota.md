@@ -33,7 +33,10 @@ BOTH:       1 x UI  KU0HN-1 -> MAIL      (14:03:00)
 ```
 
 Both radios decoded the *same* passing UI frame, which rules out the two easy
-explanations: they are on the same frequency, and the monitor is not deaf. The
+explanations: they are on the same frequency, and the monitor is not deaf.
+(Stronger evidence followed the same day -- a full bidirectional matrix at two
+frequencies, with and without session settings: see
+`docs/2026-10-01-uvpro-tx-bidirectional.md`.) The
 UV-PRO's receive path works. Its transmit does not reach the air. `tx` counts
 frames handed to the transport, not frames transmitted.
 
