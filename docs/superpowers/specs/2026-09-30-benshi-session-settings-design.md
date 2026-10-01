@@ -193,10 +193,20 @@ Consequences for this design:
 - Do NOT extend that cross-check to the dual-watch case. `curr_ch_id` would
   disagree with `channel_a` there for a benign reason, and refusing on it would
   block a QSY that is perfectly safe.
-- Whether Main/A *always* transmits on this radio is the question that decides
-  whether dual watch can be managed rather than refused. Common on dual-watch
-  radios, not established here. One more panel observation settles it: with
-  dual watch on, transmit and see which side keys.
+- **Which side transmits is operator-selectable** -- they choose A or B as
+  active (operator, 2026-10-01). So tncd cannot assume Main/A is the TX VFO,
+  and the dual-watch refusal stands unless the selection can be read reliably.
+- That also means the `curr_ch_id` anomaly above may not be an anomaly at all.
+  If `double_channel` encodes both "dual watch on" AND which side is selected
+  -- making benlink's `ChannelType` (OFF/A/B) correct -- then `curr_ch_id = 1`
+  simply means **B was the selected side** when that capture was taken, and
+  everything is consistent. The capture did not record which side was
+  selected, so this is undetermined rather than contradictory.
+- **The experiment that settles it:** with dual watch on, select A active and
+  capture, then select B active and capture. The diff shows directly whether
+  `double_channel` carries the selection and how its values map. If it does,
+  dual watch becomes manageable: read the selection, use that side's channel,
+  and the refusal can be relaxed.
 - Turning dual watch off still means re-reading afterwards rather than
   predicting, because the radio demonstrably moves `curr_ch_id` when the
   setting changes.
