@@ -159,41 +159,47 @@ B VFO watches.** It is not the enable -- but it IS the field dual watch exists
 to use, which is why "channel_b is your dual watch" is a fair description of
 it. BSS, advanced (29) and advanced2 (63) were all byte-identical.
 
-### The important part: the A/B mapping is NOT what the enum names imply
+### The important part: `curr_ch_id` is unreliable in dual watch
 
 `GET_HT_STATUS` moved at the same time:
 
 ```
-off  00 80 c1 00 3c    double_channel=0   curr_ch_id = 15<<4|12 = 252  (VFO)
-on   00 84 11 00 00    double_channel=1   curr_ch_id =  0<<4|1  =   1  (memory 1)
+off  00 80 c1 00 3c    double_channel=0   curr_ch_id = 15<<4|12 = 252
+on   00 84 11 00 00    double_channel=1   curr_ch_id =  0<<4|1  =   1
 ```
 
-With `channel_a = 252` and `channel_b = 1`, `double_channel = 1` -- which
-benlink's `ChannelType` calls **A** -- the radio reports its active channel as
-**1**, i.e. `channel_b`'s value.
+**Front-panel ground truth, captured with dual watch on:** Main (the A side) was
+the VFO on 145.670; the B side was "MN Pack". So:
 
-Read as "the radio switched its active VFO to B when dual watch engaged", that
-is perfectly coherent: the B pointer only matters once dual watch is on, so
-enabling it brings `channel_b` into play. On that reading `double_channel = 1`
-means something like "dual watch on, B current" rather than benlink's "A", and
-the enum's A/B labels are simply mis-transcribed. One observation cannot
-distinguish that from other explanations, but it is the simplest one that fits.
+| | settings | panel |
+|---|---|---|
+| `channel_a = 252` | the VFO scratch record | **Main / A**, 145.670 |
+| `channel_b = 1` | memory 1 | **B**, "MN Pack" |
 
-So `Settings.ActiveChannel()`'s rule ("OFF or A means channel_a") is
-contradicted by the radio's own status in dual watch. **`SetFreq`'s blanket
-refusal in dual watch is the only thing that has been stopping it writing to
-the wrong channel record**, and it must stay until this mapping is understood.
+Both settings fields map exactly to the panel. But `curr_ch_id` reported **1**
+-- the B side -- while Main was A.
+
+So `curr_ch_id` does NOT track the Main/transmitting VFO once dual watch is on.
+`Settings.channel_a` does. An earlier draft of this section had it backwards and
+claimed `ActiveChannel()` would pick the wrong record; that was wrong, and is
+corrected here rather than quietly deleted, because the mistake was reasoning
+from the protocol field name instead of from the panel.
 
 Consequences for this design:
 
-- Turning dual watch off to enable a QSY must **re-read settings and status
-  afterwards** and use what the radio then reports. Predicting the post-change
-  active channel from the pre-change record is exactly the inference this
-  measurement invalidates.
-- Keep the settings/status cross-check, and keep refusing when they disagree.
-- Do not trust `ChannelType`'s A/B names. Whether 1 means B, or the radio
-  switches the displayed VFO when dual watch engages, or something else, is
-  not established by one observation -- only that A-means-channel_a is wrong.
+- `activeChannel()`'s settings/status cross-check is sound when dual watch is
+  OFF, which is the only case it runs in -- `SetFreq` refuses dual watch
+  before reaching it. Keep both.
+- Do NOT extend that cross-check to the dual-watch case. `curr_ch_id` would
+  disagree with `channel_a` there for a benign reason, and refusing on it would
+  block a QSY that is perfectly safe.
+- Whether Main/A *always* transmits on this radio is the question that decides
+  whether dual watch can be managed rather than refused. Common on dual-watch
+  radios, not established here. One more panel observation settles it: with
+  dual watch on, transmit and see which side keys.
+- Turning dual watch off still means re-reading afterwards rather than
+  predicting, because the radio demonstrably moves `curr_ch_id` when the
+  setting changes.
 
 ## APRS: MEASURED 2026-10-01
 
