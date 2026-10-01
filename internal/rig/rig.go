@@ -702,6 +702,10 @@ func (r *Rig) dispatch(f benshi.Frame) {
 // messages. See benshi.Settings.ActiveChannel for the measured mapping.
 func dualWatchSideName(d benshi.DoubleChannel) string {
 	switch d {
+	case benshi.DoubleChannelOff:
+		// Only the warning path used to call this, where off never occurs, so
+		// off fell through to "unknown". Snapshot reports every state.
+		return "off"
 	case benshi.DoubleChannelA:
 		return "A"
 	case benshi.DoubleChannelB:

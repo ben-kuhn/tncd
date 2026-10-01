@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ben-kuhn/tncd/v2/benshi"
 	"github.com/ben-kuhn/tncd/v2/internal/bridge"
 	"github.com/ben-kuhn/tncd/v2/internal/config"
 	"github.com/ben-kuhn/tncd/v2/internal/rig"
@@ -23,8 +24,20 @@ func parseRigArgs(args []string) (string, uint32, error) {
 		return "", 0, fmt.Errorf("rig: need one of get-freq, set-freq <hz>, teardown, probe, session-hold [seconds]")
 	}
 	switch args[0] {
-	case "get-freq", "teardown", "probe":
+	case "get-freq", "teardown", "probe", "session-acquire":
 		return args[0], 0, nil
+	case "session-set":
+		// Three explicit values rather than a single opaque blob, so an
+		// operator can read the line session-acquire printed and see what it
+		// is about to do to their radio before pasting it.
+		if len(args) != 4 {
+			return "", 0, fmt.Errorf("rig session-set: need CHANNEL_A DUAL_WATCH APRS " +
+				"(e.g. \"5 1 on\"), as printed by session-acquire")
+		}
+		if _, err := parseSnapshotArgs(args[1:]); err != nil {
+			return "", 0, err
+		}
+		return "session-set", 0, nil
 	case "session-hold":
 		// Optional hold time in seconds. A session cannot span two
 		// invocations -- what to restore lives in memory, by design, since a
@@ -158,6 +171,19 @@ func runRig(cfgPath string, port int, args []string) error {
 		if err := runSessionHold(r, port, time.Duration(hz)*time.Second); err != nil {
 			return err
 		}
+	case "session-acquire":
+		if err := runSessionAcquire(r, port); err != nil {
+			return err
+		}
+	case "session-set":
+		snap, err := parseSnapshotArgs(args[1:])
+		if err != nil {
+			return err
+		}
+		if err := r.ApplySnapshot(snap); err != nil {
+			return fmt.Errorf("rig: port %d: session-set: %w", port, err)
+		}
+		fmt.Printf("applied: %s\n", snap)
 	case "probe":
 		// Report what actually answered, not just that something did. The
 		// old version printed a bare "radio answered" while README claimed
@@ -175,6 +201,60 @@ func runRig(cfgPath string, port int, args []string) error {
 // defaultSessionHoldSeconds is long enough to read the radio's front panel and
 // see what changed, which is the point of the command.
 const defaultSessionHoldSeconds = 15
+
+// parseSnapshotArgs parses `session-set`'s three arguments. Validated before the
+// radio is opened, so a typo costs nothing.
+func parseSnapshotArgs(args []string) (rig.Snapshot, error) {
+	var snap rig.Snapshot
+	ch, err := strconv.ParseUint(args[0], 10, 8)
+	if err != nil {
+		return snap, fmt.Errorf("rig session-set: %q is not a channel index", args[0])
+	}
+	dw, err := strconv.ParseUint(args[1], 10, 8)
+	if err != nil || dw > 2 {
+		return snap, fmt.Errorf("rig session-set: %q is not a dual-watch value "+
+			"(0 = off, 1 = side A, 2 = side B)", args[1])
+	}
+	var aprs bool
+	switch args[2] {
+	case "on":
+		aprs = true
+	case "off":
+		aprs = false
+	default:
+		return snap, fmt.Errorf("rig session-set: %q is not \"on\" or \"off\"", args[2])
+	}
+	return rig.Snapshot{ChannelA: byte(ch), DoubleChannel: benshi.DoubleChannel(dw), APRS: aprs}, nil
+}
+
+// runSessionAcquire applies managed session settings and LEAVES THEM APPLIED.
+//
+// This exists because rig control and KISS share one link on these radios, so a
+// process holding a session cannot coexist with a running tncd. Applying the
+// settings and exiting lets the daemon take the link for a real on-air session.
+//
+// Settings reach the radio's NVRAM, so the radio stays configured after this
+// exits -- a power cycle does not undo it. That is why the output states, in
+// full, what has to be put back and how: nothing else is going to.
+func runSessionAcquire(r *rig.Rig, port int) error {
+	before, err := r.SessionSnapshot()
+	if err != nil {
+		return fmt.Errorf("rig: port %d: session-acquire: %w", port, err)
+	}
+	if err := r.AcquireSession(); err != nil {
+		return fmt.Errorf("rig: port %d: session-acquire: %w", port, err)
+	}
+	after, err := r.SessionSnapshot()
+	if err != nil {
+		return fmt.Errorf("rig: port %d: session-acquire: reading back: %w", port, err)
+	}
+	fmt.Printf("session settings APPLIED and LEFT IN PLACE on port %d\n", port)
+	fmt.Printf("  before: %s\n", before)
+	fmt.Printf("  now:    %s\n", after)
+	fmt.Println("These writes reach the radio's NVRAM: a power cycle will NOT undo them.")
+	fmt.Printf("To put the radio back by hand:  tncd rig --port %d session-set %s\n", port, before.Args())
+	return nil
+}
 
 // runSessionHold acquires managed session settings, holds them so the operator
 // can see the radio change, and releases them.
@@ -216,7 +296,7 @@ func runRigCommand(args []string) int {
 	fs.String("config", "", "Configuration file (INI format) (long form of -c)")
 	port := fs.Int("port", 0, "Port number to control (index into [client.N] sections, default 0)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: tncd rig -c FILE [--port N] get-freq|set-freq HZ|teardown|probe|session-hold [seconds]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tncd rig -c FILE [--port N] get-freq|set-freq HZ|teardown|probe|session-hold [seconds]|session-acquire|session-set ...\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

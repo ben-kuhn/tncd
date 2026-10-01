@@ -397,3 +397,76 @@ func (r *Rig) AdoptSession(s SessionState) {
 	}
 	r.sess, r.orig, r.origOK = s.sess, s.orig, s.origOK
 }
+
+// Snapshot is the managed state as it reads right now: the three fields
+// AcquireSession touches, in a form that can be printed and typed back in.
+//
+// It exists for the case where acquire and release cannot share a process. Rig
+// control and KISS share one link on these radios, so a process holding a
+// session cannot coexist with a running tncd -- and because the writes reach
+// NVRAM, a session applied and abandoned stays applied. Being able to read the
+// state out and put it back explicitly is what keeps that recoverable.
+type Snapshot struct {
+	ChannelA      byte
+	DoubleChannel benshi.DoubleChannel
+	APRS          bool
+}
+
+// String is for operators reading a terminal.
+func (s Snapshot) String() string {
+	return fmt.Sprintf("channel_a=%d dual_watch=%s aprs=%s",
+		s.ChannelA, dualWatchSideName(s.DoubleChannel), onOff(s.APRS))
+}
+
+// Args renders the snapshot as the arguments `session-set` takes, so the line
+// printed by one command can be pasted into another.
+func (s Snapshot) Args() string {
+	return fmt.Sprintf("%d %d %s", s.ChannelA, s.DoubleChannel, onOff(s.APRS))
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// SessionSnapshot reads the managed fields.
+func (r *Rig) SessionSnapshot() (Snapshot, error) {
+	rec, err := r.readSettings()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	set := rec.Settings()
+	bss, err := r.readBSS()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{ChannelA: set.ChannelA, DoubleChannel: set.DoubleChannel, APRS: bss.APRSEnabled()}, nil
+}
+
+// ApplySnapshot writes the managed fields back to exactly these values.
+//
+// Unlike ReleaseSession this does not consult what tncd changed, and does not
+// skip a field the operator has since touched: it is the explicit "put it back
+// to this" the operator asked for, so it writes what it was told.
+func (r *Rig) ApplySnapshot(s Snapshot) error {
+	rec, err := r.readSettings()
+	if err != nil {
+		return err
+	}
+	want := rec.WithChannelA(s.ChannelA).WithDoubleChannel(s.DoubleChannel)
+	if !want.Equal(rec) {
+		if err := r.writeSettings(want); err != nil {
+			return err
+		}
+	}
+	bss, err := r.readBSS()
+	if err != nil {
+		return err
+	}
+	if bss.APRSEnabled() != s.APRS {
+		return r.writeBSS(bss.WithAPRSEnabled(s.APRS))
+	}
+	return nil
+}

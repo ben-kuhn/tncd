@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -632,4 +633,51 @@ func TestAdoptSessionDoesNotOverwriteLiveState(t *testing.T) {
 			got, live.sess.origChannelA)
 	}
 	_ = fr
+}
+
+// TestSnapshotNamesEveryDualWatchState: dual watch off is the normal state for a
+// snapshot, and it used to render as "unknown" because the only caller was the
+// warning path, where off never occurs.
+func TestSnapshotNamesEveryDualWatchState(t *testing.T) {
+	for _, tc := range []struct {
+		dc   benshi.DoubleChannel
+		want string
+	}{
+		{benshi.DoubleChannelOff, "off"},
+		{benshi.DoubleChannelA, "A"},
+		{benshi.DoubleChannelB, "B"},
+	} {
+		got := Snapshot{ChannelA: 5, DoubleChannel: tc.dc, APRS: true}.String()
+		if !strings.Contains(got, "dual_watch="+tc.want) {
+			t.Errorf("Snapshot(%d).String() = %q, want dual_watch=%s", tc.dc, got, tc.want)
+		}
+	}
+}
+
+// TestSnapshotArgsRoundTripThroughApply: the line session-acquire prints has to
+// be usable as session-set's arguments, since that is the only way back for a
+// session applied by a process that has exited.
+func TestSnapshotArgsRoundTripThroughApply(t *testing.T) {
+	before := mustSettings(t, 5, benshi.DoubleChannelA)
+	r, fr := newSessionRig(t, before, mustBSSFixture(t, true))
+
+	orig, err := r.SessionSnapshot()
+	if err != nil {
+		t.Fatalf("SessionSnapshot: %v", err)
+	}
+	if got := orig.Args(); got != "5 1 on" {
+		t.Errorf("Args() = %q, want \"5 1 on\"", got)
+	}
+	if err := r.AcquireSession(); err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	// A different process, which knows only the printed values.
+	if err := r.ApplySnapshot(orig); err != nil {
+		t.Fatalf("ApplySnapshot: %v", err)
+	}
+	got := fr.currentSettings(t)
+	if got.ChannelA != 5 || got.DoubleChannel != benshi.DoubleChannelA || !fr.aprsOn(t) {
+		t.Errorf("after ApplySnapshot: channel_a=%d dual_watch=%d aprs=%v, want 5, A, true",
+			got.ChannelA, got.DoubleChannel, fr.aprsOn(t))
+	}
 }
