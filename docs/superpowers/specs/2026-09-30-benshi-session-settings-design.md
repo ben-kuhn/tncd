@@ -11,7 +11,7 @@ the duration of a connected-mode session, and put it back afterwards.
 Two radio features actively break packet, and both are on by default for a
 radio someone also uses for voice:
 
-- **Dual watch** (field NOT yet confirmed -- see below). The radio splits
+- **Dual watch** (`Settings.double_channel`, measured). The radio splits
   attention between two VFOs, so traffic on the other channel deafens it
   mid-frame.
 - **APRS / position beaconing** -- measured: bit `0x10` of the BSS record's
@@ -145,26 +145,47 @@ Benshi variant.
 
 Proposed: `[client.N] manage_session_settings = false`.
 
-## Open: which field is dual watch
+## Dual watch: MEASURED 2026-10-01
 
-Two candidates, and the evidence is suggestive rather than conclusive.
+`double_channel` IS the switch. Toggling "Radio Settings -> Dual Watch" on moved
+exactly one named field:
 
-Measured on a UV-PRO 2026-09-29: `channel_a = 252`, `channel_b = 1`,
-`double_channel = 0`. So `channel_b` pointed at a real memory ("MN Pack")
-while `double_channel` read OFF. If `channel_b` being set were what enables
-dual watch, that radio would have been dual-watching at the time.
+```
+double_channel   bit 10+2    0 -> 1
+```
 
-That points at `double_channel` as the switch and `channel_b` as merely what
-the B VFO is tuned to, persisting whether or not dual watch is active.
+`channel_b` did NOT change (stayed 1) -- so it is what VFO B is tuned to, not
+what enables dual watch. BSS, advanced (29) and advanced2 (63) were all
+byte-identical.
 
-**Not proven.** The front-panel state at the moment of that capture was not
-recorded, and in the `Status` record `double_channel` is documented as which
-channel is currently ACTIVE in dual watch -- a different thing from the
-setting that enables it. Same field name, possibly different meaning in the
-two records.
+### The important part: the A/B mapping is NOT what the enum names imply
 
-Settled by the same diff as APRS: toggle dual watch on the panel, read
-settings before and after, diff the raw bytes.
+`GET_HT_STATUS` moved at the same time:
+
+```
+off  00 80 c1 00 3c    double_channel=0   curr_ch_id = 15<<4|12 = 252  (VFO)
+on   00 84 11 00 00    double_channel=1   curr_ch_id =  0<<4|1  =   1  (memory 1)
+```
+
+With `channel_a = 252` and `channel_b = 1`, `double_channel = 1` -- which
+benlink's `ChannelType` calls **A** -- the radio reports its active channel as
+**1**, i.e. `channel_b`'s value.
+
+So `Settings.ActiveChannel()`'s rule ("OFF or A means channel_a") is
+contradicted by the radio's own status in dual watch. **`SetFreq`'s blanket
+refusal in dual watch is the only thing that has been stopping it writing to
+the wrong channel record**, and it must stay until this mapping is understood.
+
+Consequences for this design:
+
+- Turning dual watch off to enable a QSY must **re-read settings and status
+  afterwards** and use what the radio then reports. Predicting the post-change
+  active channel from the pre-change record is exactly the inference this
+  measurement invalidates.
+- Keep the settings/status cross-check, and keep refusing when they disagree.
+- Do not trust `ChannelType`'s A/B names. Whether 1 means B, or the radio
+  switches the displayed VFO when dual watch engages, or something else, is
+  not established by one observation -- only that A-means-channel_a is wrong.
 
 ## APRS: MEASURED 2026-10-01
 
