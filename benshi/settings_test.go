@@ -55,16 +55,67 @@ func TestDecodeSettingsRejectsShortAndFailed(t *testing.T) {
 	}
 }
 
-// TestActiveChannelRefusesDualWatch covers the case the QSY guard depends on:
-// with dual watch on, which VFO transmits is not derivable from this record,
-// so ActiveChannel must decline rather than pick one.
-func TestActiveChannelRefusesDualWatch(t *testing.T) {
-	s := Settings{ChannelA: 252, ChannelB: 1, DoubleChannel: DoubleChannelB}
-	if _, ok := s.ActiveChannel(); ok {
-		t.Error("ActiveChannel accepted a dual-watch radio; want refusal")
+// Golden settings records captured from a UV-PRO 2026-10-01, the same radio in
+// three states. channel_a = 252 (its VFO scratch record), channel_b = 1
+// ("MN Pack"), verified against the front panel.
+var (
+	goldenDWOff = []byte{ // dual watch off
+		0x00, 0xc1, 0x04, 0xa6, 0x06, 0x18, 0x01, 0x3c, 0xe0, 0xa3, 0xf0,
+		0x00, 0x20, 0x00, 0x00, 0x08, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	}
-	s.DoubleChannel = DoubleChannelA
-	if id, ok := s.ActiveChannel(); !ok || id != 252 {
-		t.Errorf("ActiveChannel(A) = %d, %v; want 252, true", id, ok)
+	goldenDWAActive = []byte{ // dual watch on, A selected
+		0x00, 0xc1, 0x14, 0xa6, 0x06, 0x18, 0x01, 0x3c, 0xe0, 0xa3, 0xf0,
+		0x00, 0x20, 0x00, 0x00, 0x08, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	goldenDWBActive = []byte{ // dual watch on, B selected
+		0x00, 0xc1, 0x24, 0xa6, 0x06, 0x18, 0x01, 0x3c, 0xe0, 0xa3, 0xf0,
+		0x00, 0x20, 0x00, 0x00, 0x08, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+)
+
+// TestActiveChannelResolvesSelectedSide pins the dual-watch mapping measured on
+// hardware. double_channel carries both "is dual watch on" and which side the
+// operator selected as active, and it matches benlink's ChannelType exactly.
+//
+// An earlier version of this test asserted that a dual-watch radio must be
+// REFUSED, because the mapping was unverified and writing the wrong side's
+// channel record would retune a band the operator was still listening to.
+// Toggling the selection on the front panel and diffing settled it.
+func TestActiveChannelResolvesSelectedSide(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		record []byte
+		wantDC DoubleChannel
+		wantCh byte
+	}{
+		{"dual watch off -> A", goldenDWOff, DoubleChannelOff, 252},
+		{"A selected", goldenDWAActive, DoubleChannelA, 252},
+		{"B selected", goldenDWBActive, DoubleChannelB, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, err := DecodeSettings(tc.record)
+			if err != nil {
+				t.Fatalf("DecodeSettings: %v", err)
+			}
+			if set.DoubleChannel != tc.wantDC {
+				t.Errorf("DoubleChannel = %d, want %d", set.DoubleChannel, tc.wantDC)
+			}
+			id, ok := set.ActiveChannel()
+			if !ok {
+				t.Fatalf("ActiveChannel refused a state measured on hardware")
+			}
+			if id != tc.wantCh {
+				t.Errorf("ActiveChannel = %d, want %d", id, tc.wantCh)
+			}
+		})
+	}
+}
+
+// An encoding never seen on hardware must still refuse rather than guess,
+// because the next step rewrites a channel record.
+func TestActiveChannelRefusesUnknownEncoding(t *testing.T) {
+	s := Settings{ChannelA: 252, ChannelB: 1, DoubleChannel: DoubleChannel(3)}
+	if id, ok := s.ActiveChannel(); ok {
+		t.Errorf("ActiveChannel accepted double_channel=3, returned %d", id)
 	}
 }

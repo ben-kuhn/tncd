@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -182,12 +183,35 @@ func (r *Rig) activeChannel() (benshi.RFCh, error) {
 	if !ok {
 		return benshi.RFCh{}, ErrDualWatch
 	}
-	live, err := r.currChannel()
-	if err != nil {
-		return benshi.RFCh{}, err
+	// Dual watch being on is not a reason to refuse: the selected side is
+	// readable, so the target record is unambiguous. It IS worth warning
+	// about. Dual watch time-slices the receiver between two frequencies, so
+	// the other side's traffic can eat part or all of an inbound packet
+	// whichever side is selected -- tuning the right channel on a radio that
+	// will then drop frames is worth saying out loud. Turning it off for the
+	// duration belongs to the session-settings work, not here.
+	if set.DoubleChannel != benshi.DoubleChannelOff {
+		log.Printf("rig: dual watch is on (side %s selected) -- the QSY applies correctly, "+
+			"but packet will drop frames while the receiver is shared with the other side; "+
+			"turn dual watch off for packet operation",
+			dualWatchSideName(set.DoubleChannel))
 	}
-	if live != id {
-		return benshi.RFCh{}, fmt.Errorf("%w (settings say channel %d, status says %d)", ErrVFOAmbiguous, id, live)
+	// Cross-check against the live status ONLY when dual watch is off.
+	//
+	// With dual watch on, curr_ch_id does not track the selected side: it read
+	// 1 whether A or B was selected, while the settings record correctly
+	// identified both (measured 2026-10-01). Cross-checking there would
+	// disagree for a benign reason and refuse a QSY that is perfectly safe.
+	// With dual watch off the two agree, and the check still earns its place
+	// catching states this code does not model.
+	if set.DoubleChannel == benshi.DoubleChannelOff {
+		live, err := r.currChannel()
+		if err != nil {
+			return benshi.RFCh{}, err
+		}
+		if live != id {
+			return benshi.RFCh{}, fmt.Errorf("%w (settings say channel %d, status says %d)", ErrVFOAmbiguous, id, live)
+		}
 	}
 	body, err := r.request(benshi.CmdReadRFCh, []byte{id})
 	if err != nil {
@@ -725,5 +749,18 @@ func (r *Rig) dispatch(f benshi.Frame) {
 		case w <- m:
 		default:
 		}
+	}
+}
+
+// dualWatchSideName renders which side the operator has selected, for log
+// messages. See benshi.Settings.ActiveChannel for the measured mapping.
+func dualWatchSideName(d benshi.DoubleChannel) string {
+	switch d {
+	case benshi.DoubleChannelA:
+		return "A"
+	case benshi.DoubleChannelB:
+		return "B"
+	default:
+		return "unknown"
 	}
 }

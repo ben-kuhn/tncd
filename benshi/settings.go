@@ -44,15 +44,32 @@ type Settings struct {
 // ActiveChannel returns the channel index the radio transmits on, and whether
 // that is unambiguous.
 //
-// With dual watch off, the radio operates on VFO A. With it on, which VFO
-// carries a transmission depends on radio state this record does not capture,
-// so this reports false rather than guessing -- writing the wrong VFO's record
-// would retune a band the operator is still listening to.
+// DoubleChannel carries both "is dual watch on" and, when it is, which side the
+// operator has SELECTED as active -- the selection is theirs to make from the
+// front panel. Measured on a UV-PRO 2026-10-01 by toggling the selection and
+// diffing the settings record:
+//
+//	A selected -> DoubleChannel = 1   -> transmits on ChannelA
+//	B selected -> DoubleChannel = 2   -> transmits on ChannelB
+//	dual watch off -> 0               -> transmits on ChannelA
+//
+// which matches benlink's ChannelType exactly. An earlier version returned
+// false for the B case because the mapping was unverified; it is verified now,
+// so all three cases are answerable.
+//
+// Note that GET_HT_STATUS's curr_ch_id must NOT be used to cross-check this
+// while dual watch is on: it read 1 regardless of whether A or B was selected,
+// and 252 (ChannelA's value) with dual watch off, so it does not track the
+// selection. See internal/rig's activeChannel.
 func (s Settings) ActiveChannel() (byte, bool) {
 	switch s.DoubleChannel {
 	case DoubleChannelOff, DoubleChannelA:
 		return s.ChannelA, true
+	case DoubleChannelB:
+		return s.ChannelB, true
 	default:
+		// An encoding this code has not seen. Refusing beats guessing when
+		// the next step rewrites a channel record.
 		return 0, false
 	}
 }

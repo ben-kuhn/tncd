@@ -214,24 +214,49 @@ func TestSetFreqRefusesNamedChannel(t *testing.T) {
 	}
 }
 
-// TestSetFreqRefusesDualWatch covers the other refusal: with dual watch on,
-// which VFO a transmission goes out on is not derivable, so writing either
-// record could retune a band the operator is still listening to.
-func TestSetFreqRefusesDualWatch(t *testing.T) {
+// TestSetFreqInDualWatchTargetsTheSelectedSide: dual watch is no longer a
+// refusal. The selected side is readable (see benshi.Settings.ActiveChannel),
+// so the target record is unambiguous and the QSY applies correctly.
+//
+// It is still a bad state for packet -- the receiver time-slices between two
+// frequencies, so the other side's traffic can eat inbound frames whichever
+// side is selected -- which is why SetFreq warns, and why turning dual watch
+// off is part of the session-settings design rather than something SetFreq
+// enforces by refusing.
+//
+// With B selected this radio's channel_b is memory 1 ("MN Pack"), so the name
+// guard fires and the QSY is refused for THAT reason -- which is the correct
+// outcome and proves the right side was resolved.
+func TestSetFreqInDualWatchTargetsTheSelectedSide(t *testing.T) {
 	ch := newFakeChannel()
 	r := New(ch, time.Second, 0)
 	defer r.Close()
 
-	dual := append([]byte{}, fakeSettingsCh252...)
-	dual[2] |= 0x20 // double_channel = B (bits 10..11 of the record)
+	// double_channel = 2 (B selected); channel_b = 1.
+	dwB := append([]byte{}, fakeSettingsCh252...)
+	dwB[2] = (dwB[2] & 0xCF) | 0x20
 
 	go func() {
 		ch.awaitWrite(t, 1)
-		ch.reply(benshi.CmdReadSettings, dual)
+		ch.reply(benshi.CmdReadSettings, dwB)
+		// No GET_HT_STATUS: the cross-check is skipped in dual watch because
+		// curr_ch_id does not track the selection there.
+		ch.awaitWrite(t, 2)
+		ch.reply(benshi.CmdReadRFCh, append([]byte{0x00}, fakeNamedRecord...))
 	}()
 
-	if err := r.SetFreq(145670000); !errors.Is(err, ErrDualWatch) {
-		t.Fatalf("SetFreq in dual watch: err = %v, want ErrDualWatch", err)
+	err := r.SetFreq(145670000)
+	if !errors.Is(err, ErrChannelMode) {
+		t.Fatalf("SetFreq with B selected: err = %v, want ErrChannelMode (channel_b is a named memory)", err)
+	}
+	// Two requests, not three: settings then READ_RF_CH, with no status read.
+	if n := len(ch.writes()); n != 2 {
+		t.Errorf("sent %d requests, want 2 (settings, read_rf_ch -- no status cross-check in dual watch)", n)
+	}
+	for _, w := range ch.writes() {
+		if m, derr := benshi.DecodeMessage(w[4:]); derr == nil && m.Command == benshi.CmdWriteRFCh {
+			t.Fatal("SetFreq wrote a record despite the name guard refusing")
+		}
 	}
 }
 
