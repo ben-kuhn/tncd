@@ -67,14 +67,15 @@ a consequence of the session settings.
 - tncd's L2 and the gateway are both healthy, which is worth having on record
   independently.
 
-**NOT established, and still open:**
+**Not a question:** whether packet behaves better with dual watch off. There is
+one receiver, time-slicing between two frequencies; traffic on the other side
+eats part or all of an inbound frame. That follows from how the hardware works
+and is not worth bench time. Dual watch off is a requirement, not a hypothesis.
 
-- **Does packet actually behave better with dual watch off?** That is the
-  premise the feature rests on, and it needs a radio that transmits. It cannot be
-  answered on the UV-PRO until its TX bug is fixed. A Benshi radio that does
-  transmit, or a fixed UV-PRO firmware, is required.
-- The automatic trigger points are still unwired, so this test drove the session
-  from the CLI rather than from a connect.
+**Still open:**
+
+- The automatic trigger points are unwired, so this test drove the session from
+  the CLI rather than from a connect.
 
 ## Reproducing the TX isolation
 

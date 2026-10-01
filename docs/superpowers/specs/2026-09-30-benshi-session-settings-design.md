@@ -489,7 +489,8 @@ value can never be a cross-check on the live one.
 - OTA: **partly done 2026-10-01** -- see `docs/2026-10-01-session-settings-ota.md`.
   Writes are confirmed PERSISTENT, not volatile. Acquire and restore were
   validated from the worst starting state (dual watch on, both VFOs on named
-  memories, APRS on) and every record came back byte-identical. Whether a session
-  actually behaves better with dual watch off is still OPEN: the UV-PRO does not
-  transmit (its own firmware bug, isolated by a modem swap in that report), so the
-  premise needs a Benshi radio that does.
+  memories, APRS on) and every record came back byte-identical. The UV-PRO does
+  not transmit (its own firmware bug, isolated by a modem swap in that report), so
+  nothing TX-side can be validated on that radio -- but "does packet behave better
+  with dual watch off" is not among the things needing validation: one receiver
+  time-slicing two frequencies drops frames by construction.
