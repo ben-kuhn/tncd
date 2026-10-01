@@ -53,16 +53,59 @@ disconnect, tncd shutdown (signal handler).
 
 **When restore is impossible** (port dead, radio unreachable at shutdown):
 retry while the process lives and the port may come back; at shutdown, log
-loudly and give up. **No on-disk snapshot.** The operator was turning these
-off by hand before tncd existed, so a radio left in packet-ready state is the
-state they would have chosen anyway — not worth a state file that can go
-stale, describe a radio that has since been reconfigured, or outlive the
-config that produced it.
+loudly and give up.
 
-`WRITE_SETTINGS` (11) and `STORE_SETTINGS` (12) being separate commands
-strongly suggests writes are volatile and only `STORE_SETTINGS` commits to
-NVRAM. If so a power cycle self-heals, and tncd must never send command 12.
-**Unverified — see below.**
+**Writes are PERSISTENT -- measured 2026-10-01, and this changes the above.**
+An earlier draft of this section reasoned that `WRITE_SETTINGS` (11) and
+`STORE_SETTINGS` (12) being separate commands "strongly suggests writes are
+volatile and only `STORE_SETTINGS` commits to NVRAM. If so a power cycle
+self-heals." That inference was wrong. The radio was left displaced
+(`channel_a` moved off a named memory to the VFO record) and power-cycled: it
+came back up **in VFO mode on the same frequency**, panel identical to before
+the power-off. `WRITE_SETTINGS` reaches NVRAM on its own.
+
+So there is no free safety net. A failed restore is permanent until something
+puts the radio back, and that something has to be tncd or the operator. tncd
+must still never send `STORE_SETTINGS` -- but the reason is now "we do not know
+what it does," not "it is the one that commits."
+
+**This splits the three managed fields into two classes**, and the split is the
+important consequence:
+
+| field | left unrestored | acceptable? |
+|---|---|---|
+| dual watch off | radio stays in single-VFO | **yes** -- what the operator sets by hand for packet anyway |
+| APRS off | no position beacons | **yes, with a caveat** -- benign for packet, but silently stops something the operator may expect to be running |
+| `channel_a` moved to the VFO | radio no longer on their memory channel | **no** -- this is their radio reconfigured, permanently |
+
+The first two keep the original "no on-disk snapshot" reasoning: the operator
+was turning them off by hand before tncd existed, so leaving them off is a
+state they would have chosen anyway, and a state file that can go stale or
+outlive its config buys nothing.
+
+**The third does not.** Leaving an operator's radio parked on a packet
+frequency in VFO mode instead of the memory they had selected is not a state
+they would have chosen, it is now permanent, and -- unlike the other two -- they
+may not even notice until they next key up expecting their voice channel.
+Options, to be decided before this is implemented:
+
+1. **Do not manage `channel_a` at all.** Keep the `ErrChannelMode` refusal and
+   make the operator switch to VFO mode themselves. Loses the feature; costs
+   nothing; the guard already produces an actionable message naming the memory.
+2. **Separate opt-in.** `manage_session_settings` covers dual watch and APRS;
+   a distinct setting covers the memory->VFO switch, so taking the permanent
+   risk is its own deliberate choice.
+3. **Persist just this one field.** A one-line state file holding the
+   pre-session `channel_a`, restored on next startup if still displaced. The
+   staleness objection is much weaker for a single field with a verifiable
+   current value: tncd can re-read `channel_a`, and only restore if it still
+   equals what tncd wrote.
+
+Recommendation: **(2) plus (3)** -- the opt-in keeps an operator who has not
+asked for it entirely clear of the risk, and the one-field snapshot is cheap
+precisely because it is checkable against the radio before being applied.
+Deferred to implementation rather than settled here, since it is the one open
+design question left.
 
 ## Read-modify-write, never rebuild
 
@@ -383,14 +426,50 @@ hands at the radio:
 - **Does behaviour follow the record?** These probes confirm the radio *reports*
   what was written. That the receiver actually stops time-slicing, and the
   beacon actually stops, is still inferred from the menu the bit tracks.
-- **Volatility.** Whether `WRITE_SETTINGS` and `WRITE_BSS_SETTINGS` survive a
-  power cycle is still open. It does not change the design -- tncd must never
-  send `STORE_SETTINGS` (12) either way -- but it decides whether a power cycle
-  self-heals a failed restore.
+- **`WRITE_BSS_SETTINGS` volatility.** `WRITE_SETTINGS` is now measured
+  persistent (see "Restore"); whether the BSS record behaves the same way was
+  not tested separately, though there is no reason to expect it differs.
 
 The probes live in `internal/rig/wsprobe_test.go`, skipped unless
 `TNCD_HW_BDADDR` is set, and each skips rather than guesses if the radio is not
 in the state it needs (dual watch off / APRS on).
+
+## Volatility: MEASURED 2026-10-01 -- writes persist
+
+The test that settled it, run on the UV-PRO:
+
+```
+1. radio on memory 5 ("AUS 730", 145.730), panel showing it
+2. tncd writes channel_a = 252     -> VFO mode, record 252 holds 145.670
+   tncd rig set-freq 145670000     -> QSY through the production path
+3. POWER CYCLE
+4. panel: VFO mode, 145.67 -- identical to step 2
+```
+
+`WRITE_SETTINGS` survives a power cycle with no `STORE_SETTINGS`. The design
+consequences are in "Restore" above.
+
+Two incidental results from the same run:
+
+**Nothing leaked from the earlier round-trip probes.** A power cycle taken
+*before* this test, with everything restored, read back `settings` and `bss`
+byte-identical to their pre-probe values, and `ch 5` still held "AUS 730" on
+145.730. The restore paths are clean across a power cycle, not just within a
+session.
+
+**`curr_ch_id` trails one change behind, which explains every earlier
+reading.** Across this sequence:
+
+| event | `channel_a` | `curr_ch_id` |
+|---|---|---|
+| after power cycle, on memory 5 | 5 | 0 |
+| after writing 252 | 252 | 5 |
+| (earlier) on memory 5, after VFO | 5 | 252 |
+| (earlier) dual watch on | 252 | 1 |
+
+It consistently reports the *previously* selected channel. That is a mechanism,
+not just a correlation, and it retires the field for this purpose: a lagging
+value can never be a cross-check on the live one.
 
 ## Testing
 

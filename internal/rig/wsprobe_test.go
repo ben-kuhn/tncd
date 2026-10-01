@@ -3,6 +3,7 @@ package rig
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -261,4 +262,89 @@ func TestHWBssWriteRoundTrip(t *testing.T) {
 		t.Errorf("radio's BSS record differs from what was written:\n wrote %s\n read  %s",
 			hex.EncodeToString(off), hex.EncodeToString(now))
 	}
+}
+
+// TestHWSetChannelA points the A VFO at a given channel index and LEAVES IT
+// THERE. Unlike the round-trip probes above it deliberately does not restore:
+// its purpose is to displace the radio across a power cycle so the volatility
+// of WRITE_SETTINGS can be observed. TNCD_SET_CHANNEL_A names the target index.
+//
+// channel_a is split across the record: the low nibble is bits 0-3 (byte 0's
+// high nibble) and the high nibble is bits 72-75 (byte 9's high nibble), so
+// writing it means patching two bytes while preserving byte 9's low nibble,
+// which carries channel_b's high nibble.
+func TestHWSetChannelA(t *testing.T) {
+	addr := os.Getenv("TNCD_HW_BDADDR")
+	target := os.Getenv("TNCD_SET_CHANNEL_A")
+	if addr == "" || target == "" {
+		t.Skip("set TNCD_HW_BDADDR and TNCD_SET_CHANNEL_A to move the A VFO")
+	}
+	var want int
+	if _, err := fmt.Sscanf(target, "%d", &want); err != nil || want < 0 || want > 255 {
+		t.Fatalf("TNCD_SET_CHANNEL_A=%q is not a channel index", target)
+	}
+
+	tr := kiss.NewBluetoothTransport(kiss.BluetoothConfig{BDAddr: addr})
+	if err := tr.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer tr.Close()
+	cc, err := kiss.ControlChannelFor(tr)
+	if err != nil {
+		t.Fatalf("control channel: %v", err)
+	}
+	defer cc.Close()
+	r := New(cc, 5*time.Second, 0)
+	defer r.Close()
+
+	before, err := r.request(benshi.CmdReadSettings, nil)
+	if err != nil {
+		t.Fatalf("READ_SETTINGS: %v", err)
+	}
+	set, err := benshi.DecodeSettings(before)
+	if err != nil {
+		t.Fatalf("DecodeSettings: %v", err)
+	}
+	t.Logf("before: %s channel_a=%d", hex.EncodeToString(before[1:]), set.ChannelA)
+
+	rec := append([]byte{}, before[1:]...)
+	if len(rec) < 10 {
+		t.Fatalf("record too short to patch channel_a: %d bytes", len(rec))
+	}
+	rec[0] = (rec[0] & 0x0F) | byte(want&0x0F)<<4
+	rec[9] = (rec[9] & 0x0F) | byte(want>>4)<<4
+
+	check, err := benshi.DecodeSettings(append([]byte{0x00}, rec...))
+	if err != nil {
+		t.Fatalf("DecodeSettings(patched): %v", err)
+	}
+	if int(check.ChannelA) != want {
+		t.Fatalf("patch produced channel_a=%d, want %d -- not writing", check.ChannelA, want)
+	}
+	if check.ChannelB != set.ChannelB || check.DoubleChannel != set.DoubleChannel {
+		t.Fatalf("patch disturbed another field (channel_b %d->%d, double_channel %d->%d) -- not writing",
+			set.ChannelB, check.ChannelB, set.DoubleChannel, check.DoubleChannel)
+	}
+
+	wr, err := r.request(cmdWriteSettings, rec)
+	if err != nil {
+		t.Fatalf("WRITE_SETTINGS: %v", err)
+	}
+	if len(wr) < 1 || wr[0] != 0 {
+		t.Fatalf("WRITE_SETTINGS rejected: % X", wr)
+	}
+
+	after, err := r.request(benshi.CmdReadSettings, nil)
+	if err != nil {
+		t.Fatalf("READ_SETTINGS (after): %v", err)
+	}
+	got, err := benshi.DecodeSettings(after)
+	if err != nil {
+		t.Fatalf("DecodeSettings (after): %v", err)
+	}
+	t.Logf("after:  %s channel_a=%d", hex.EncodeToString(after[1:]), got.ChannelA)
+	if int(got.ChannelA) != want {
+		t.Errorf("radio reports channel_a=%d after writing %d -- write did not take", got.ChannelA, want)
+	}
+	t.Logf("radio LEFT DISPLACED on purpose: channel_a=%d (was %d)", got.ChannelA, set.ChannelA)
 }
