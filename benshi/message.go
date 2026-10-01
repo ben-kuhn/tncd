@@ -41,9 +41,12 @@ const (
 	CmdGetDevInfo        Command = 4
 	CmdEventNotification Command = 9
 	CmdReadSettings      Command = 10
+	CmdWriteSettings     Command = 11
 	CmdReadRFCh          Command = 13
 	CmdWriteRFCh         Command = 14
 	CmdGetHTStatus       Command = 20
+	CmdReadBSSSettings   Command = 33
+	CmdWriteBSSSettings  Command = 34
 	CmdDoProgFunc        Command = 66
 )
 
