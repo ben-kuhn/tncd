@@ -185,31 +185,44 @@ claimed `ActiveChannel()` would pick the wrong record; that was wrong, and is
 corrected here rather than quietly deleted, because the mistake was reasoning
 from the protocol field name instead of from the panel.
 
-Consequences for this design:
+### The selection IS readable -- measured 2026-10-01
 
-- `activeChannel()`'s settings/status cross-check is sound when dual watch is
-  OFF, which is the only case it runs in -- `SetFreq` refuses dual watch
-  before reaching it. Keep both.
-- Do NOT extend that cross-check to the dual-watch case. `curr_ch_id` would
-  disagree with `channel_a` there for a benign reason, and refusing on it would
-  block a QSY that is perfectly safe.
-- **Which side transmits is operator-selectable** -- they choose A or B as
-  active (operator, 2026-10-01). So tncd cannot assume Main/A is the TX VFO,
-  and the dual-watch refusal stands unless the selection can be read reliably.
-- That also means the `curr_ch_id` anomaly above may not be an anomaly at all.
-  If `double_channel` encodes both "dual watch on" AND which side is selected
-  -- making benlink's `ChannelType` (OFF/A/B) correct -- then `curr_ch_id = 1`
-  simply means **B was the selected side** when that capture was taken, and
-  everything is consistent. The capture did not record which side was
-  selected, so this is undetermined rather than contradictory.
-- **The experiment that settles it:** with dual watch on, select A active and
-  capture, then select B active and capture. The diff shows directly whether
-  `double_channel` carries the selection and how its values map. If it does,
-  dual watch becomes manageable: read the selection, use that side's channel,
-  and the refusal can be relaxed.
-- Turning dual watch off still means re-reading afterwards rather than
-  predicting, because the radio demonstrably moves `curr_ch_id` when the
-  setting changes.
+Toggling the active side on the front panel, dual watch on throughout:
+
+```
+A selected      -> double_channel = 1
+B selected      -> double_channel = 2
+dual watch off  -> double_channel = 0
+```
+
+Exactly benlink's `ChannelType{OFF=0, A=1, B=2}` -- so the enum was right, and
+two earlier guesses recorded above were not. `curr_ch_id` read **1 in both
+selections**, confirming it does not track the selection; `double_channel` plus
+`channel_a`/`channel_b` are authoritative.
+
+### But the answer is still "turn it OFF", not "pick a side"
+
+Dual watch is harmful for packet **whichever side is selected**: there is one
+receiver, time-slicing between two frequencies, so activity on the other side
+eats part or all of an inbound frame. Selecting the right side does not help.
+
+So the measured mapping is for **reading and restoring** state, not for
+operating in dual watch:
+
+- `Settings.ActiveChannel()` resolves all three states, so the QSY target is
+  always unambiguous. Implemented, with the three captured records as golden
+  fixtures.
+- `SetFreq` no longer REFUSES in dual watch -- the target is known, so the tune
+  is correct. It logs a warning instead, since the radio will then drop frames
+  for a reason the operator may not connect to their radio settings.
+- `activeChannel()` skips the `curr_ch_id` cross-check when dual watch is on,
+  because that field disagrees there for a benign reason. The check still runs,
+  and still earns its place, when dual watch is off.
+- **Session setup turns dual watch off** (`double_channel = 0`) and restores
+  the previous value on release -- including which side was selected. That is
+  the actual fix; the mapping above is what makes the restore faithful.
+- Restoring still means re-reading rather than predicting, since the radio
+  demonstrably moves `curr_ch_id` when the setting changes.
 
 ## APRS: MEASURED 2026-10-01
 
