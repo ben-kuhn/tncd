@@ -12,7 +12,6 @@
 package rig
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -156,20 +155,27 @@ var ErrDualWatch = errors.New("rig: radio is in dual-watch mode; turn dual watch
 // on its VFO.
 var ErrChannelMode = errors.New("rig: radio is on a named memory channel, not its VFO")
 
-// ErrVFOAmbiguous reports the settings record and the live status disagreeing
-// about which channel the radio is on.
-var ErrVFOAmbiguous = errors.New("rig: radio's settings and status disagree about the active channel")
-
 // activeChannel resolves which channel record the radio actually transmits on,
 // and reads it.
 //
-// This is deliberately not just GET_HT_STATUS's curr_ch_id. That field reports
-// whichever channel is live at the instant it is read, which under dual watch
-// is whichever VFO last received -- not necessarily the one a transmission
-// would go out on. The settings record names both VFOs explicitly, so it is
-// the authority here, and curr_ch_id is used only to cross-check it: if the
-// two disagree the radio is in a state this code does not model, and refusing
-// is the only safe answer when the next step is a write.
+// Settings.channel_a is the sole authority, and GET_HT_STATUS's curr_ch_id is
+// deliberately not consulted at all. Measured 2026-10-01 against the front
+// panel, curr_ch_id disagreed with channel_a in both states where the two
+// could differ, and channel_a was right every time:
+//
+//   - dual watch on: curr_ch_id read 1 whichever side was selected, while
+//     channel_a/channel_b correctly named both sides.
+//   - radio parked on memory 5 ("AUS 730", 145.730, confirmed on the panel and
+//     by READ_RF_CH): channel_a read 5, curr_ch_id stayed 252 -- the VFO
+//     scratch record -- and had not caught up 5s later.
+//
+// An earlier version cross-checked the two and refused on disagreement. That
+// made every QSY *and* every GetFreq fail on a radio sitting on a memory
+// channel, which is the common case this code most needs to handle, and it
+// masked the ErrChannelMode guard that gives the operator an actionable
+// message. curr_ch_id is simply not a reliable report of the active channel on
+// this firmware, so cross-checking against it can only manufacture false
+// refusals.
 func (r *Rig) activeChannel() (benshi.RFCh, error) {
 	sb, err := r.request(benshi.CmdReadSettings, nil)
 	if err != nil {
@@ -195,23 +201,6 @@ func (r *Rig) activeChannel() (benshi.RFCh, error) {
 			"but packet will drop frames while the receiver is shared with the other side; "+
 			"turn dual watch off for packet operation",
 			dualWatchSideName(set.DoubleChannel))
-	}
-	// Cross-check against the live status ONLY when dual watch is off.
-	//
-	// With dual watch on, curr_ch_id does not track the selected side: it read
-	// 1 whether A or B was selected, while the settings record correctly
-	// identified both (measured 2026-10-01). Cross-checking there would
-	// disagree for a benign reason and refuse a QSY that is perfectly safe.
-	// With dual watch off the two agree, and the check still earns its place
-	// catching states this code does not model.
-	if set.DoubleChannel == benshi.DoubleChannelOff {
-		live, err := r.currChannel()
-		if err != nil {
-			return benshi.RFCh{}, err
-		}
-		if live != id {
-			return benshi.RFCh{}, fmt.Errorf("%w (settings say channel %d, status says %d)", ErrVFOAmbiguous, id, live)
-		}
 	}
 	body, err := r.request(benshi.CmdReadRFCh, []byte{id})
 	if err != nil {
@@ -436,45 +425,6 @@ func (r *Rig) GetPTT() (bool, error) {
 		return false, fmt.Errorf("%w (GET_HT_STATUS status %d)", benshi.ErrRadioRejected, body[0])
 	}
 	return body[1]&htStatusTXBit != 0, nil
-}
-
-// htStatusExtLen is the reply body length that distinguishes the extended
-// GET_HT_STATUS reply (StatusExt: status + Status(2) + a trailing 16-bit
-// word) from the plain one (status + Status(2) only). Only StatusExt carries
-// the channel id's upper nibble -- see currChannel.
-const htStatusExtLen = 5
-
-// currChannel returns the radio's currently selected channel id from
-// GET_HT_STATUS.
-//
-// curr_ch_id_lower is the high nibble of the second Status byte, but that's
-// only half the id: on a StatusExt reply the trailing 16-bit word packs
-// rssi(4) region(6) curr_ch_id_upper(4) pad(2), and the true channel is
-// upper<<4|lower. Reading the lower nibble alone silently wraps any channel
-// >= 16 to the wrong one -- live proof: body 00 80 C1 00 3C on a radio
-// parked on channel 252 gives lower=12 (an unprogrammed record) instead of
-// upper<<4|lower=15<<4|12=252, confirmed by READ_RF_CH echoing
-// channel_id=0xFC for the latter. The plain (non-extended) Status reply has
-// no trailing word at all, so there's no upper nibble to read -- decide
-// which shape a given reply is from its length rather than guessing.
-func (r *Rig) currChannel() (byte, error) {
-	body, err := r.request(benshi.CmdGetHTStatus, nil)
-	if err != nil {
-		return 0, err
-	}
-	if len(body) < 3 {
-		return 0, benshi.ErrShortBody
-	}
-	if body[0] != 0 {
-		return 0, fmt.Errorf("%w (GET_HT_STATUS status %d)", benshi.ErrRadioRejected, body[0])
-	}
-	lower := body[2] >> 4
-	if len(body) < htStatusExtLen {
-		return lower, nil
-	}
-	tail := binary.BigEndian.Uint16(body[3:5])
-	upper := byte((tail >> 2) & 0x0F)
-	return upper<<4 | lower, nil
 }
 
 // getDevInfoRequestByte is GET_DEV_INFO's one-byte request body. It's a

@@ -123,16 +123,16 @@ connected therefore still releases, rather than pinning the radio forever.
 
 ## Interaction with the QSY guard
 
-`SetFreq` currently REFUSES in three cases that managed state can turn into
-transitions instead:
+`SetFreq` REFUSES in two remaining cases that managed state can turn into
+transitions instead. A third refusal was deleted outright:
 
 | Refusal | Managed behaviour |
 |---|---|
 | radio in dual watch | turn it off, do the work, put it back |
 | radio on a named memory | switch `channel_a` to the VFO record, restore after |
-| settings/status disagree | still refuse -- this is a state tncd does not model |
+| settings/status disagree | *refusal removed* -- `curr_ch_id` is measured unreliable, so this check only produced false refusals (below) |
 
-All three refusals REMAIN when `manage_session_settings = false`. The split is
+Both remaining refusals REMAIN when `manage_session_settings = false`. The split is
 deliberate: unmanaged, tncd has no mandate to move the operator's radio, so
 refusing is correct; managed, the operator has asked for exactly that.
 
@@ -159,7 +159,7 @@ B VFO watches.** It is not the enable -- but it IS the field dual watch exists
 to use, which is why "channel_b is your dual watch" is a fair description of
 it. BSS, advanced (29) and advanced2 (63) were all byte-identical.
 
-### The important part: `curr_ch_id` is unreliable in dual watch
+### The important part: `curr_ch_id` is unreliable
 
 `GET_HT_STATUS` moved at the same time:
 
@@ -215,9 +215,9 @@ operating in dual watch:
 - `SetFreq` no longer REFUSES in dual watch -- the target is known, so the tune
   is correct. It logs a warning instead, since the radio will then drop frames
   for a reason the operator may not connect to their radio settings.
-- `activeChannel()` skips the `curr_ch_id` cross-check when dual watch is on,
-  because that field disagrees there for a benign reason. The check still runs,
-  and still earns its place, when dual watch is off.
+- `activeChannel()` does not consult `curr_ch_id` **at all** -- see "the
+  cross-check had to go" below. An earlier revision skipped it only in dual
+  watch; measurement on a memory channel showed that was not enough.
 - **Session setup turns dual watch off** (`double_channel = 0`) and restores
   the previous value on release -- including which side was selected. That is
   the actual fix; the mapping above is what makes the restore faithful.
@@ -236,6 +236,76 @@ saved value back really does return the radio to its prior state, so a
 restore is faithful rather than approximate. It also means the only field the
 session needs to touch for dual watch is `double_channel`; the radio handles
 the rest, including putting `curr_ch_id` back.
+
+## The cross-check had to go -- MEASURED 2026-10-01
+
+With dual watch OFF, Main was switched from the VFO to memory 5 on the front
+panel:
+
+```
+settings  channel_a: 252 -> 5        (only field that moved)
+status    00 80 c1 00 3c -> UNCHANGED, curr_ch_id still 252
+```
+
+Re-read 5 seconds later: still 252. It is not lag.
+
+**Which one is right, settled by reading the records themselves:**
+
+```
+ch   1: name="MN Pack"  rx=145670000
+ch   5: name="AUS 730"  rx=145730000   <- panel showed AUS 730
+ch 252: name=""         rx=145670000   <- the unnamed VFO scratch record
+```
+
+The panel showed "AUS 730". `channel_a = 5` names exactly that record.
+`curr_ch_id = 252` named the VFO the radio had left. **`channel_a` is the
+authority; `curr_ch_id` is not.**
+
+So `curr_ch_id` disagreed with `channel_a` in *both* states where the two could
+differ -- dual watch, and memory mode -- and `channel_a` was right both times.
+A field that is only correct in the one case where nothing can go wrong is not
+a cross-check.
+
+### What it cost
+
+The live consequence, measured against the radio before the fix:
+
+```
+$ tncd rig get-freq
+rig: ... settings and status disagree about the active channel (settings say 5, status says 252)
+$ tncd rig set-freq 145030000
+rig: ... settings and status disagree about the active channel (settings say 5, status says 252)
+```
+
+Both commands failed on a radio sitting on a memory channel -- the single most
+common state an operator's radio is in. Worse, it **masked `ErrChannelMode`**,
+the guard that exists precisely for this case and tells the operator what to do
+about it.
+
+After removing the cross-check, same radio, same position:
+
+```
+$ tncd rig get-freq
+145730000
+$ tncd rig set-freq 145030000
+rig: radio is on a named memory channel, not its VFO: channel 5 is "AUS 730"
+     -- switch the radio to VFO/frequency mode first
+```
+
+`GetFreq` answers correctly from the memory record, and the QSY refusal is the
+actionable one.
+
+`currChannel()` and `ErrVFOAmbiguous` are deleted rather than left unused, and
+`TestActiveChannelNeverReadsHTStatus` asserts the request is never sent, so the
+check cannot creep back on the strength of the field's name. The nibble-packing
+decode it contained (`curr_ch_id = upper<<4|lower`, from the StatusExt trailing
+word) is recorded here in case the field is ever needed for something it is
+actually good for.
+
+**Consequence for this design:** the memory -> VFO switch is now the *only* way
+a managed session can QSY a radio parked on a memory, because the name guard is
+reachable again and correctly refuses. That makes the `channel_a` write in
+"Memory mode -> VFO mode -> memory mode" load-bearing rather than a nicety.
 
 ## APRS: MEASURED 2026-10-01
 
