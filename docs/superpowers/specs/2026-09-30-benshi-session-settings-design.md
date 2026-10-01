@@ -347,6 +347,51 @@ Consequences for this design:
 split for BSS, so whether `WRITE_BSS_SETTINGS` persists across a power cycle
 is still unverified, same as `WRITE_SETTINGS`.
 
+## Both managed writes are validated on hardware -- 2026-10-01
+
+The design assumes tncd can read-modify-write these two records and put them
+back faithfully. All three parts of that are now measured on the UV-PRO, each
+probe restoring unconditionally and comparing byte-for-byte.
+
+**`WRITE_SETTINGS` (11) accepts a full record.** An identity write -- read the
+22-byte record, write the same bytes back -- returned status 0 and left the
+record unchanged. The command takes the whole record, so read-modify-write is
+the available shape, exactly as `RFCh.WithFreq` is for channels.
+
+**Dual watch really is writable, not just readable.**
+
+```
+before      5104a6...  double_channel=0
+write A     5114a6...  double_channel=1   <- one byte changed, 04 -> 14
+restore     5104a6...  double_channel=0   byte-identical
+```
+
+**The APRS bit is writable, and the BSS record survives intact.**
+
+```
+before   00 1c 80 1e ... 2f5b4b5530484e00   aprs on   ("/[KU0HN")
+cleared  00 0c 80 1e ... 2f5b4b5530484e00   aprs off  <- one bit
+restore  00 1c 80 1e ... 2f5b4b5530484e00   byte-identical
+```
+
+The callsign and symbol at the tail came back untouched, which is the specific
+disaster read-modify-write exists to prevent here.
+
+So the write path is no longer an assumption. What remains unverified needs
+hands at the radio:
+
+- **Does behaviour follow the record?** These probes confirm the radio *reports*
+  what was written. That the receiver actually stops time-slicing, and the
+  beacon actually stops, is still inferred from the menu the bit tracks.
+- **Volatility.** Whether `WRITE_SETTINGS` and `WRITE_BSS_SETTINGS` survive a
+  power cycle is still open. It does not change the design -- tncd must never
+  send `STORE_SETTINGS` (12) either way -- but it decides whether a power cycle
+  self-heals a failed restore.
+
+The probes live in `internal/rig/wsprobe_test.go`, skipped unless
+`TNCD_HW_BDADDR` is set, and each skips rather than guesses if the radio is not
+in the state it needs (dual watch off / APRS on).
+
 ## Testing
 
 - Golden-byte tests for the settings patcher, from real captured records,
