@@ -882,3 +882,59 @@ func TestT1ReturnsToDataPhaseOnConnect(t *testing.T) {
 		})
 	}
 }
+
+// TestT1FloorRespectsLinkSpeed: the RTT estimator must never settle below the
+// time it physically takes to put the outstanding window on the air and get an
+// answer back. A flat 3s floor ignored the link speed and was far too short at
+// 1200 baud, where a 3-frame window of 254-byte I-frames needs ~6s of air time
+// on its own -- so tncd retransmitted into its own in-flight data and a mod-8
+// receiver counted the retransmission as new data.
+//
+// The samples that drive the estimator down are themselves misleading: RTT is
+// measured on whatever gets acked, and the small FC/FS exchanges around a
+// Winlink transfer come back in about a second.
+func TestT1FloorRespectsLinkSpeed(t *testing.T) {
+	for _, tc := range []struct {
+		baud      int
+		wantFloor time.Duration
+	}{
+		{1200, 6 * time.Second},  // must be well above the flat 3s
+		{9600, 3 * time.Second},  // fast links keep the old floor
+		{19200, 3 * time.Second},
+	} {
+		p := DeriveParams(tc.baud, 3, 10, 180)
+		if p.T1Floor < tc.wantFloor {
+			t.Errorf("%d baud: T1Floor = %v, want >= %v", tc.baud, p.T1Floor, tc.wantFloor)
+		}
+		if p.T1Floor > p.T1 {
+			t.Errorf("%d baud: T1Floor %v exceeds T1 %v", tc.baud, p.T1Floor, p.T1)
+		}
+	}
+}
+
+// TestSRTTNeverSinksBelowTheLinkFloor drives the estimator with the short RTTs a
+// handshake produces and asserts it cannot pull T1 under the link's floor.
+func TestSRTTNeverSinksBelowTheLinkFloor(t *testing.T) {
+	params := DeriveParams(1200, 3, 10, 180)
+	tbl := NewTable(newFakeClock(), Hooks{
+		SendAX25:     func(port int, f *ax25.Frame) {},
+		Connected:    func(c *Conn, in bool) {},
+		Data:         func(c *Conn, pid uint8, d []byte) {},
+		Disconnected: func(c *Conn) {},
+	}, []PortParams{params})
+
+	tbl.OnFrame(0, mkFrame(ax25.SABM, "KU0HN-10", "KU0HN", pf))
+	c := tbl.Get(0, "KU0HN", "KU0HN-10")
+	if c == nil {
+		t.Fatal("no connection")
+	}
+	// Feed it handshake-sized round trips repeatedly.
+	for i := 0; i < 20; i++ {
+		tbl.updateSRTT(c, 800*time.Millisecond)
+	}
+	if c.t1Value < params.T1Floor {
+		t.Errorf("t1Value = %v after 20 fast samples, want >= the link floor %v -- "+
+			"the estimator sized the data phase from handshake traffic",
+			c.t1Value, params.T1Floor)
+	}
+}

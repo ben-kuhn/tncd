@@ -20,6 +20,11 @@ const ax25Overhead = 20
 // Derived from ota_baudrate via DeriveParams (tncd.py:1068-1087).
 type PortParams struct {
 	MaxWindow   int
+	// T1Floor is the shortest T1 the RTT estimator may settle on: the time it
+	// physically takes to put the outstanding window on the air and get an
+	// answer back. Retransmitting sooner than this cannot be correct -- the
+	// data has not finished being transmitted yet.
+	T1Floor time.Duration
 	N2Retry     int
 	T1          time.Duration // data-phase retransmit: max(3s, 2*(window*frameTime + 1s))
 	T1Setup     time.Duration // connection-phase retransmit base (FRACK); 0 means defaultT1Setup
@@ -75,6 +80,15 @@ func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
 	if v := 2.0 * (float64(maxWindow)*frameTime + turnaround); v > t1Sec {
 		t1Sec = v
 	}
+	// The estimator must never go below the time to transmit a full window plus
+	// one turnaround. A flat floor ignores the link speed: 3s is sane at 9600
+	// baud and far too short at 1200, where a 3-frame window of 254-byte
+	// I-frames needs ~6s of air time on its own.
+	t1FloorSec := 3.0
+	if v := float64(maxWindow)*frameTime + turnaround; v > t1FloorSec {
+		t1FloorSec = v
+	}
+
 	t2Sec := 0.1
 	const t2Multiplier = 1.2
 	if v := t2Multiplier * frameTime; v > t2Sec {
@@ -84,6 +98,7 @@ func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
 		MaxWindow: maxWindow,
 		N2Retry:   n2Retry,
 		T1:        time.Duration(t1Sec * float64(time.Second)),
+		T1Floor:   time.Duration(t1FloorSec * float64(time.Second)),
 		T1Setup:   defaultT1Setup,
 		T2:        time.Duration(t2Sec * float64(time.Second)),
 		T3:        time.Duration(t3Seconds) * time.Second,
@@ -179,7 +194,7 @@ func (t *Table) Hooks() *Hooks {
 // portParams returns the PortParams for the given port (clamped to last if out of range).
 func (t *Table) portParams(port int) PortParams {
 	if port < 0 || len(t.params) == 0 {
-		return PortParams{N2Retry: 10, T1: 3 * time.Second, T1Setup: defaultT1Setup}
+		return PortParams{N2Retry: 10, T1: 3 * time.Second, T1Setup: defaultT1Setup, T1Floor: defaultT1Setup}
 	}
 	if port >= len(t.params) {
 		return t.params[len(t.params)-1]
@@ -801,7 +816,21 @@ func (t *Table) ackFrames(c *Conn, nr uint8) {
 // updateSRTT updates smoothed RTT and variance per Karn's algorithm (RFC 2988).
 // Mirrors tncd.py:1404-1421.
 func (t *Table) updateSRTT(c *Conn, rtt time.Duration) {
-	const t1Floor = 3 * time.Second
+	// The floor comes from the port's link speed, not a constant. With a flat
+	// 3s floor the estimator settled below the time needed to transmit a
+	// window on a 1200-baud link, so tncd retransmitted into its own in-flight
+	// data; a mod-8 receiver whose N(R) had advanced then counted the
+	// retransmission as NEW data and the assembled image came out ~1900 bytes
+	// long. See TestT1FloorRespectsLinkSpeed.
+	//
+	// The samples that drive the estimator down are themselves misleading here:
+	// RTT is measured on whatever gets acked, and the small FC/FS exchanges
+	// around a Winlink transfer return in about a second, so an estimator with
+	// no link-aware floor happily sizes the data phase from handshake traffic.
+	t1Floor := t.portParams(c.Port).T1Floor
+	if t1Floor <= 0 {
+		t1Floor = defaultT1Setup
+	}
 	const t1Ceil = 60 * time.Second
 	if c.srtt == 0 {
 		// First measurement.
