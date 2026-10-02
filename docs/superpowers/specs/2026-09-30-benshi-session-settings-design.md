@@ -11,11 +11,12 @@ hardware the same day: two `pat connect` attempts each logged a full acquire
 reporting the ORIGINAL state, proving the release in between, and the radio was
 byte-identical to baseline afterwards. **Remaining: an on-air session driven by
 the automatic path that actually completes a transfer**, which needs a Benshi
-radio that transmits. Whether the UV-PRO does is UNRESOLVED and under
-investigation: it keys the transmitter but nothing it sends has been decoded,
-and an earlier claim that this was isolated to the radio has been retracted --
-see `docs/2026-10-01-uvpro-tx-bidirectional.md`. Until that is settled, this
-feature must not be assumed innocent of it.
+radio that transmits, and the UV-PRO DOES -- confirmed 2026-10-02 once two rig
+faults were fixed (see `docs/2026-10-02-uvpro-tx-confirmed.md`). A full Winlink
+session ran over it with session settings active, reaching 50% of a message
+before the gateway gave up, and every supervisory frame tncd sent was decoded
+off the air by a local receiver. Session settings applied and restored correctly
+throughout. The remaining limit is the RF path to the remote gateway, not tncd.
 
 **Goal**: put a Benshi radio into a state where AX.25 packet actually works for
 the duration of a connected-mode session, and put it back afterwards.

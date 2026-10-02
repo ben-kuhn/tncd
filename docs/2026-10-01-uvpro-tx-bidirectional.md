@@ -1,5 +1,11 @@
 # UV-PRO transmit, isolated bidirectionally — 2026-10-01 (post-reboot)
 
+> **SUPERSEDED — see `docs/2026-10-02-uvpro-tx-confirmed.md`.** The UV-PRO does
+> transmit; this report's zeros were measured with the TS-2000 selected on the
+> wrong VFO (so transmitter and receiver were on different frequencies) and read
+> out through a monitor script that reported false zeros. Nothing in the matrix
+> below is usable.
+>
 > **RETRACTED 2026-10-01, same day.** The conclusion below -- "the UV-PRO does
 > not transmit" -- is not supported by the evidence in it, and the operator was
 > right to reject it. See "What was wrong with this" at the end. The measurements
