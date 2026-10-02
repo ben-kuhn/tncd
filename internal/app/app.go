@@ -317,6 +317,10 @@ func (r *Runtime) gateRigCtl(port int, srv *rigctl.Server) {
 				"The KISS bridge on this port is unaffected. Remove [rigctl.N] enabled = true to "+
 				"silence this.",
 				"port", port, "listen", srv.Addr(), "err", err)
+			// Also stop managing session settings on this port. Without this
+			// the gate still fired on every AX.25 session and logged a failed
+			// restore for a radio it had never successfully touched.
+			r.bridge.DisableRigSettings(port)
 			srv.Close()
 			return
 		}

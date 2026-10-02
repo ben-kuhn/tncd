@@ -314,3 +314,27 @@ func TestRigGateRapidFlapSettlesHeldOrReleasedCorrectly(t *testing.T) {
 	t.Errorf("after a flap ending in zero sessions: actual=%v busy=%v, want released and idle (calls=%v)",
 		actual, busy, f.got())
 }
+
+// TestRigGateDisabledIsInert: when the radio turns out not to speak the control
+// protocol, rig control is disabled for the port -- and the gate must go with
+// it. Without this a port with a non-Benshi radio still tried to acquire on
+// every session and logged "FAILED to restore the radio's settings" about a
+// radio it had never touched, which is both alarming and false.
+func TestRigGateDisabledIsInert(t *testing.T) {
+	f := &fakeGate{}
+	g := newTestGate(f)
+	g.disabled.Store(true)
+
+	g.setSessions(1)
+	g.addClient()
+	if err := g.acquireForQSY(); err != nil {
+		t.Errorf("acquireForQSY on a disabled gate: %v", err)
+	}
+	g.setSessions(0)
+	g.removeClient()
+	g.shutdown()
+	time.Sleep(50 * time.Millisecond)
+	if got := f.got(); len(got) != 0 {
+		t.Errorf("a disabled gate produced %v, want no radio writes at all", got)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ben-kuhn/tncd/v2/internal/rig"
 )
@@ -46,6 +47,13 @@ type rigGate struct {
 	actual bool
 	busy   bool
 
+	// disabled turns the gate inert. Set when the radio turns out not to speak
+	// the control protocol at all: without it, a port whose rig control has
+	// been disabled for exactly that reason still tried to acquire on every
+	// session and logged a "FAILED to restore the radio's settings" alarm
+	// naming a radio it had never touched -- alarming and wrong.
+	disabled atomic.Bool
+
 	// ioMu serializes the radio I/O itself, so the inline acquire a QSY needs
 	// and the background reconcile can never run apply and release at once.
 	ioMu sync.Mutex
@@ -64,6 +72,9 @@ func newRigGate(name string, apply, release func() error) *rigGate {
 
 // setSessions records the port's AX.25 connection count.
 func (g *rigGate) setSessions(n int) {
+	if g.disabled.Load() {
+		return
+	}
 	g.mu.Lock()
 	g.sessions = n
 	g.mu.Unlock()
@@ -72,6 +83,9 @@ func (g *rigGate) setSessions(n int) {
 
 // addClient and removeClient track connected rigctl clients.
 func (g *rigGate) addClient() {
+	if g.disabled.Load() {
+		return
+	}
 	g.mu.Lock()
 	g.clients++
 	g.mu.Unlock()
@@ -99,6 +113,9 @@ func (g *rigGate) removeClient() {
 // an unmanaged radio may still succeed, and refusing to tune because the session
 // settings could not be applied would be worse than tuning without them.
 func (g *rigGate) acquireForQSY() error {
+	if g.disabled.Load() {
+		return nil
+	}
 	g.mu.Lock()
 	g.qsy = true
 	g.mu.Unlock()
@@ -313,6 +330,16 @@ func (b *Bridge) RigClientDisconnected(port int) {
 		return
 	}
 	b.rigGates[port].removeClient()
+}
+
+// DisableRigSettings makes a port's gate inert, for a radio that turns out not
+// to speak the control protocol. Safe to call from any goroutine, and safe to
+// call on a port that never had a gate.
+func (b *Bridge) DisableRigSettings(port int) {
+	if port < 0 || port >= len(b.rigGates) || b.rigGates[port] == nil {
+		return
+	}
+	b.rigGates[port].disabled.Store(true)
 }
 
 // shutdownRigGates restores every held radio, synchronously. Called from
