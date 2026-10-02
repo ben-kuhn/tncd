@@ -289,21 +289,42 @@ func (g *rigGate) reconcile() {
 	}()
 }
 
-// shutdown releases the radio if it is held, synchronously, for the process exit
-// path. Nothing else will put the radio back.
-func (g *rigGate) shutdown() {
+// shutdownWith releases the radio if it is held, synchronously, using the
+// release function given rather than the gate's own.
+//
+// The caller supplies it because Bridge.Shutdown runs ON the engine goroutine,
+// and the gate's normal release does an engine round trip to resolve the rig.
+// Calling that from inside the engine's own closure deadlocks it: the loop is
+// busy running the shutdown and can never service the request it is waiting on.
+// tncd hung on SIGTERM for exactly this reason until the rig was resolved by the
+// caller instead -- app.go carries the same warning for the PTT release path.
+//
+// Nothing else will put the radio back after this, so a failure is reported with
+// the command that will.
+func (g *rigGate) shutdownWith(release func() error) {
 	g.mu.Lock()
 	g.sessions, g.clients, g.qsy = 0, 0, false
 	held := g.actual
+	if g.retry != nil {
+		g.retry.Stop()
+		g.retry = nil
+	}
 	g.mu.Unlock()
 	if !held {
 		return
 	}
-	if _, _, err := g.step(); err != nil {
+	g.ioMu.Lock()
+	err := release()
+	g.ioMu.Unlock()
+	if err != nil {
 		log.Printf("rig: %s: FAILED to restore the radio's settings at shutdown (%v) -- "+
 			"it is still in packet configuration; "+
 			"use `tncd rig session-set` to put it back", g.name, err)
+		return
 	}
+	g.mu.Lock()
+	g.actual = false
+	g.mu.Unlock()
 }
 
 // --- Bridge wiring ----------------------------------------------------------
@@ -421,9 +442,19 @@ func (b *Bridge) RigPortBack(port int) {
 // Shutdown: these writes reach NVRAM, so if this does not put the radio back
 // nothing else will.
 func (b *Bridge) shutdownRigGates() {
-	for _, g := range b.rigGates {
-		if g != nil {
-			g.shutdown()
+	for port, g := range b.rigGates {
+		if g == nil {
+			continue
 		}
+		p := port
+		// Already on the engine goroutine, so resolve the rig inline. Going
+		// through withRig here would deadlock -- see shutdownWith.
+		g.shutdownWith(func() error {
+			r, err := b.RigFor(p)
+			if err != nil {
+				return err
+			}
+			return r.ReleaseSession()
+		})
 	}
 }

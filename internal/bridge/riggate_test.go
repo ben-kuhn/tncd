@@ -253,12 +253,12 @@ func TestRigGateShutdownReleases(t *testing.T) {
 
 	g.setSessions(1)
 	waitCalls(t, f, []string{"apply"})
-	g.shutdown()
+	g.shutdownWith(g.release)
 	if got := f.got(); !eq(got, []string{"apply", "release"}) {
 		t.Errorf("calls = %v after shutdown, want [apply release]", got)
 	}
 	// Idempotent: a second shutdown must not write again.
-	g.shutdown()
+	g.shutdownWith(g.release)
 	if got := f.got(); !eq(got, []string{"apply", "release"}) {
 		t.Errorf("calls = %v after a second shutdown, want no extra writes", got)
 	}
@@ -270,7 +270,7 @@ func TestRigGateShutdownWithNothingHeldIsSilent(t *testing.T) {
 	f := &fakeGate{}
 	g := newTestGate(f)
 	g.addClient()
-	g.shutdown()
+	g.shutdownWith(g.release)
 	if got := f.got(); len(got) != 0 {
 		t.Errorf("shutdown produced %v with nothing held, want no radio writes", got)
 	}
@@ -334,7 +334,7 @@ func TestRigGateDisabledIsInert(t *testing.T) {
 	}
 	g.setSessions(0)
 	g.removeClient()
-	g.shutdown()
+	g.shutdownWith(g.release)
 	time.Sleep(50 * time.Millisecond)
 	if got := f.got(); len(got) != 0 {
 		t.Errorf("a disabled gate produced %v, want no radio writes at all", got)
@@ -569,5 +569,36 @@ func TestRigGateGivesUpRestoringEventually(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "session-set") {
 		t.Errorf("gave up without naming the recovery command:\n%s", out.String())
+	}
+}
+
+// TestRigGateShutdownUsesTheCallersRelease pins why shutdownWith takes a release
+// function. Bridge.Shutdown runs on the engine goroutine, and the gate's normal
+// release does an engine round trip to resolve the rig -- calling that from inside
+// the engine's own closure deadlocks the loop, which is how tncd came to hang on
+// SIGTERM. The caller must be able to supply a release that resolves the rig
+// inline.
+func TestRigGateShutdownUsesTheCallersRelease(t *testing.T) {
+	f := &fakeGate{}
+	g := newTestGate(f)
+	g.setSessions(1)
+	waitCalls(t, f, []string{"apply"})
+
+	called := false
+	g.shutdownWith(func() error { called = true; return nil })
+	if !called {
+		t.Fatal("shutdownWith did not use the release it was given")
+	}
+	for _, c := range f.got() {
+		if c == "release" {
+			t.Error("shutdownWith used the gate's own release instead of the caller's -- " +
+				"that is the engine round trip that deadlocks on SIGTERM")
+		}
+	}
+	g.mu.Lock()
+	held := g.actual
+	g.mu.Unlock()
+	if held {
+		t.Error("gate still reports the radio held after a successful shutdown release")
 	}
 }
