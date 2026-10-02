@@ -500,6 +500,53 @@ It consistently reports the *previously* selected channel. That is a mechanism,
 not just a correlation, and it retires the field for this purpose: a lagging
 value can never be a cross-check on the live one.
 
+## Hardware validation, 2026-10-02
+
+The three paths that unit tests could only model were run against the radio, and
+each one hid a real bug. None of them needed a transfer to COMPLETE -- the trigger
+fires when a connection is created, so a connect to an absent station exercises
+the whole path.
+
+| path | result | what it found |
+|---|---|---|
+| refcount, two overlapping sessions | PASS | nothing -- one acquire, one release |
+| restore across a port drop | PASS after fixes | **two stacked faults** |
+| restore on shutdown (SIGTERM) | PASS after fix | **tncd hung forever** |
+| non-Benshi port with rig control on | PASS | validated the disable path |
+
+**The port-drop bug was the serious one.** The gate cleared its state when a
+release failed, so it believed the radio was restored and never retried -- and a
+Bluetooth port bouncing mid-session is the common case, not a rare one. Worse,
+the failed attempt destroyed the evidence: `RigFor` calls `invalidateRig` when it
+finds the port offline, which is exactly the path a release takes on its way to
+reporting "port is offline", and that dropped the rig along with the session
+state it held. The retry then built a fresh rig holding nothing, found nothing to
+restore, and reported SUCCESS while the operator's radio stayed displaced.
+
+The unit test for the carry-over passed throughout, because it modelled the rig
+swap in `RigFor` and not the invalidate-on-offline path that runs first. Session
+state now lives on the Bridge, and a failed restore is re-attempted on a spaced,
+bounded schedule rather than on a single poke when the port reports
+"reconnected" -- that poke raced the port becoming usable, failed with the same
+error, and was deduped into silence.
+
+**The shutdown hang** was a self-deadlock: `Bridge.Shutdown` runs inside
+`eng.Do`, and the gate's release did another `eng.Do` and waited on an engine
+already busy running the shutdown. `app.go` carries a comment warning about
+exactly this hazard for the PTT release; it was reintroduced one layer up.
+
+**Verification method worth reusing.** Release is silent on success, so it is
+confirmed indirectly: start another session and check whether its acquire reports
+the ORIGINAL value ("from channel 1"). `AcquireSession` is idempotent while held,
+so an acquire that logs at all proves the previous release ran, and the value it
+names proves the restore was complete rather than partial.
+
+**One limitation found, not yet addressed.** These tests needed
+`rx_wedge_timeout = 0`: on a failing radio the watchdog relinks at 25 s and tears
+the control channel out from under an in-flight acquire, so the session proceeds
+unmanaged. On a healthy radio the acquire completes long before 25 s, so this is
+only reachable when the radio is already in trouble -- but it is a real gap.
+
 ## Testing
 
 - Golden-byte tests for the settings patcher, from real captured records,
