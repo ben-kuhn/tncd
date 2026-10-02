@@ -824,3 +824,61 @@ func TestSetupRetriesAreNotDataPhaseSpaced(t *testing.T) {
 			"(retries still spaced by the data-phase T1?)", steps, defaultT1Setup, got, want)
 	}
 }
+
+// TestT1ReturnsToDataPhaseOnConnect is the fix for a regression that corrupted
+// Winlink uploads.
+//
+// T1Setup (FRACK) is sized for a handshake -- a ~17-byte command and a ~17-byte
+// UA. It was left in place after the link came up, so the data phase ran with a
+// 3s retransmit timer when a single window of 254-byte I-frames takes several
+// seconds to transmit at 1200 baud. tncd retransmitted frames still in flight,
+// and a mod-8 receiver whose N(R) had advanced counted them as NEW data: a BPQ
+// gateway assembled 10,275 bytes for an 8,175 byte message and the application
+// checksum failed, while every AX.25 FCS stayed valid. Five of six large uploads
+// failed; none did once T1 was handed back on connect.
+func TestT1ReturnsToDataPhaseOnConnect(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		est  func(tbl *Table)
+	}{
+		{"outgoing connect confirmed by UA", func(tbl *Table) {
+			tbl.Connect(0, "KU0HN", "KU0HN-10", nil)
+			tbl.OnFrame(0, mkFrame(ax25.UA, "KU0HN-10", "KU0HN", resp, pf))
+		}},
+		{"incoming SABM", func(tbl *Table) {
+			tbl.OnFrame(0, mkFrame(ax25.SABM, "KU0HN-10", "KU0HN", pf))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, _, _, _ := newSessionHarness()
+			// A setup timer far shorter than the data-phase T1, as FRACK is.
+			params := DeriveParams(1200, 3, 10, 180)
+			params.T1Setup = 3 * time.Second
+			tbl = NewTable(newFakeClock(), Hooks{
+				SendAX25:     func(port int, f *ax25.Frame) {},
+				Connected:    func(c *Conn, in bool) {},
+				Data:         func(c *Conn, pid uint8, d []byte) {},
+				Disconnected: func(c *Conn) {},
+			}, []PortParams{params, params})
+
+			tc.est(tbl)
+
+			c := tbl.Get(0, "KU0HN", "KU0HN-10")
+			if c == nil {
+				t.Fatal("no connection after establishment")
+			}
+			if c.State != Connected {
+				t.Fatalf("state = %v, want Connected", c.State)
+			}
+			if c.t1Value != params.T1 {
+				t.Errorf("t1Value = %v after connect, want the data-phase T1 %v -- "+
+					"the setup timer leaked into the data phase, which retransmits "+
+					"into frames still in flight and duplicates data at the receiver",
+					c.t1Value, params.T1)
+			}
+			if c.t1Value <= params.T1Setup {
+				t.Errorf("t1Value = %v is no larger than T1Setup %v", c.t1Value, params.T1Setup)
+			}
+		})
+	}
+}

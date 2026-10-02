@@ -568,6 +568,28 @@ func (t *Table) sendSABME(c *Conn) {
 	t.sendFrame(c.Port, f)
 }
 
+// enterConnected does the bookkeeping common to every way a link becomes
+// established, and in particular hands T1 back to the DATA-phase value.
+//
+// This matters more than it looks. T1Setup (FRACK, 3s by default) is sized for a
+// handshake: a ~17-byte command and a ~17-byte UA, a quarter of a second of air
+// time. The data phase is a different problem -- at 1200 baud a window of
+// 254-byte I-frames takes several seconds just to transmit -- and T1 was left
+// holding the setup value until the first round-trip measurement replaced it.
+//
+// On a slow link that is long enough to do real damage. T1 fires before the
+// first window is even on the air, tncd retransmits frames that are still in
+// flight or already acknowledged, and a mod-8 receiver whose N(R) has moved on
+// counts those as NEW data. The result is an assembled image longer than what
+// was sent: measured against a BPQ gateway, 10,275 bytes received for an 8,175
+// byte message, failing the application checksum while every AX.25 FCS stayed
+// valid. Five of six large uploads failed that way; with the data-phase T1
+// restored, none did.
+func (t *Table) enterConnected(c *Conn) {
+	c.State = Connected
+	c.t1Value = t.portParams(c.Port).T1
+}
+
 // fallbackToSABM downgrades a still-connecting mod-128 attempt to mod-8 and
 // resends SABM. Mirrors Direwolf set_version_2_0 + resend. Returns true if a
 // downgrade happened.
@@ -972,7 +994,7 @@ func (t *Table) dispatchSABM(port int, f *ax25.Frame, src, dst string) {
 	// Full state reset (tncd.py:1884-1896). SABM always establishes mod-8,
 	// even on a conn a previous SABME left at mod-128.
 	c.Via = returnVia
-	c.State = Connected
+	t.enterConnected(c)
 	c.modulo = 8
 	c.resetSeqs()
 	c.t1 = cancelTimer(c.t1)
@@ -1023,7 +1045,7 @@ func (t *Table) dispatchSABME(port int, f *ax25.Frame, src, dst string) {
 	ua := respFrame(src, dst, returnVia, ax25.UA, f.PF)
 	t.sendFrame(port, ua)
 	c.Via = returnVia
-	c.State = Connected
+	t.enterConnected(c)
 	c.modulo = 128
 	c.resetSeqs()
 	c.t1 = cancelTimer(c.t1)
@@ -1047,7 +1069,7 @@ func (t *Table) dispatchUA(port int, f *ax25.Frame, src, dst string) {
 	case Connecting:
 		// Outgoing connect confirmed (tncd.py:1922-1934).
 		c.t1 = cancelTimer(c.t1)
-		c.State = Connected
+		t.enterConnected(c)
 		c.sendSeq = 0
 		c.recvSeq = 0
 		c.t1Polls = 0
@@ -1190,7 +1212,7 @@ func (t *Table) dispatchI(port int, f *ax25.Frame, src, dst string) {
 	// Promote to CONNECTED so the I-frame is processed normally below.
 	// Mirrors tncd.py:1749-1759.
 	if c != nil && c.State == Connecting {
-		c.State = Connected
+		t.enterConnected(c)
 		c.t1 = cancelTimer(c.t1) // the SABM retry timer; nothing is awaited now
 		c.t1Polls = 0
 		c.sendSeq = 0
