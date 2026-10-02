@@ -114,3 +114,65 @@ That is a front-panel menu setting on the TS-2000 and hamlib exposes no control
 for it, so it cannot be checked from the host.
 
 Capture was at 35 when this session started and is left at 9.
+
+## Why the 50% stall happened — root-caused with the gateway's logs
+
+The gateway (KU0HN-10, linbpq 25.36 on `bbs`, port 2 = its own Dire Wolf on
+127.0.0.1:9001) keeps a decoder log. With both hosts' clocks verified in sync to
+20 ms, it names the mechanism exactly:
+
+```
+tncd handed acks to the radio   07:44:22.642, :25.626, :28.641
+gateway gave up, sent DISC      07:44:29.264
+gateway RECEIVED all 13 acks    07:44:32.104 -> 07:44:33.624
+                                128 ms apart, audio level decaying 47 -> 14
+```
+
+**The UV-PRO buffered tncd's acknowledgements and released them in a burst three
+seconds after the gateway had already disconnected.** The gateway sent I-frames
+6/7/0, got no ack inside FRACK=8000, resent them three times, then DISCed. The
+whole backlog then arrived at once.
+
+tncd was correct throughout, and this is checkable rather than asserted:
+
+- Its decode of the gateway's frames matches the local Dire Wolf exactly
+  (`I n(s)=6/7/0, n(r)=3`), so there is no sequence-number or mod-128 bug.
+- It answered every poll in the SAME MILLISECOND: `07:44:22.642 [RX] I[0/3]` ->
+  `07:44:22.642 [TX] RR[1]`. The 3-second spacing between acks is the gateway's
+  own `MAXFRAME=3` cycle polling on every third frame, not a tncd timer. (The
+  3-second duplicate-RR suppressor this looked like was removed long ago --
+  see the comment at `ax25/l2/l2.go:365`.)
+- The gateway's decoder hears tncd at audio level 46-51, which is ideal.
+  Reception at the gateway was never the problem.
+
+## Is the benshi work responsible? A/B on a freshly rebooted radio
+
+Run A FIRST so that no Gaia traffic had ever touched the radio in its current
+power cycle, then B. Order matters because the radio's bad state persists.
+
+| run | rig control | tncd TX | reached the air | outcome |
+|---|---|---|---|---|
+| **A** (first after reboot) | **off** | 11 | **1** — the opening SABME, level 49 | connect timed out |
+| **B** (second) | on | 11 | **0** | connect timed out |
+| (earlier, 07:42) | on | — | handshake + 116 inbound frames | 50% of a message, then the stall above |
+
+**Run A is the decisive one.** The radio was freshly rebooted and the benshi code
+was not running at all -- no rig control, no session settings, no Gaia frames on
+the link. The UV-PRO transmitted ONE of eleven frames. It also failed to deliver
+an inbound FRMR that the gateway demonstrably sent and the LOCAL Dire Wolf
+decoded twice -- so frames are lost in both directions.
+
+Run B is confounded by ordering (it ran on a radio already degraded by A) and is
+reported for completeness, not as evidence.
+
+So the failure is not caused by the benshi work: it reproduces fully with that
+code inactive, and the worst of the three runs was the one with it inactive. The
+best run was one with rig control ON. The link drops frames intermittently in
+both directions regardless.
+
+After run B the radio stopped answering even its Gaia control link (the SPP
+socket connects, `READ_SETTINGS` gets no reply), which left `channel_a` displaced
+because the release could not run. It recovered on its own within about two
+minutes and `tncd rig session-set 1 0 off` then restored it. That is worth
+knowing operationally: a wedged radio defeats the restore path, exactly as the
+session-settings design's best-effort caveat predicted.
