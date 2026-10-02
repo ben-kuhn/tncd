@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -336,5 +338,63 @@ func TestRigGateDisabledIsInert(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := f.got(); len(got) != 0 {
 		t.Errorf("a disabled gate produced %v, want no radio writes at all", got)
+	}
+}
+
+// logCapture swaps the standard logger's output for the duration of a test.
+func logCapture(t *testing.T) *strings.Builder {
+	t.Helper()
+	var b strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&b)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &b
+}
+
+// TestRigGateFailedApplyDoesNotClaimTheRadioIsDisplaced: a failed APPLY must not
+// print the restore-failure message. It used to, because the message was chosen
+// from g.actual -- which step() has already set to false by then -- so an acquire
+// that never wrote anything told the operator their radio might be left in packet
+// configuration and to run `session-set` to fix it. Seen in the field on a port
+// whose control channel had closed.
+func TestRigGateFailedApplyDoesNotClaimTheRadioIsDisplaced(t *testing.T) {
+	out := logCapture(t)
+	f := &fakeGate{applyErr: errors.New("control channel closed")}
+	g := newTestGate(f)
+
+	g.setSessions(1)
+	waitCalls(t, f, []string{"apply"})
+	time.Sleep(50 * time.Millisecond)
+
+	got := out.String()
+	if strings.Contains(got, "FAILED to restore") {
+		t.Errorf("a failed apply logged the restore-failure message:\n%s", got)
+	}
+	if !strings.Contains(got, "could not apply session settings") {
+		t.Errorf("a failed apply did not log the apply-failure message:\n%s", got)
+	}
+}
+
+// TestRigGateFailedReleaseSaysSo is the other half: a failed RELEASE must still
+// tell the operator the radio is displaced and name the command that fixes it,
+// because these writes reach NVRAM and nothing else will put them back.
+func TestRigGateFailedReleaseSaysSo(t *testing.T) {
+	f := &fakeGate{}
+	g := newTestGate(f)
+	g.setSessions(1)
+	waitCalls(t, f, []string{"apply"})
+
+	out := logCapture(t)
+	f.releaseOK = func() error { return errors.New("port offline") }
+	g.setSessions(0)
+	waitCalls(t, f, []string{"apply", "release"})
+	time.Sleep(50 * time.Millisecond)
+
+	got := out.String()
+	if !strings.Contains(got, "FAILED to restore") {
+		t.Errorf("a failed release did not warn that the radio is displaced:\n%s", got)
+	}
+	if !strings.Contains(got, "session-set") {
+		t.Errorf("a failed release did not name the recovery command:\n%s", got)
 	}
 }

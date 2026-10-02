@@ -137,8 +137,10 @@ func (g *rigGate) desiredLocked() bool {
 }
 
 // step performs at most one transition toward the desired state, serialized
-// against every other caller. Reports whether it did any work.
-func (g *rigGate) step() (bool, error) {
+// against every other caller. Reports whether it did any work, and which
+// direction it attempted -- the caller needs the direction to describe a
+// failure, because by the time it looks, the state has already moved.
+func (g *rigGate) step() (did bool, applied bool, err error) {
 	g.ioMu.Lock()
 	defer g.ioMu.Unlock()
 
@@ -146,10 +148,9 @@ func (g *rigGate) step() (bool, error) {
 	want, have := g.desiredLocked(), g.actual
 	g.mu.Unlock()
 	if want == have {
-		return false, nil
+		return false, want, nil
 	}
 
-	var err error
 	if want {
 		err = g.apply()
 	} else {
@@ -173,7 +174,7 @@ func (g *rigGate) step() (bool, error) {
 		g.actual = false
 		g.qsy = false
 	}
-	return true, err
+	return true, want, err
 }
 
 // drain converges the radio toward the desired state, re-reading that state
@@ -181,9 +182,9 @@ func (g *rigGate) step() (bool, error) {
 // racing a second goroutine.
 func (g *rigGate) drain() error {
 	for {
-		did, err := g.step()
+		did, applied, err := g.step()
 		if err != nil {
-			g.logStepError(err)
+			g.logStepError(applied, err)
 			return err
 		}
 		if !did {
@@ -192,11 +193,16 @@ func (g *rigGate) drain() error {
 	}
 }
 
-func (g *rigGate) logStepError(err error) {
-	g.mu.Lock()
-	held := g.actual
-	g.mu.Unlock()
-	if held {
+// logStepError describes the failure by what was ATTEMPTED, not by the state
+// afterwards.
+//
+// This used to read g.actual, which step() has already updated by then: after a
+// failed apply, actual is false, so a failed APPLY printed the RESTORE message
+// and told the operator their radio might be left in packet configuration when
+// nothing had been written to it at all. Seen in the field on a port whose
+// control channel had closed.
+func (g *rigGate) logStepError(applied bool, err error) {
+	if applied {
 		log.Printf("rig: %s: could not apply session settings (%v) -- "+
 			"continuing with the radio as the operator left it", g.name, err)
 		return
@@ -237,7 +243,7 @@ func (g *rigGate) shutdown() {
 	if !held {
 		return
 	}
-	if _, err := g.step(); err != nil {
+	if _, _, err := g.step(); err != nil {
 		log.Printf("rig: %s: FAILED to restore the radio's settings at shutdown (%v) -- "+
 			"it is still in packet configuration; "+
 			"use `tncd rig session-set` to put it back", g.name, err)
