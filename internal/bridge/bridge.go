@@ -82,6 +82,9 @@ type Bridge struct {
 	// rigGates decide when each port's radio is in packet configuration; nil
 	// for ports without rig control. See riggate.go.
 	rigGates []*rigGate
+	// rigSessions holds displaced session state for a port with no live rig, so
+	// it survives invalidateRig. See invalidateRig for why that matters.
+	rigSessions []rig.SessionState
 
 	// portEpoch[port] is bumped every time a connect attempt for the port is
 	// initiated (initial, auto-reconnect, manual relink, wedge relink). A dial
@@ -298,11 +301,11 @@ func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
 	// not come back with a rig that has forgotten what to put back: a fresh
 	// acquire would then capture tncd's own packet settings as the
 	// "original" and strand the operator off their memory channel for good.
+	b.invalidateRig(port) // stashes any held session state on the bridge
 	var carried rig.SessionState
-	if port < len(b.rigs) && b.rigs[port].r != nil {
-		carried = b.rigs[port].r.SessionState()
+	if port < len(b.rigSessions) {
+		carried = b.rigSessions[port]
 	}
-	b.invalidateRig(port)
 	ch, err := kp.ControlChannel()
 	if err != nil {
 		return nil, fmt.Errorf("bridge: port %d: %w", port, err)
@@ -313,6 +316,11 @@ func (b *Bridge) RigFor(port int) (*rig.Rig, error) {
 	}
 	r := rig.New(ch, rigRequestTimeout, vfoMin)
 	r.AdoptSession(carried)
+	if port < len(b.rigSessions) {
+		// Handed over: the rig owns it now, and leaving a copy here would let a
+		// later swap re-adopt state that has since been restored.
+		b.rigSessions[port] = rig.SessionState{}
+	}
 	if port < len(b.rigs) {
 		b.rigs[port] = rigSlot{kp: kp, r: r}
 	}
@@ -363,7 +371,17 @@ func (b *Bridge) logReconnectError(port int, err error) {
 // not to drown everything else.
 const reconnectLogRepeatEvery = 60
 
-// invalidateRig closes and drops any rig cached for port. Rig.Close detaches
+// invalidateRig closes and drops any rig cached for port, PRESERVING any
+// displaced session state on the bridge first.
+//
+// Preserving it here rather than only at the rig swap in RigFor is load-bearing.
+// RigFor invalidates the rig when it finds the port offline, which is exactly
+// what a failed restore does on its way to reporting "port is offline" -- so the
+// attempt to put the radio back was itself destroying the record of what to put
+// back. The retry then built a fresh rig holding nothing, found nothing to
+// restore, and reported success while the operator's radio stayed on the VFO
+// record. Reproduced on hardware.
+// Rig.Close detaches
 // the control-channel consumer (kiss.Port.ControlChannel's single-consumer
 // slot) and stops the rig's reader goroutine; it does not touch the
 // transport (see portControlChannel.Close's doc comment), so this is safe
@@ -372,6 +390,9 @@ const reconnectLogRepeatEvery = 60
 func (b *Bridge) invalidateRig(port int) {
 	if port < 0 || port >= len(b.rigs) || b.rigs[port].r == nil {
 		return
+	}
+	if st := b.rigs[port].r.SessionState(); st.Held() && port < len(b.rigSessions) {
+		b.rigSessions[port] = st
 	}
 	b.rigs[port].r.Close()
 	b.rigs[port] = rigSlot{}
@@ -637,6 +658,7 @@ func (b *Bridge) initLastRX() {
 	b.lastRX = make([]time.Time, len(b.ports))
 	b.relinks = make([]int, len(b.ports))
 	b.rigs = make([]rigSlot, len(b.ports))
+	b.rigSessions = make([]rig.SessionState, len(b.ports))
 	b.initRigGates()
 	now := time.Now()
 	for i := range b.lastRX {
@@ -864,6 +886,8 @@ func (b *Bridge) connectPortWithBackoff(idx int, pc config.Port, nextDelay float
 		}
 		b.ports[idx] = port
 		log.Printf("bridge: port %d reconnected", idx)
+		// A restore that failed while this port was down can run now.
+		b.RigPortBack(idx)
 	})
 }
 

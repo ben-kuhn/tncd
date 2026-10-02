@@ -5,6 +5,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ben-kuhn/tncd/v2/internal/rig"
 )
@@ -46,6 +47,14 @@ type rigGate struct {
 	// goroutine is already converging it toward the desired state.
 	actual bool
 	busy   bool
+
+	// releaseFailures counts consecutive failed restores, and lastFailure is the
+	// reason last reported, so a radio that stays unreachable does not repeat
+	// the same alarm on every event.
+	releaseFailures int
+	lastFailure     string
+	// retry is the pending delayed restore attempt, if any.
+	retry *time.Timer
 
 	// disabled turns the gate inert. Set when the radio turns out not to speak
 	// the control protocol at all: without it, a port whose rig control has
@@ -164,17 +173,52 @@ func (g *rigGate) step() (did bool, applied bool, err error) {
 		g.actual = want
 		if !want {
 			g.qsy = false
+			g.releaseFailures, g.lastFailure = 0, ""
+			if g.retry != nil {
+				g.retry.Stop()
+				g.retry = nil
+			}
 		}
 	case !want:
-		// A failed release is NOT left pending for a retry loop: the radio may
-		// simply be gone, and since these writes reach NVRAM there is no
-		// power-cycle safety net to wait for. Record it as released and say so
-		// loudly -- the operator needs to know their radio is still configured
-		// for packet, and the exact command to undo it.
-		g.actual = false
-		g.qsy = false
+		// A failed release stays HELD so it can be retried. It used to clear
+		// actual here, which made the gate believe the radio was restored when
+		// it had not been -- and that is the common case, not a rare one: a
+		// Bluetooth port that bounces mid-session fails the release while
+		// offline, reconnects five seconds later, and the operator's radio was
+		// then left on the VFO record permanently. Reproduced on hardware.
+		//
+		// This cannot spin: drain stops on error, and reconcile only runs on
+		// events (a session starting or ending, a client arriving, a port
+		// coming back). The repeated-failure logging is deduped below.
+		g.releaseFailures++
+		g.scheduleRetryLocked()
 	}
 	return true, want, err
+}
+
+// releaseRetryDelays are the waits before each re-attempt at restoring a radio
+// whose release failed. They are spaced rather than immediate because the
+// failure is usually a port that is coming back: poking the gate the instant
+// "reconnected" is logged races the port actually becoming usable, and that
+// retry then fails with the same error and is deduped into silence -- observed
+// on hardware. They are bounded because a radio that is simply gone should not
+// be retried forever; the final failure tells the operator how to put it back.
+var releaseRetryDelays = []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 60 * time.Second}
+
+// scheduleRetryLocked arms the next restore attempt. Caller holds g.mu.
+func (g *rigGate) scheduleRetryLocked() {
+	if g.retry != nil {
+		g.retry.Stop()
+		g.retry = nil
+	}
+	i := g.releaseFailures - 1
+	if i < 0 || i >= len(releaseRetryDelays) {
+		log.Printf("rig: %s: giving up on restoring the radio after %d attempts -- "+
+			"it is still in packet configuration; use `tncd rig session-set` to put it back",
+			g.name, g.releaseFailures)
+		return
+	}
+	g.retry = time.AfterFunc(releaseRetryDelays[i], func() { g.reconcile() })
 }
 
 // drain converges the radio toward the desired state, re-reading that state
@@ -207,9 +251,21 @@ func (g *rigGate) logStepError(applied bool, err error) {
 			"continuing with the radio as the operator left it", g.name, err)
 		return
 	}
-	log.Printf("rig: %s: FAILED to restore the radio's settings (%v) -- "+
-		"it may still be in packet configuration; "+
-		"use `tncd rig session-set` to put it back", g.name, err)
+	// Repeat the restore alarm only when the reason changes. The retry fires on
+	// every later event, and a radio that is simply gone would otherwise bury
+	// the one line the operator needs under identical copies.
+	g.mu.Lock()
+	first := g.lastFailure != err.Error()
+	g.lastFailure = err.Error()
+	n := g.releaseFailures
+	g.mu.Unlock()
+	if !first {
+		return
+	}
+	log.Printf("rig: %s: could not restore the radio's settings (%v) -- attempt %d; "+
+		"it is still in packet configuration and tncd will keep trying while the port "+
+		"may come back. If tncd exits first, use `tncd rig session-set` to put it back",
+		g.name, err, n)
 }
 
 // reconcile converges in the background, since the counts change on the engine
@@ -346,6 +402,19 @@ func (b *Bridge) DisableRigSettings(port int) {
 		return
 	}
 	b.rigGates[port].disabled.Store(true)
+}
+
+// RigPortBack tells a port's gate that its transport is usable again, so a
+// restore that failed while the port was down can be retried.
+//
+// Without this nothing retried: the gate only reconciles on session and client
+// events, and a port bouncing mid-session produces neither once the session is
+// already gone.
+func (b *Bridge) RigPortBack(port int) {
+	if port < 0 || port >= len(b.rigGates) || b.rigGates[port] == nil {
+		return
+	}
+	b.rigGates[port].reconcile()
 }
 
 // shutdownRigGates restores every held radio, synchronously. Called from
