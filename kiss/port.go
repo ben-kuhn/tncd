@@ -49,6 +49,10 @@ type Port struct {
 	// flight. acquireTxSem lets writerLoop (and any later control write)
 	// give up cleanly once the port is torn down instead.
 	txSem chan struct{}
+
+	// pace bounds how far ahead of the air frames are handed to the
+	// transport. Owned exclusively by writerLoop -- see pacing.go.
+	pace pacer
 }
 
 // NewPort creates a Port that is not yet started.
@@ -63,6 +67,7 @@ func NewPort(num int, tr Transport, params Params,
 		txCh:      make(chan []byte, txQueueSize),
 		stopCh:    make(chan struct{}),
 		txSem:     make(chan struct{}, 1),
+		pace:      newPacer(params),
 	}
 }
 
@@ -207,6 +212,18 @@ func (p *Port) writerLoop() {
 	for {
 		select {
 		case frame := <-p.txCh:
+			// Pace by estimated air time before taking the write slot, so a
+			// pacing delay never blocks a rig-control write (which shares
+			// txSem) and never holds the slot while doing nothing.
+			if wait := p.pace.delayFor(len(frame), time.Now()); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-p.stopCh:
+					timer.Stop()
+					return
+				}
+			}
 			if !p.acquireTxSem() {
 				// Port is tearing down -- e.g. a wedged control write already
 				// poisoned it via failTX (see portControlChannel.Write). Give

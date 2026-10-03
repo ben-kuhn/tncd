@@ -116,6 +116,23 @@ The bridge fully implements AX.25 v2.0 connected mode for KISS TNCs:
   the configured over-the-air baud rate and window size
 - **DISC/DM handling** — clean disconnect in both directions; F-bit echoed per spec
 
+### TX Pacing
+
+A KISS TNC takes frames as fast as the link will accept them and queues them
+internally, so a full window of I-frames reaches the TNC in milliseconds and
+then takes seconds to actually transmit. tncd paces its writes by estimated air
+time at `ota_baudrate`, keeping at most one full-size frame of air time
+outstanding at the TNC rather than handing over the whole window at once.
+
+> [!NOTE]
+> This bounds a class of failure where the host cannot see what went wrong: a
+> radio that buffers internally accepts an entire burst and reports success
+> while nothing reaches the air, and L2 can queue a retransmit of a frame the
+> TNC has not started sending. The TX counter means "handed to the transport",
+> never "transmitted". Pacing does not slow a healthy link — the TNC always has
+> work queued — but it needs `ota_baudrate` to match the real channel rate. Set
+> `tx_pacing = false` on the port to restore the old unpaced behaviour.
+
 ## Supported TNC Connections
 
 ### Serial TNC
@@ -290,7 +307,8 @@ callsign = AGWPE
 type = serial
 device = /dev/ttyUSB0
 serial_baudrate = 9600
-ota_baudrate = 1200     # over-the-air baud rate (for T1/T2 timer calculation)
+ota_baudrate = 1200     # over-the-air baud rate (T1/T2 timers and TX pacing)
+# tx_pacing = true      # pace TX by air time at ota_baudrate (default: true)
 # name = My TNC         # human-readable name shown to AGWPE clients
 # parity = N            # N=none, O=odd, E=even, M=mark, S=space (default: N)
 # stopbits = 1          # 1, 1.5, or 2 (default: 1)

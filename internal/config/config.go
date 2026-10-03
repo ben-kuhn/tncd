@@ -98,6 +98,14 @@ type Port struct {
 	AX25Version int  // 20 or 22; default 22
 	SREJ        bool // v2.2 selective reject; default true, effective only on mod-128 links
 
+	// TXPacing bounds how far ahead of the air tncd hands frames to the TNC,
+	// using ota_baudrate as the channel rate (see kiss/pacing.go). Default
+	// true. Set false to hand frames over as fast as the transport accepts
+	// them, which is what tncd did before pacing existed -- useful for
+	// isolating pacing from a problem under test, or if ota_baudrate is
+	// deliberately wrong.
+	TXPacing bool
+
 	// RXWedgeTimeout is the read-side watchdog: if a connection has unacked TX
 	// outstanding and NO frame of any kind arrives on this port for this many
 	// seconds, the link is treated as a wedged Bluetooth SPP RX and auto-relinked.
@@ -186,7 +194,7 @@ var knownClientKeys = []string{
 	"bdaddr", "channel", "reconnect", "reconnect_delay", "reconnect_max_delay",
 	"ota_baudrate", "init_string", "init_delay", "send_kiss_exit",
 	"host_exit_string", "exit_delay",
-	"ax25_version", "srej", "rx_wedge_timeout",
+	"ax25_version", "srej", "rx_wedge_timeout", "tx_pacing",
 }
 
 // knownKISSKeys are the recognized keys in [kiss.N].
@@ -673,6 +681,7 @@ func Load(path string) (*Config, error) {
 			ExitDelay:         getFloat(s, "exit_delay", 1.0),
 			AX25Version:       ax25Version,
 			SREJ:              getBool(s, "srej", true),
+			TXPacing:          getBool(s, "tx_pacing", true),
 			RXWedgeTimeout:    getInt(s, "rx_wedge_timeout", rxWedgeDefault),
 			VFOChannelMin:     getInt(s, "vfo_channel_min", defaultVFOChannelMin),
 		}

@@ -775,6 +775,11 @@ func (b *Bridge) connectPort(idx int, pc config.Port, epoch int) {
 	}
 
 	params := pc.KISS
+	// OTABaud drives TX pacing, which lives in kiss.Port but is configured per
+	// port rather than in [kiss.N]. Zero leaves pacing off.
+	if pc.TXPacing {
+		params.OTABaud = pc.OTABaudrate
+	}
 	port := kiss.NewPort(idx, tr, params,
 		func(f kiss.RXFrame) {
 			b.eng.Do(func() { b.OnKISSFrame(f) })
@@ -863,6 +868,11 @@ func (b *Bridge) connectPortWithBackoff(idx int, pc config.Port, nextDelay float
 	}
 
 	params := pc.KISS
+	// OTABaud drives TX pacing, which lives in kiss.Port but is configured per
+	// port rather than in [kiss.N]. Zero leaves pacing off.
+	if pc.TXPacing {
+		params.OTABaud = pc.OTABaudrate
+	}
 	port := kiss.NewPort(idx, tr, params,
 		func(f kiss.RXFrame) {
 			b.eng.Do(func() { b.OnKISSFrame(f) })
