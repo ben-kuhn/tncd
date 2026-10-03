@@ -21,9 +21,14 @@ compressed message:
 | `main`, `frack=13` (by hand) | 2 of 2 | 8476, 8478 |
 | pre-benshi (`2251061`) | 4 of 4 | 8474, 8476, 8491, 8491 |
 | `main` + fix 1 | 2 of 3 | 8478, 8479, **10098** |
-| `main` + both fixes | 3 of 3 | 8484, 8485, 8489 |
+| `main` + both fixes | **11 of 11** | 8475-8489, every run |
 
 ~1,800 extra bytes is about seven 254-byte frames counted twice.
+
+The 11-run confirmation matters because the first fix alone looked convincing at
+2 of 3 and was not sufficient. Against a build failing ~83% of uploads, eleven
+consecutive clean runs with correct byte counts is the first result here worth
+calling conclusive.
 
 ## Why it survived three weeks of testing
 
