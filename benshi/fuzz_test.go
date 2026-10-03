@@ -101,13 +101,49 @@ func FuzzDecodeSettings(f *testing.F) {
 	f.Add(goldenSettings)
 	f.Add([]byte{0x00})
 	f.Add([]byte{0x05, 1, 2, 3})
+	// A record with dual watch on side B, which an earlier version of this
+	// target asserted must be REJECTED. It is not: the A/B mapping was measured
+	// on a UV-PRO on 2026-10-01 and side B resolves to channel_b, so the
+	// invariant below is "the right field, or an honest refusal" rather than
+	// "B is unanswerable". Kept as a seed so the case cannot regress unnoticed.
+	f.Add(func() []byte {
+		b := append([]byte{}, goldenSettings...)
+		if len(b) > 2 {
+			b[2] = (b[2] & ^byte(0x30)) | 0x20 // double_channel = B
+		}
+		return b
+	}())
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s, err := DecodeSettings(data)
 		if err != nil {
 			return
 		}
-		if id, ok := s.ActiveChannel(); ok && s.DoubleChannel == DoubleChannelB {
-			t.Fatalf("ActiveChannel accepted dual-watch B, returned %d", id)
+		id, ok := s.ActiveChannel()
+		switch s.DoubleChannel {
+		case DoubleChannelOff, DoubleChannelA:
+			// Dual watch off, or on with side A selected: the radio transmits
+			// on the A VFO either way.
+			if !ok {
+				t.Fatalf("ActiveChannel refused double_channel=%d", s.DoubleChannel)
+			}
+			if id != s.ChannelA {
+				t.Fatalf("double_channel=%d resolved to %d, want channel_a=%d",
+					s.DoubleChannel, id, s.ChannelA)
+			}
+		case DoubleChannelB:
+			if !ok {
+				t.Fatal("ActiveChannel refused double_channel=B, which resolves to channel_b")
+			}
+			if id != s.ChannelB {
+				t.Fatalf("double_channel=B resolved to %d, want channel_b=%d", id, s.ChannelB)
+			}
+		default:
+			// An encoding this code has not seen. Refusing beats guessing when
+			// the next step rewrites a channel record.
+			if ok {
+				t.Fatalf("ActiveChannel accepted unknown double_channel=%d, returned %d",
+					s.DoubleChannel, id)
+			}
 		}
 	})
 }
