@@ -35,6 +35,80 @@ gateway RECEIVES all 13 acks      07:44:32.104 -> 07:44:33.624
 Thirteen frames, queued over the preceding minute, were all radiated in a
 1.5-second burst three seconds AFTER the session had been dropped.
 
+## Decisive measurement: 11 consecutive frames swallowed, witnessed by a third receiver
+
+Taken 2026-10-03. The host was logging every frame it handed to the radio, with
+timestamps, while an **independent receiver in the same room** (Dire Wolf on a
+separate radio, receive-only, never keying) logged every frame that actually
+reached the air. Same frequency, same session, two clocks.
+
+The host attempted a connection. It sent SABME, got no answer, fell back to
+SABM, and retried on its 3-second timer:
+
+```
+handed to the radio over Bluetooth        heard on the air
+10:49:47.708  SABME                       10:49:48  SABME
+10:49:48.874  SABM                        -- nothing, for the rest of the run --
+10:49:51.876  SABM
+10:49:54.877  SABM
+10:49:57.879  SABM
+10:50:00.881  SABM
+10:50:03.881  SABM
+10:50:06.883  SABM
+10:50:09.883  SABM
+10:50:12.885  SABM
+10:50:15.885  SABM
+10:50:18.886  SABM
+```
+
+**The radio transmitted the first frame and then radiated nothing at all for the
+next 30 seconds, across 11 further frames.** Every one was accepted by the
+RFCOMM socket without error. The connection attempt timed out with no response.
+
+Twelve frames in 31 seconds is not a buffer-pressure scenario by any
+interpretation.
+
+## The same failure mid-session, with the frames arriving two minutes late
+
+A second run connected successfully and died partway through a 10KB upload. The
+time alignment shows the frames were not lost -- they were held:
+
+```
+handed to the radio                       heard on the air
+10:46:44.582  I[6/6]                      10:46:41  I
+10:46:44.691  I[7/6]                      10:46:42  I
+10:46:44.821  I[0/6]                      10:46:43  I
+10:46:53.977  RR                          ------------------------
+10:47:12.287  RR + I,I,I   (retransmit)     DEAD AIR, 2m 07s
+10:47:48.909  RR + I,I,I   (retransmit)   ------------------------
+10:48:47.009  UA                          10:48:50  I
+                                          10:48:52  I
+                                          10:48:54  RR, UA
+```
+
+The air was silent for **2 minutes 7 seconds** while the host handed over eleven
+frames in four separate attempts. They were radiated afterwards, by which time
+the remote had given up and the session was gone. This matches the ~2-minute
+hold reported below.
+
+## Feed rate is not the variable
+
+The two runs above, and a third, were a controlled A/B of the host's new TX
+pacing, which caps outstanding air time so the radio is never handed more than
+one frame of air time ahead:
+
+| run | pacing | frames handed over | reached the air | lost | outcome |
+|-----|--------|-------------------:|----------------:|-----:|---------|
+| 1 | on  | 37 | 25 | 32% | stalled at 40% of upload |
+| 2 | off | 25 | 16 | 36% | 2m07s dead air, session lost |
+| 3 | on  | 12 |  1 | 92% | never connected |
+
+Same binary, same radio, same gateway, same monitor; only `tx_pacing` changed.
+**Pacing made no difference.** Feeding the radio strictly slower than the
+channel can drain does not prevent the failure, which rules out host-side
+overrun of any queue as the cause. The radio is not being given more than it can
+take; it stops radiating what it already holds.
+
 ## Lag distribution across six sessions
 
 Per session, matching each frame the host transmitted against the time the
