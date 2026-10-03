@@ -469,6 +469,11 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
 
     api_port: if set, appends an [api] section enabling the HTTP API on
     127.0.0.1 at the given port.
+
+    TX pacing (kiss/pacing.go) is on by default, as it is in production. Set
+    the environment variable TNCD_E2E_TX_PACING=false to run the suite with it
+    disabled -- that is how paced and unpaced throughput get compared on the
+    same audio path without editing any test body.
     """
     lines = [
         "[server]",
@@ -487,6 +492,9 @@ def write_tncd_config(path, agwpe_port, kiss_type, kiss_host=None,
         lines.append("serial_baudrate = 9600")
     if ax25_version is not None:
         lines.append(f"ax25_version = {ax25_version}")
+    pacing = os.environ.get("TNCD_E2E_TX_PACING")
+    if pacing is not None:
+        lines.append(f"tx_pacing = {pacing}")
     lines.extend([
         "",
         "[kiss]",
