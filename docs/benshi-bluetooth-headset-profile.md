@@ -1,4 +1,4 @@
-# Benshi radios dial Hands-Free at your host — stopping it
+# Benshi radios dial Hands-Free at your host
 
 **Symptom**: a BTech UV-PRO (or Benshi relative) paired for KISS over Bluetooth
 SPP shows up as a phantom headset in your audio settings, and tncd logs this on
@@ -10,12 +10,11 @@ bluetooth: 38:D2:00:01:52:8F dropped audio profile 0000111e-0000-1000-8000-00805
 bluetooth: 38:D2:00:01:52:8F dropped audio profile 0000111f-0000-1000-8000-00805f9b34fb
 ```
 
-**Why it matters beyond tidiness**: an active audio profile corrupts the
-SPP/KISS data channel on these radios -- writes complete at the socket but
-frames never reach the TNC. That is why tncd drops audio profiles on every
-connect rather than only at startup.
+**Short answer: you do not need to do anything.** Those lines are tncd working
+correctly, not a fault. Read on if you want to know why, or if the phantom
+headset in your audio UI bothers you enough to want it gone.
 
-## What is actually happening
+## What is happening
 
 The radio is the initiator, not your host. With a UV-PRO sitting idle,
 bluetoothd logs:
@@ -28,30 +27,60 @@ Device is already marked as connected
 ```
 
 The radio dials **Hands-Free** at the host, treating it as a phone. It
-advertises both `0000111e` (Handsfree) and `0000111f` (Handsfree Audio Gateway).
+advertises both `0000111e` (Handsfree) and `0000111f` (Handsfree Audio
+Gateway), and your audio server takes the bait and claims it as a headset.
 
-Two consequences worth separating:
+This matters beyond tidiness: an active audio profile corrupts the SPP/KISS
+data channel on these radios -- writes complete at the socket but frames never
+reach the TNC. That is why tncd drops audio profiles on every connect rather
+than only at startup, and why it tears the link down before dialling SPP.
 
-1. **Your audio server claims the radio as a headset.** This is fixable, and is
-   the part that corrupts KISS.
-2. **The device reads "Connected" even when no profile succeeds.** This is NOT
-   fixable from the host: the radio opens the ACL before any profile
-   negotiation, so a paired, trusted device will always get that far. Tested --
-   a device-scoped rule does not prevent it. tncd therefore has to tear the link
-   down before dialling SPP, and that teardown is load-bearing: dialling
-   ConnectProfile on an already-connected device does not make BlueZ deliver
-   NewConnection at all.
+## Why there is no clean host-side fix
 
-So the goal is to stop (1). Do not expect to stop (2).
+Two things are happening, and only one of them is preventable.
 
-## Linux with PipeWire / WirePlumber (0.5+)
+1. **Your audio server claims the radio as a headset.** Preventable, see below.
+2. **The device reads "Connected" even when no profile succeeds.** NOT
+   preventable from the host. The radio opens the ACL before any profile
+   negotiation, so a paired, trusted device always gets that far. Tested: a
+   device-scoped rule stops the audio profile but the ACL comes back within
+   10s, every time.
 
-Withdraw the headset roles host-wide. A2DP is left enabled, so Bluetooth
-speakers and headphones keep working; only the hands-free roles the radios abuse
-are gone.
+Because (2) cannot be stopped, tncd has to tear the link down before dialling
+SPP regardless -- and that teardown is load-bearing, because `ConnectProfile`
+on an already-connected device does not make BlueZ deliver `NewConnection` at
+all. tncd drops the audio profiles as part of that same teardown.
 
-`~/.config/wireplumber/wireplumber.conf.d/97-no-hfp.conf`, or system-wide in
-`/etc/wireplumber/wireplumber.conf.d/`:
+So suppressing (1) does not remove a step from tncd's connect path or fix
+anything that was broken. It silences two log lines per connect and removes the
+phantom headset from your audio UI. That is the whole benefit. Decide
+accordingly -- the options below are not recommendations.
+
+## If you want the phantom headset gone anyway
+
+### Linux, one radio only (preferred if you use Bluetooth headsets)
+
+A device-scoped WirePlumber rule stops your audio server claiming that one
+device, and leaves headset support intact for everything else. In
+`~/.config/wireplumber/wireplumber.conf.d/97-no-radio-audio.conf`:
+
+```
+monitor.bluez.rules = [
+  {
+    matches = [ { device.name = "~bluez_card.38_D2_00_01_52_8F" } ]
+    actions = { update-props = { device.disabled = true } }
+  }
+]
+```
+
+Substitute your radio's address, underscores not colons. Then
+`systemctl --user restart wireplumber`.
+
+### Linux, host-wide (has a real cost -- probably not worth it)
+
+Withdrawing the hands-free roles globally also works, and measurably: it took
+tncd's "dropped audio profile" count from 2 on every connect to 0 on a test
+host.
 
 ```
 monitor.bluez.properties = {
@@ -60,45 +89,19 @@ monitor.bluez.properties = {
 }
 ```
 
-Then `systemctl --user restart wireplumber`.
+**But this disables Bluetooth headset and hands-free audio for the whole host,
+for every user and every device, to tidy up log output on the radios.** A2DP
+sink/source stay enabled so speakers and headphones still work, but anything
+needing HFP/HSP -- a headset microphone, a phone call -- stops working. This
+was tried in the author's own fleet config and reverted for exactly that
+reason. Prefer the device-scoped rule.
 
-Measured effect on one host: tncd's "dropped audio profile" count went from 2 on
-every connect to 0, and the radio stopped appearing as an audio device.
+On PulseAudio the equivalent is removing `load-module module-bluetooth-policy`
+from `/etc/pulse/default.pa`, with the same host-wide cost.
 
-A device-scoped rule (`monitor.bluez.rules` matching
-`bluez_card.<ADDR>` with `device.disabled = true`) also stops WirePlumber
-claiming that one radio, and is worth using if you do need headsets on the same
-host. It is strictly narrower, so prefer it when headsets matter and the
-global switch when they do not.
+### Windows (per-device, no tradeoff)
 
-### NixOS
-
-See `services.pipewire.wireplumber.configPackages` in this fleet's
-`modules/ham-radio.nix`, which ships the global form above with the tradeoff
-documented inline.
-
-## Linux with PulseAudio
-
-Unload the policy module that performs the auto-connect, in
-`/etc/pulse/default.pa` (or `~/.config/pulse/default.pa`):
-
-```
-### comment out or remove:
-# load-module module-bluetooth-policy
-```
-
-`module-bluetooth-discover` can stay -- it is the policy module that drives
-profile auto-connection.
-
-## Linux with no audio server
-
-Nothing to do for (1). Without an HFP backend registered on D-Bus, BlueZ has
-nothing to hand the radio's Hands-Free attempt, so no audio profile is
-established. The "Connected" ACL from (2) still happens.
-
-## Windows
-
-Per-device and persistent, which is better than the Linux situation:
+Windows exposes this properly, so there is no reason not to do it here:
 
 1. Settings -> Bluetooth & devices -> Devices -> **More devices and printer
    settings**
@@ -107,21 +110,32 @@ Per-device and persistent, which is better than the Linux situation:
 4. Apply, then re-pair or power-cycle the radio
 
 The Serial Port service must stay checked -- that is the SPP link tncd uses.
+This affects only that radio, so headsets are unaffected.
 
-## macOS
+### Linux with no audio server
 
-Not applicable in practice: macOS does not expose Bluetooth SPP to
-applications, so tncd does not support Bluetooth transports there. Use a
-serial or TCP transport instead.
+Nothing to do. Without an HFP backend registered on D-Bus, BlueZ has nothing
+to hand the radio's Hands-Free attempt, so no audio profile is established. The
+"Connected" ACL still happens.
 
-## Verifying the fix
+### macOS
 
-Start tncd with `-v -v` against the radio and count the profile drops:
+Not applicable: macOS does not expose Bluetooth SPP to applications, so tncd
+does not support Bluetooth transports there. Use a serial or TCP transport.
+
+## Verifying
 
 ```
 grep -c "dropped audio profile" tncd.log
 ```
 
-Zero means nothing is bringing up a headset profile any more. Expect to still
-see `already connected, disconnecting first` -- that is consequence (2), and it
-is not a fault.
+Zero means nothing is bringing up a headset profile. Expect to still see
+`already connected, disconnecting first` either way -- that is consequence (2),
+and it is not a fault.
+
+## What would actually fix this
+
+The radio should not advertise or dial hands-free while it is in KISS/SPP use,
+and should not present as connected before a profile is negotiated. Both are
+in the report filed with the vendor
+([2026-10-02](2026-10-02-uvpro-bluetooth-tx-report.md)).
