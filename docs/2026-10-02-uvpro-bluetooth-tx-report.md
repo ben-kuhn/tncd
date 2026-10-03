@@ -77,9 +77,13 @@ same room decodes the radio's transmissions at an ideal level (46-51 on Dire
 Wolf's scale) when they do occur. The same host and the same gateway complete
 100% of transfers when a different modem is substituted.
 
-**Not the receive direction.** The radio's receive path is healthy throughout:
-it decoded 11 of 11 test transmissions on two different frequencies, and 116
-frames from the gateway during one of the failing sessions.
+**Not primarily the receive direction.** Receive is good enough to rule it out
+as the cause of the TX symptom: the radio decoded 11 of 11 test transmissions on
+two different frequencies, and 116 frames from the gateway during one of the
+failing sessions. It is not spotless, though, and we would rather state that
+than overclaim -- in one post-reboot session it failed to deliver an inbound
+frame that two other receivers in the same room decoded (see below). Treat
+receive as working but not proven perfect.
 
 **Not a power-cycle-clearable state.** Reproduced immediately after a reboot. In
 one post-reboot session the radio transmitted exactly ONE frame of eleven, and
@@ -92,6 +96,40 @@ data path is not.
 
 **Not channel vs frequency mode.** Reproduced with the radio on a named memory
 channel and on its VFO record, at 145.670 and 145.730.
+
+## A second symptom: the Bluetooth link sometimes will not come up at all
+
+This is separate from frames being swallowed, and may or may not share a cause.
+It is reported here because any fix for the TX path has to survive it.
+
+The radio intermittently refuses the SPP connection outright. BlueZ returns
+`br-connection-refused` from `ConnectProfile`, and the host then retries on its
+reconnect backoff:
+
+```
+bluetooth: calling ConnectProfile on /org/bluez/hci0/dev_38_D2_00_01_52_8F
+bridge: port 0 reconnect error: bluetooth: ConnectProfile: br-connection-refused
+bridge: port 0 reconnect in 10.0s
+```
+
+Across the bench logs for this investigation this happened 8 times, and every
+single occurrence was this radio. A Mobilinkd TNC4 on the same host, the same
+Bluetooth adapter and the same host code never produced it once, over 900+
+`ConnectProfile` calls. The radio is paired and trusted when it refuses, and it
+is reachable -- its control protocol answers over the same link once a
+connection does succeed.
+
+Two related observations:
+
+- The radio dials **Hands-Free** at the host unprompted, treating it as a
+  phone, and the host's Bluetooth daemon logs an authorization failure for it.
+  The host has to actively drop the audio profiles the radio brings up, because
+  an active audio profile corrupts the SPP data channel. It would be better if
+  a radio in KISS/SPP use did not advertise or dial hands-free at all.
+- The radio reports `Connected` as soon as the ACL is up, before any profile is
+  negotiated. A host cannot tell "the radio is linked and ready for data" from
+  "the radio opened a link for its own audio purposes", which makes the refused
+  SPP connection above harder to diagnose than it should be.
 
 ## The host cannot detect it
 
@@ -118,3 +156,8 @@ roughly 128 ms apart.
 - Whether there is a way for the host to query or bound that queue.
 - Whether inbound RF flushes it: bursts have repeatedly been observed to
   coincide with received traffic.
+- What makes the radio return `br-connection-refused` to an SPP connection from
+  a paired, trusted host, and whether the host can avoid provoking it.
+- Whether hands-free can be suppressed while the radio is in KISS/SPP use, so
+  the host does not have to tear down audio profiles to keep the data channel
+  intact.
