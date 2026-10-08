@@ -107,6 +107,27 @@ socket write completes normally.
 Same signature on BlueZ and on Winsock `AF_BTH`. **The failure is independent of
 the operating system and of the Bluetooth stack.**
 
+## The same failure with unrelated host software
+
+The measurements in this report were taken with one host application. That
+application is not the variable either.
+
+**WoAD on Android.** The same radio shows the same behaviour driven by WoAD, an
+unrelated Winlink application on a third operating system. WoAD speaks KISS to
+the radio directly and carries its own AX.25 layer-2 implementation -- it shares
+no code, no library and no language with the host software used above, and runs
+on Android's Bluetooth stack rather than BlueZ or Winsock.
+
+This is an operator observation rather than an instrumented capture, and is
+flagged as such. What it adds is that three independent implementations on three
+operating systems produce the same symptom:
+
+| Host application | Operating system | Bluetooth stack | Result |
+|---|---|---|---|
+| `tncd` 2.0 | Linux | BlueZ / D-Bus | frames swallowed |
+| `tncd` 2.0 | Windows 11 | Winsock `AF_BTH` | frames swallowed |
+| WoAD | Android | Android Bluetooth | same behaviour observed |
+
 ## The same software completes transfers with every other modem
 
 The host software, the test harness and the AX.25/KISS layers are held constant
@@ -133,6 +154,13 @@ across 900+ connection attempts.
 | AEA PK-232MBX | full Winlink CMS session, 3 messages delivered |
 | Kenwood TS-2000 internal TNC | full Winlink CMS round-trip, 21 messages including one of 65 KB |
 | Dire Wolf (software TNC, KISS over TCP) | completes transfers reliably |
+| NinoTNC | reported working on production systems by experienced operators |
+
+The NinoTNC line is third-party field reporting rather than our own bench
+measurement, and is marked as such deliberately; everything else in this report
+is instrumented. We include it because it is the widest-deployment data point
+available: the same KISS/AX.25 approach is in routine production use on that
+hardware.
 
 Taken together: the host's AX.25 connected-mode implementation and its KISS
 framing complete real sessions against real Winlink gateways across a range of
@@ -255,6 +283,10 @@ simply are not radiated when handed over.
 across three different host builds spanning three weeks of development: it is
 byte-identical, and conventional (`C0 00 <frame> C0`, one frame per pair of
 FENDs).
+
+**Not the host application.** The same behaviour occurs under WoAD on Android,
+an unrelated Winlink program with its own AX.25 and KISS implementation, on a
+third operating system and Bluetooth stack.
 
 **Not the host operating system or Bluetooth stack.** Reproduced on Linux
 (BlueZ, SPP over D-Bus) and on Windows 11 (Winsock `AF_BTH`), which share no
