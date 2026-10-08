@@ -1,8 +1,10 @@
 # The UV-PRO frame loss is at least partly ours — hold the firmware report
 
-**Status: the firmware report's lead claim is not currently defensible. Do not
-send it.** This is the controlled test that should have been run before that
-claim was written.
+**Status: two distinct failure states, and they point in opposite directions.**
+In the mild state there is a measurable host-side component. In the severe state
+a bare socket with no tncd at all radiates nothing either, which is the
+strongest firmware evidence this project has produced. Read the whole file
+before quoting either half.
 
 ## What was measured
 
@@ -88,3 +90,60 @@ documented -- and it is why tncd's teardown-before-connect exists.
 reproducing tncd's own on-air address bytes), `kissutil-probe.sh` (Dire Wolf's
 `kissutil` driving the radio over `/dev/rfcomm0`), `alternate.sh` (interleaved
 arms, per-SSID attribution), `isolate.sh` (tncd over the kernel tty).
+
+## Later the same day: a 10-round series, and the radio went fully deaf
+
+Run after the above, same harness, 5 rounds per arm interleaved, per-SSID
+attribution, same continuously-running monitor.
+
+| arm | rounds | handed | on air |
+|---|---:|---:|---:|
+| raw `AF_BLUETOOTH` socket, no tncd | 5 | 60 | **0** |
+| tncd, `type = bluetooth` | 5 | 55 | **0** |
+
+**115 frames, none radiated, over about 13 minutes.** Every socket write
+returned its full byte count; tncd's port stayed online with no link failures.
+
+The monitor was not the problem, and there is a positive control for that: in
+the middle of the series it decoded a genuine off-air frame from another station
+(`KU0HN-1>MAIL`), and the receiving radio was verified on VFOA 145.670
+afterwards. Audio, frequency and squelch were all working, so the monitor would
+have heard our transmissions had they existed.
+
+**This is the strongest firmware evidence we have** -- stronger than the 11-of-12
+measurement the report currently leads with, because there is no tncd in the
+losing arm at all, and because it carries its own positive control. A raw socket
+wrote 60 frames into the radio and none reached the air.
+
+Immediately afterwards the radio stopped accepting SPP connections altogether:
+`ConnectProfile` timed out at 30 s while BlueZ still reported `Connected: yes`.
+The control channel was therefore unreachable, so the radio's own frequency
+could not be read back -- **a self-retune cannot be formally excluded** for this
+series, though it would not explain the refused connections. Clearing it needs a
+power cycle.
+
+## Reconciling the two states
+
+Both results are real and they are not in conflict once separated:
+
+- **Mild state** (earlier, radio freshly powered): raw socket 48/48, tncd over
+  the kernel tty 11/11, tncd over BlueZ 16/22 with one link failure. A real
+  host-side component, in our BlueZ transport.
+- **Severe state** (after an hour of connection churn): everything dies equally,
+  raw socket included. Purely the radio.
+
+The radio appears to **degrade progressively under connection churn** -- which is
+consistent with the long-standing note that only inbound RF or a power cycle
+clears the wedge, and with the operator's own suspicion that the churn and
+restarts between tests are themselves a trigger.
+
+## Revised guidance
+
+1. The firmware report's *conclusion* is better supported than it looked an hour
+   ago. Replace the 11-of-12 lead (busy channel, uncontrolled carrier sense)
+   with the **0-of-60 raw-socket series**, which has none of that weakness.
+2. The host-side defect in our BlueZ write path is still real and still worth
+   chasing, but it is a **separate, milder** problem -- not the headline.
+3. Any further bench work needs a **power cycle between series**, and must
+   record the radio's own frequency read-back at the start of each, since once
+   it wedges the control channel is gone and that check is impossible.
