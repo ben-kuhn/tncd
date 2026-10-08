@@ -361,14 +361,24 @@ write returns.
 
 ## Reproduction
 
-1. Connect to the radio over Bluetooth SPP and put it in KISS/TNC mode.
-2. Write KISS frames at a modest rate -- an AX.25 connection attempt to an
-   absent station (SABM every 3 s) is sufficient.
+This needs none of our software. It reproduces with standard, freely available
+tools, so there is nothing here you have to take on trust.
+
+1. Expose the radio's SPP channel as a serial device:
+   `rfcomm bind /dev/rfcomm0 <bdaddr> <spp-channel>`
+2. Drive it with **Dire Wolf's own `kissutil`**, which is a KISS host for an
+   external TNC: `kissutil -p /dev/rfcomm0 -v -T`. Feed it frames on stdin in
+   TNC2 format (`MYCALL>TEST:probe 1`) at a modest rate -- one every 3 seconds
+   is enough. `-T` timestamps what it sends.
 3. Monitor the frequency with an independent receiver and compare its decode
-   timestamps against the host's write timestamps.
+   timestamps against `kissutil`'s send timestamps.
+
+For a connected-mode version, Dire Wolf's `tnctest` drives two TNCs against each
+other over the air: `tnctest /dev/rfcomm0=9600 <second-tnc>`. Pointing the second
+at a known-good modem gives a direct side-by-side on the same channel.
 
 Expect a minority of frames, delayed by seconds to minutes, arriving in bursts
-roughly 128 ms apart.
+roughly 128 ms apart. Reproduces on Linux and on Windows.
 
 ## What would help
 
