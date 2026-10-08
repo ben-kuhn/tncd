@@ -4,11 +4,21 @@ Prepared for BTech / Benshi firmware support. Everything below is measured, with
 the host and the receiving station's logs timestamped against clocks verified in
 sync to 20 ms.
 
-**Radio**: BTech UV-PRO. `GET_DEV_INFO` reports vendor 6, product 260, hardware
-1, **firmware 146**.
+**Radios**: BTech UV-PRO -- `GET_DEV_INFO` reports vendor 6, product 260,
+hardware 1, **firmware 146**. A second Benshi radio, the **DB-50B**, reproduces
+the link-layer faults; see "A second radio shows the same link-layer faults".
 
-**Host**: Linux (NixOS), BlueZ, Bluetooth SPP (RFCOMM), `tncd` 2.0 acting as a
-KISS TNC bridge.
+**Hosts**: reproduced on **two operating systems with two independent Bluetooth
+stacks that share no code**:
+
+| Host | Bluetooth stack | Host implementation |
+|---|---|---|
+| Linux | BlueZ 5.86, SPP over RFCOMM via D-Bus | `bluetooth_linux.go` |
+| Windows 11 | Winsock `AF_BTH`, RFCOMM sockets | `bluetooth_windows.go` |
+
+Host software is `tncd` 2.0 acting as a KISS TNC bridge. The two platforms use a
+different socket API, a different connection-setup path and a different
+operating system. **Both produce the same failure.**
 
 ## Symptom
 
@@ -68,6 +78,35 @@ RFCOMM socket without error. The connection attempt timed out with no response.
 Twelve frames in 31 seconds is not a buffer-pressure scenario by any
 interpretation.
 
+## Reproduced on Windows, on an unrelated Bluetooth stack
+
+Taken 2026-09-13/14. The Linux measurements above could in principle be a BlueZ
+or a Linux problem. They are not. The same test was run on **Windows 11**, where
+the host reaches the radio through **Winsock `AF_BTH`** RFCOMM sockets -- a
+separate implementation sharing no code with the Linux D-Bus/BlueZ path.
+
+- **33** SABM/SABME frames handed to the UV-PRO over `AF_BTH`
+- **0** heard on the air -- the independent monitor's log did not grow by one line
+- **0 of 3** sessions connected; every failure at SABM -> UA
+
+**The positive control that makes this conclusive.** During the same run the
+radio delivered one inbound frame to the host: a genuine off-air beacon
+(`KU0HN-1 > MAIL`), logged by the host at 22:21:49 and independently decoded by
+the monitoring receiver at 22:21:48. So in that session, on Windows, the radio's
+**receiver worked, it was tuned correctly, and the Windows read path delivered
+data**. Only transmit failed.
+
+**A different modem passed the identical test on the same host.** A Mobilinkd
+TNC4 -- same binary, same Windows host, same configuration, hours earlier --
+completed **3 of 3** sessions.
+
+A send timeout cannot catch this either: with `SO_SNDTIMEO` correctly applied,
+**zero** send timeouts fired, because the radio *accepts* the bytes and the
+socket write completes normally.
+
+Same signature on BlueZ and on Winsock `AF_BTH`. **The failure is independent of
+the operating system and of the Bluetooth stack.**
+
 ## The same failure mid-session, with the frames arriving two minutes late
 
 A second run connected successfully and died partway through a 10KB upload. The
@@ -109,6 +148,48 @@ channel can drain does not prevent the failure, which rules out host-side
 overrun of any queue as the cause. The radio is not being given more than it can
 take; it stops radiating what it already holds.
 
+## A second radio shows the same link-layer faults
+
+A second Benshi radio -- the **DB-50B** (`38:D2:00:01:67:9D`), on a different
+Linux host -- reproduces the Bluetooth link-layer problems described under "A
+second symptom" below.
+
+To be precise about what this does and does not show: the DB-50B incident is
+**not** another instance of frames being swallowed, and we are not presenting it
+as one. It is a different failure -- an SPP channel delivering bytes that do not
+frame as KISS. What it establishes is that the link-layer faults are **not
+specific to a single radio model or a single unit**, and it adds a defect of its
+own.
+
+**1. bluez cannot parse this radio's SDP record.** At the exact timestamp of
+every connect attempt:
+
+```
+sdp_extract_attr: Unknown data descriptor : 0x5 terminating
+sdp_extract_attr: Unknown data descriptor : 0x30 terminating
+```
+
+preceded by an hour of `Unable to get Serial Port SDP record`. An SDP parser
+terminating mid-record means SPP channel resolution falls back to something
+cached or never verified -- and consistent with exactly that, a freshly
+connected socket delivered five bytes that were not a valid frame
+(`raw=b2bd7d8fe9`) seven seconds after connecting. **This looks like a malformed
+SDP record on the radio**, and is worth checking independently of everything
+else in this report.
+
+**2. The same unprompted Hands-Free dialling.** The DB-50B advertises Handsfree
+(`0000111e`) and Handsfree Audio Gateway (`0000111f`) alongside SPP, the host
+drops both on every single connect, and the radio keeps re-offering them.
+
+**3. The same `Connected` with no working data path.** bluez reported
+`Connected=True` on an ACL with no functioning SPP session -- the same condition
+described below, now seen on a second radio.
+
+**In fairness, part of that incident was our own bug.** The host's wedge detector
+responded by relinking without an upper bound, tearing down the baseband link
+each time and making the churn worse. That is fixed on our side with a relink
+budget. The three firmware-side observations above are independent of it.
+
 ## Lag distribution across six sessions
 
 Per session, matching each frame the host transmitted against the time the
@@ -145,6 +226,11 @@ FENDs).
 before the host gained any support for this radio's control protocol, with that
 support present but idle, and with it fully active. The worst session of the six
 was the one with that code absent.
+
+**Not the host operating system or Bluetooth stack.** Reproduced on Linux
+(BlueZ, SPP over D-Bus) and on Windows 11 (Winsock `AF_BTH`), which share no
+host code between them -- see the Windows section above. Same signature on both,
+and on both a different modem on the same host passes the same test.
 
 **Not host-side audio or the receiving station.** An independent receiver in the
 same room decodes the radio's transmissions at an ideal level (46-51 on Dire
@@ -187,7 +273,7 @@ bridge: port 0 reconnect in 10.0s
 ```
 
 Across the bench logs for this investigation this happened 8 times, and every
-single occurrence was this radio. A Mobilinkd TNC4 on the same host, the same
+single occurrence was a Benshi radio. A Mobilinkd TNC4 on the same host, the same
 Bluetooth adapter and the same host code never produced it once, over 900+
 `ConnectProfile` calls. The radio is paired and trusted when it refuses, and it
 is reachable -- its control protocol answers over the same link once a
@@ -235,3 +321,6 @@ roughly 128 ms apart.
 - Whether hands-free can be suppressed while the radio is in KISS/SPP use, so
   the host does not have to tear down audio profiles to keep the data channel
   intact.
+- Whether the DB-50B's SDP record is well-formed. A standard Linux SDP parser
+  terminates mid-record on it (`Unknown data descriptor : 0x5/0x30`), which
+  would make SPP channel resolution unreliable on any host.
