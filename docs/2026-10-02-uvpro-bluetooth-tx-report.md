@@ -107,6 +107,40 @@ socket write completes normally.
 Same signature on BlueZ and on Winsock `AF_BTH`. **The failure is independent of
 the operating system and of the Bluetooth stack.**
 
+## The same software completes transfers with every other modem
+
+The host software, the test harness and the AX.25/KISS layers are held constant
+across everything below. Only the modem changes.
+
+**Over the same Bluetooth SPP path, same binary:**
+
+| Modem | Result |
+|---|---|
+| Mobilinkd TNC4 | **3 of 3** sessions on Windows; 2 x 10 KB uploads at **100%** on Linux |
+| Mobilinkd TNC3 | completes transfers |
+
+The TNC4 is the tightest control available: same binary, same host, same
+configuration, same frequency, same gateway, same hour -- only the radio
+differs. It passes on **both** operating systems where the UV-PRO fails on both.
+It has also never once produced the `br-connection-refused` described below,
+across 900+ connection attempts.
+
+**Over USB / serial KISS, the same AX.25 and KISS implementation:**
+
+| Modem | Result |
+|---|---|
+| Kantronics KPC-3+ / KPC-9612+ | full Winlink CMS session, messages delivered |
+| AEA PK-232MBX | full Winlink CMS session, 3 messages delivered |
+| Kenwood TS-2000 internal TNC | full Winlink CMS round-trip, 21 messages including one of 65 KB |
+| Dire Wolf (software TNC, KISS over TCP) | completes transfers reliably |
+
+Taken together: the host's AX.25 connected-mode implementation and its KISS
+framing complete real sessions against real Winlink gateways across a range of
+hardware, and the Mobilinkd results establish the same for the Bluetooth SPP
+transport specifically.
+
+**No modem other than a Benshi radio has produced this failure.**
+
 ## The same failure mid-session, with the frames arriving two minutes late
 
 A second run connected successfully and died partway through a 10KB upload. The
@@ -221,11 +255,6 @@ simply are not radiated when handed over.
 across three different host builds spanning three weeks of development: it is
 byte-identical, and conventional (`C0 00 <frame> C0`, one frame per pair of
 FENDs).
-
-**Not the host software version.** The same failure occurs with a build from
-before the host gained any support for this radio's control protocol, with that
-support present but idle, and with it fully active. The worst session of the six
-was the one with that code absent.
 
 **Not the host operating system or Bluetooth stack.** Reproduced on Linux
 (BlueZ, SPP over D-Bus) and on Windows 11 (Winsock `AF_BTH`), which share no
