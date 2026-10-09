@@ -24,9 +24,15 @@ jobs:
         # Strip the leading 'v' from the tag: v1.97-Beta → 1.97-Beta.
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
+      # Must track stable, like test.yml. go.mod's directive is the language
+      # floor (1.25.13), whose standard library carries 8 known CVEs fixed in
+      # go1.26.9 -- building releases against it shipped those to every user who
+      # downloaded a binary. Verified: stable resolved to go1.27.2 and
+      # govulncheck reports 0 vulnerabilities, where 1.25.13 reported 8 and even
+      # 1.27.1 still reports 6.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
 
       - name: Install nfpm
         run: |

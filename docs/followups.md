@@ -392,3 +392,47 @@ Wolf cannot use PipeWire and must grab the Digirig directly via `plughw`, which 
 other application from sharing that audio interface. The running daemon reports libpipewire
 1.6.6 while the ALSA plugins in the store are 1.4.9 and 1.6.5 — a version skew is the
 leading suspect. Not a tncd issue; it just blocks sharing the radio's audio.
+
+## Go toolchain: release and nix build paths ship an unpatched standard library
+
+Found 2026-10-09 while fixing CI. `govulncheck` under each toolchain, same code:
+
+| Go | source | stdlib vulns reported |
+|---|---|---|
+| 1.25.13 | `go.mod` directive | **8** |
+| 1.26.7 | nixpkgs `go` (current channel) | affected |
+| 1.27.1 | nixpkgs `go_1_27` | **6** |
+| **1.27.2** | GitHub `setup-go` with `stable` | **0** |
+
+`.github/workflows/test.yml` and `release.yml` now both use `go-version:
+stable`, so CI and released binaries get the patched toolchain. Two gaps remain
+and neither is fixable in this repo today:
+
+- **`nix/default.nix` uses `buildGoModule`**, which takes nixpkgs' default `go`
+  (1.26.7 on the current channel). `go_1_27` is 1.27.1, also affected, so there
+  is no patched Go in this channel to pin to. It resolves when nixpkgs advances;
+  until then nix-built binaries -- **including the fleet's, which builds from
+  this path via the `tncd-src` flake input** -- carry the unpatched stdlib.
+  Re-check with: `nix-shell -p go_1_27 --run 'go run
+  golang.org/x/vuln/cmd/govulncheck@latest ./...'`
+- **`packaging/PKGBUILD` declares `makedepends=('go')`**, so Arch builds with
+  whatever Go that distro currently ships. Out of our control and Arch tracks
+  Go closely, so probably fine, but unverified.
+
+**Proportionality.** The affected symbols are `net/http` (mostly http2),
+`net/textproto` and `crypto/tls`. The only one tncd genuinely reaches is the
+monitoring API in `internal/frontend/api`, which is off by default and
+loopback-bound with an allowlist when enabled. The other listeners (AGWPE,
+KISS-over-TCP, rigctl) are plain TCP and do not go through net/http. So the
+practical exposure is low -- but it is not zero for anyone who exposes the API,
+and shipping a knowingly-unpatched stdlib in release artifacts is not a good
+look for a project that runs `govulncheck` in CI.
+
+## Stale version strings in packaging
+
+`nix/default.nix` says `version = "1.103-Beta"` and `packaging/PKGBUILD` says
+`pkgver=1.3.3`, both left over from the 1.x line while `main` is the 2.0 line.
+The release checklist already says to bump both at tag time, so this is only
+wrong between releases -- but `nix/default.nix`'s value is compiled into the
+binary via `-X ...version.Version`, so a nix build from `main` today reports
+itself as 1.103-Beta. Worth fixing independently of any release.
