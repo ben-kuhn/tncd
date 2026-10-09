@@ -428,11 +428,33 @@ practical exposure is low -- but it is not zero for anyone who exposes the API,
 and shipping a knowingly-unpatched stdlib in release artifacts is not a good
 look for a project that runs `govulncheck` in CI.
 
-## Stale version strings in packaging
+## Version strings in packaging -- FIXED 2026-10-09
 
-`nix/default.nix` says `version = "1.103-Beta"` and `packaging/PKGBUILD` says
-`pkgver=1.3.3`, both left over from the 1.x line while `main` is the 2.0 line.
-The release checklist already says to bump both at tag time, so this is only
-wrong between releases -- but `nix/default.nix`'s value is compiled into the
-binary via `-X ...version.Version`, so a nix build from `main` today reports
-itself as 1.103-Beta. Worth fixing independently of any release.
+Both were wrong, and the PKGBUILD was worse than a stale string: it was broken.
+
+`packaging/PKGBUILD` had `pkgver=1.3.3` with a matching `source=` and
+`sha256sums=`, so it fetched the **v1.3.3 tarball -- the final Python release,
+which contains no `go.mod` and no `cmd/tncd`** -- and then ran
+`go build ./cmd/tncd` on it. A half-migrated file: `build()` had been converted
+to Go while the version, source and checksum still pointed at the Python line.
+It cannot ever have built. Now `pkgver=1.103_Beta` (underscore because Arch
+pkgver may not contain a hyphen; the existing `${pkgver//_/-}` substitutions
+reconstruct the real tag), with the checksum for that tarball.
+
+Note this does not conflict with CLAUDE.md's "the AUR repo stays on the stable
+1.3.x line during the 2.0 beta" -- that is about what gets *published*, gated in
+the release workflow. The PKGBUILD on `main` builds the Go tree, so it has to be
+versioned for the Go line to be internally consistent.
+
+`nix/default.nix` said `1.103-Beta` while building `src = ../.`, the working
+tree rather than a fetched tag, so a build from `main` labelled itself with the
+last release. Now `2.0.0-dev`, matching `internal/version`'s own default for
+untagged `main`; the release checklist bumps it at tag time as before.
+
+Fixing that surfaced a third problem: `nix/default.nix` could not build at all.
+Its pinned `vendorHash` was stale (`sha256-FFRXOD48...` against an actual
+`sha256-iRvDXz9D...`), so every build failed on a fixed-output hash mismatch --
+independent of the version string, since that hash covers go.mod/go.sum only.
+Updated, and the build now completes and reports `tncd 2.0.0-dev`. Worth a CI
+job: nothing in this repo builds the nix path, which is why it rotted
+unnoticed.

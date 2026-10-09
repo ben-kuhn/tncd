@@ -4,13 +4,17 @@
 
 buildGoModule rec {
   pname = "tncd";
-  version = "1.103-Beta";
+  # This builds `src = ../.` -- the working tree, not a fetched tag -- so the
+  # version must describe what is actually being compiled. Matches
+  # internal/version's own default for untagged main; the release checklist
+  # bumps it to the tag at release time.
+  version = "2.0.0-dev";
 
   src = lib.cleanSource ../.;
 
   # Pin the module dependency hash. Update when go.mod/go.sum change:
   #   set to lib.fakeHash, build, and copy the "got:" hash from the error.
-  vendorHash = "sha256-FFRXOD48HO+2C3m95wkFYpAIXmHytpXFSxl5TYbnjR8=";
+  vendorHash = "sha256-iRvDXz9Dn7Pi6m2rA+nwgDYCgqd3KWJATBMSKvxwRZ8=";
 
   env.CGO_ENABLED = "0";
 
