@@ -45,6 +45,43 @@ gateway RECEIVES all 13 acks      07:44:32.104 -> 07:44:33.624
 Thirteen frames, queued over the preceding minute, were all radiated in a
 1.5-second burst three seconds AFTER the session had been dropped.
 
+## 115 frames handed over, none transmitted -- 60 of them with no host software at all
+
+Taken 2026-10-08, and this is the measurement with the fewest assumptions in it.
+
+Two programs alternated against the radio for about thirteen minutes, five
+rounds each, on an idle channel. One of them was a forty-line program that opens
+a Bluetooth RFCOMM socket and writes KISS frames -- no AX.25 stack, no TNC
+software, nothing but the kernel's socket and a hand-built frame.
+
+| sender | rounds | frames handed over | reached the air |
+|---|---:|---:|---:|
+| bare RFCOMM socket, no TNC software | 5 | 60 | **0** |
+| `tncd` 2.0 | 5 | 55 | **0** |
+
+Every socket write returned its full byte count. Nothing reached the air.
+
+**The receiver was working, and there is a control for it.** Mid-series the
+monitoring receiver decoded a frame from an unrelated station on the same
+frequency, and the receiving radio was verified on 145.670 afterwards. So the
+monitor had audio, correct tuning and open squelch throughout.
+
+**Why this measurement is the cleanest one here.** The bare-socket program has
+no retry logic, no link supervision and no recovery behaviour of any kind. It
+cannot relink, cannot reset the connection, and cannot do anything but write
+bytes and wait. There is no host-side mechanism available to explain the loss.
+Sixty frames went into the radio and none came out.
+
+Immediately afterwards the radio stopped accepting SPP connections entirely --
+`ConnectProfile` timing out at 30 s while the host's Bluetooth daemon still
+reported the device connected. A power cycle cleared it, and after the power
+cycle the same bare-socket program radiated 44 of 44.
+
+That recovery pattern is itself informative: **the radio appears to degrade
+progressively** across a long run of connections and disconnections, from
+working, through losing a fraction of frames, to transmitting nothing, to
+refusing connections -- and a power cycle returns it to working.
+
 ## Decisive measurement: 11 consecutive frames swallowed, witnessed by a third receiver
 
 Taken 2026-10-03. The host was logging every frame it handed to the radio, with
@@ -77,6 +114,13 @@ RFCOMM socket without error. The connection attempt timed out with no response.
 
 Twelve frames in 31 seconds is not a buffer-pressure scenario by any
 interpretation.
+
+One qualification we would rather state than have you find: this run used TNC
+software whose link supervision relinks the Bluetooth connection after 20
+seconds of silence, and the station being called never answers, so some of
+these frames may have been handed over while that software was rebuilding its
+own connection. The preceding 60-frame measurement has no such mechanism in it
+at all, which is why we lead with it.
 
 ## Reproduced on Windows, on an unrelated Bluetooth stack
 
@@ -352,6 +396,53 @@ Two related observations:
   "the radio opened a link for its own audio purposes", which makes the refused
   SPP connection above harder to diagnose than it should be.
 
+## A third symptom: the radio's services cannot be enumerated over SDP
+
+Separate from the TX problem and from the connection refusals. Reported because
+it is cheap to check on your side and it makes every other problem here harder
+to diagnose.
+
+A standard SDP browse of the radio returns no service records at all. The same
+command against a Mobilinkd TNC4, on the same host and the same Bluetooth
+adapter, minutes apart, returns a full record:
+
+```
+sdptool browse <UV-PRO>      -> 1 line:  "Browsing 38:D2:00:01:52:8F ..."  and nothing else
+sdptool browse <TNC4>        -> 33 lines: service records, class IDs, protocol
+                                descriptors, language base attributes
+```
+
+Reproduced on every attempt. A *targeted* search does work -- `sdptool search SP`
+reliably returns `Service Name: SPP Dev`, `Channel: 1` -- so the Serial Port
+record exists and is readable when asked for by name. It is the browse group
+that comes back empty, which suggests the radio does not publish its services
+into the public browse group.
+
+**Why it matters practically.** A host or an operator cannot discover what the
+radio offers. Every integration has to be told the service by name in advance,
+and when something goes wrong there is no way to ask the radio what it supports.
+
+**On the DB-50B this is worse, and noisier.** That radio's record makes the
+host's SDP parser give up part way through, at the exact timestamp of every
+connect attempt:
+
+```
+sdp_extract_attr: Unknown data descriptor : 0x5 terminating
+sdp_extract_attr: Unknown data descriptor : 0x30 terminating
+```
+
+with an hour of `Unable to get Serial Port SDP record` around it. The same
+`0x30` message has been seen once against the UV-PRO, though we have not been
+able to produce it on demand there.
+
+**Not the TX mechanism.** We checked, because it was an attractive theory: if a
+host resolved the wrong RFCOMM channel it would write into a service that is not
+the TNC, and the frames would vanish exactly as described above. It is not that.
+Driving the radio on channel 4 instead of channel 1 radiated 6 of 6 frames,
+twice. And across ten consecutive queries the channel resolved to 1 every time,
+so the varying channel numbers we saw in one earlier session did not reproduce.
+We mention the hypothesis only so you do not spend time on it.
+
 ## The host cannot detect it
 
 `TIOCOUTQ` on the RFCOMM socket does not reflect the backlog: the socket reports
@@ -395,3 +486,5 @@ roughly 128 ms apart. Reproduces on Linux and on Windows.
 - Whether the DB-50B's SDP record is well-formed. A standard Linux SDP parser
   terminates mid-record on it (`Unknown data descriptor : 0x5/0x30`), which
   would make SPP channel resolution unreliable on any host.
+- Whether the UV-PRO can publish its services into the public SDP browse group,
+  so that a browse returns its records the way other TNCs on the same host do.
