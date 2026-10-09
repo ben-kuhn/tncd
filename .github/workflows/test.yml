@@ -11,9 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NOT go-version-file: go.mod. That directive is the language/minimum
+      # version (1.25.13), and pinning CI to it meant every single commit --
+      # including docs-only ones -- failed govulncheck on 8 Go *standard
+      # library* CVEs that are only fixable by moving the toolchain
+      # (GO-2026-6603/6607/6608/6609/6611/6612/6613/6617, all "Fixed in
+      # go1.26.9"). Tracking stable keeps the stdlib patched as releases land
+      # instead of requiring a go.mod bump every time one does -- and a newer
+      # toolchain building an older `go` directive is normal and supported.
+      # go.mod stays where it is so local builds are not forced to upgrade.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
 
       - name: Unit tests
         # -count=1 disables the test cache: a cached pass can mask a flaky
@@ -74,9 +83,40 @@ jobs:
                       "benshi FuzzParseRFCh" "benshi FuzzDecodeSettings" \
                       "internal/frontend/rigctl FuzzHandleLine"; do
             pkg="${spec% *}"; target="${spec#* }"
+            corpus="./$pkg/testdata/fuzz/$target"
+            before=$(ls -1 "$corpus" 2>/dev/null | wc -l)
             # -fuzzminimizetime bounds the per-find minimisation that races the
             # deadline; without it one slow minimisation can overrun the step.
-            CGO_ENABLED=0 go test -fuzz="$target" -fuzztime=10s -fuzzminimizetime=2s "./$pkg/"
+            out=$(CGO_ENABLED=0 go test -fuzz="$target" -fuzztime=10s \
+                    -fuzzminimizetime=2s "./$pkg/" 2>&1) && rc=0 || rc=$?
+            echo "$out"
+            # Not `[ ... ] && continue`: under `set -e` a false test makes the
+            # AND-list return non-zero and aborts the whole step.
+            if [ $rc -eq 0 ]; then continue; fi
+
+            # A real finding writes a reproducer into testdata/fuzz/<target>/.
+            # Treat that as fatal, always.
+            after=$(ls -1 "$corpus" 2>/dev/null | wc -l)
+            if [ "$after" -gt "$before" ]; then
+              echo "::error::$target found a crasher; reproducer written to $corpus"
+              exit 1
+            fi
+
+            # No reproducer. The known non-finding failure is the coordinator
+            # being cancelled at the -fuzztime boundary while a worker is still
+            # busy, which reports "context deadline exceeded" and has failed
+            # commits that changed no Go code. Retry once: the deadline race is
+            # random, so a genuine problem fails twice.
+            if echo "$out" | grep -q "context deadline exceeded"; then
+              echo "::warning::$target hit the fuzz deadline race with no crasher; retrying once"
+              CGO_ENABLED=0 go test -fuzz="$target" -fuzztime=10s \
+                -fuzzminimizetime=2s "./$pkg/" || {
+                  echo "::error::$target failed twice"; exit 1; }
+              continue
+            fi
+
+            echo "::error::$target failed (rc=$rc) with no crasher and no deadline race"
+            exit 1
           done
 
   vulncheck:
@@ -84,9 +124,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Must match the test job: govulncheck reports standard-library
+      # vulnerabilities against whichever toolchain runs it.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
 
       - name: govulncheck
         run: |
