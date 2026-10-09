@@ -1,10 +1,10 @@
 # The UV-PRO frame loss is at least partly ours — hold the firmware report
 
-**Status: two distinct failure states, and they point in opposite directions.**
-In the mild state there is a measurable host-side component. In the severe state
-a bare socket with no tncd at all radiates nothing either, which is the
-strongest firmware evidence this project has produced. Read the whole file
-before quoting either half.
+**Status: the host-side conclusion in this document is RETRACTED. See the
+2026-10-09 section at the end -- tncd radiates 44 of 44 once the test stops
+provoking its own wedge watchdog.** The firmware evidence (a bare socket with
+no tncd radiating nothing) stands. Read the final section before quoting
+anything above it.
 
 ## What was measured
 
@@ -147,3 +147,64 @@ restarts between tests are themselves a trigger.
 3. Any further bench work needs a **power cycle between series**, and must
    record the radio's own frequency read-back at the start of each, since once
    it wedges the control channel is gone and that check is impossible.
+
+## 2026-10-09 RETRACTION: the host-side finding was my test design
+
+Freshly power-cycled radio, three arms interleaved, per-SSID attribution, and
+one change from the runs above: `rx_wedge_timeout = 0` on both tncd arms.
+
+| arm | tncd L2 | tncd BT code | handed | on air | radiated |
+|---|---|---|---|---:|---:|---|
+| raw socket, no tncd | no | no | 44 | 44 | **100%** |
+| tncd over the relay | yes | no | 22 | 22 | **100%** |
+| **tncd, `type = bluetooth`** | yes | **yes** | **44** | **44** | **100%** |
+
+Zero relinks, 111 monitor decodes as a positive control. **tncd loses nothing.**
+
+### What the earlier 70-73% actually was
+
+My stimulus was SABM to a station that cannot answer. That guarantees permanent
+RX silence, which trips `rx_wedge_timeout` (20 s default on bluetooth) every
+20 seconds forever. Each firing relinks the port -- tearing down the SPP socket
+and building a new one -- and frames handed over inside that window are lost.
+The round-4 log shows it plainly:
+
+```
+port 0 RX wedged -- 20s silence with unacked TX; relinking (keeping session)
+ConnectProfile ... NewConnection fd=10 ... port 0 online
+port 0 RX wedged -- 20s silence with unacked TX; relinking (keeping session)
+```
+
+The 12 s and 15 s "dead windows" I described as a crisp defect signature are
+relink windows. The raw-socket arm has no watchdog and cannot relink, so it was
+never subject to the same thing. **The comparison was never fair**, and
+`kiss/bluetooth_linux.go` is exonerated: the identical code radiates 44 of 44
+when the watchdog is not being provoked.
+
+### What survives
+
+- **A real but minor tncd issue:** a relink silently drops frames already handed
+  to the transport. Explicable in a recovery path, but worth logging at least.
+  Filed as a followup; it is not a mystery write-path bug.
+- **The firmware evidence is untouched.** The 2026-10-08 series where *both*
+  arms went to zero included the raw-socket arm, which has no watchdog and
+  cannot relink. That result has no such confound.
+- **A separate, concrete Benshi SDP defect**, now confirmed on the UV-PRO as
+  well as the DB-50B: `sdp_extract_attr: Unknown data descriptor : 0x30
+  terminating`, `sdptool browse` returning nothing at all, and SPP channel
+  resolution alternating between 1 and 4 across queries. Channel 4 radiates
+  perfectly, so this is **not** the frame-loss mechanism -- a hypothesis tested
+  and discarded the same morning -- but it is a genuine firmware bug with a
+  clean reproduction.
+- The radio's own frequency read-back was 145.670 after the power cycle, which
+  **eliminates the self-retune hypothesis** left open yesterday.
+
+### Method note worth keeping
+
+Comparing software that has recovery behaviour against software that has none
+requires disabling the recovery, or the recovery *is* the difference you
+measure. Four harness defects preceded this one today (a mis-invoked
+`kissutil -T`, a count-based verdict, time-window attribution producing 13
+decodes from 12 sends, and a `pkill -f` that matched its own parent shell).
+Every dramatic result this bench produces should be assumed to be an artifact
+until the instrument has been shown to be sound.
