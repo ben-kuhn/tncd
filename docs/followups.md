@@ -36,20 +36,24 @@ I/O — wait on the very call it is unblocking. Verified with `-race -count=2` a
 internal/rig, internal/frontend/rigctl, internal/bridge and internal/app.
 
 **Windows had the same shape and is now guarded the same way** (2026-11-20,
-branch `fix/windows-bt-close-guards`): `handle()` snapshots the fd under mu,
-Read/Write/ControlChannel use the snapshot, and the struct comment records
-why mu is never held across the data syscalls. `TestConcurrentCloseGuardsFD`
-drives Close/reopen churn against two I/O loops on a dummy handle — the exact
-race the Linux half had — and `TestReadWriteAfterCloseFailsCleanly` pins the
-guard's error, because a missing guard also errors, but as a raw WSAENOTSOCK
-from a syscall on the stale handle, indistinguishable in a log from a radio
-that closed on us.
+branch `fix/windows-bt-close-guards`, merged in 2beb950): `handle()`
+snapshots the fd under mu, Read/Write/ControlChannel use the snapshot, and
+the struct comment records why mu is never held across the data syscalls.
+`TestConcurrentCloseGuardsFD` drives Close/reopen churn against two I/O
+loops on a dummy handle — the exact race the Linux half had — and
+`TestReadWriteAfterCloseFailsCleanly` pins the guard's error, because a
+missing guard also errors, but as a raw WSAENOTSOCK from a syscall on the
+stale handle, indistinguishable in a log from a radio that closed on us.
 
-Still missing: the `-race` run itself. This host has no C compiler (the repo
-is no-cgo by policy) and the race detector needs one even to cross-compile,
-so the binary staged for the VM is the plain build; run
-`go test -race ./kiss/` from a Windows box with a Go toolchain (or build the
-race binary on a host with mingw) before calling this closed.
+**Validated on the `tncd-test` Windows VM, 2026-11-20, red and green.**
+The -race binaries were cross-built from this host after all:
+`nix-shell -p pkgsCross.mingwW64.buildPackages.gcc` provides the mingw
+toolchain the race detector needs, so the no-cgo policy (which governs the
+shipped binary, not test tooling) no longer blocks the proof. Against the
+pre-fix production code the test FAILS with the detector naming the bare
+`bt.fd` read in Read (bluetooth_windows.go:232) racing the Close/reopen
+writes; the fixed code passes it twice, and the full kiss package passes
+under `-race -count=2` on the same VM. Followup #2 is closed.
 
 ### 3. Benshi framing constants are duplicated — LINKED 2026-09-29
 `kiss/demux.go` still mirrors five constants from `benshi/frame.go`, and still should: the
@@ -250,6 +254,17 @@ and the source tree is not there.
 Recreate the paths and they pass. Worth knowing before reading a cross-platform run as a
 portability failure -- on both Windows and FreeBSD the same three failed identically, which
 is itself the clue that it is the harness and not the platform.
+
+**Flags do not survive the SSH hop to the Windows VM.** With the guest's
+default shell set to PowerShell, `ssh host ".\foo.test.exe -test.run=X"`
+loses or mangles the flags (the binary prints usage; this cost an hour to
+diagnose as transport, not code). Put the invocation in a `.cmd` file
+staged next to the binary and run `cmd /c` on it: the flags live inside the
+file, out of sshd's reach, and under cmd.exe a bare name finds the current
+directory so no `.\` prefix dance is needed. CRLF line endings required.
+Also stage your cleanup in the .cmd: PowerShell's `del` rejects multi-glob
+argument lists, so a 2026-11-20 run left its test binaries in the guest's
+Administrator profile.
 
 ### 17. Remote PTT does not work on UV-PRO firmware 146
 `DO_PROG_FUNC(MAIN_PTT)` is accepted by the radio and never keys the
