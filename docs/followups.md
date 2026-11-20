@@ -35,9 +35,21 @@ radio takes, and holding it there would make `Close` — whose job is to interru
 I/O — wait on the very call it is unblocking. Verified with `-race -count=2` across kiss,
 internal/rig, internal/frontend/rigctl, internal/bridge and internal/app.
 
-**Windows still has the same shape** (`bt.fd == InvalidHandle` checked without
-synchronisation) and was not touched here — no Windows box was available to test against.
-Same fix, same reasoning, when someone is on that VM.
+**Windows had the same shape and is now guarded the same way** (2026-11-20,
+branch `fix/windows-bt-close-guards`): `handle()` snapshots the fd under mu,
+Read/Write/ControlChannel use the snapshot, and the struct comment records
+why mu is never held across the data syscalls. `TestConcurrentCloseGuardsFD`
+drives Close/reopen churn against two I/O loops on a dummy handle — the exact
+race the Linux half had — and `TestReadWriteAfterCloseFailsCleanly` pins the
+guard's error, because a missing guard also errors, but as a raw WSAENOTSOCK
+from a syscall on the stale handle, indistinguishable in a log from a radio
+that closed on us.
+
+Still missing: the `-race` run itself. This host has no C compiler (the repo
+is no-cgo by policy) and the race detector needs one even to cross-compile,
+so the binary staged for the VM is the plain build; run
+`go test -race ./kiss/` from a Windows box with a Go toolchain (or build the
+race binary on a host with mingw) before calling this closed.
 
 ### 3. Benshi framing constants are duplicated — LINKED 2026-09-29
 `kiss/demux.go` still mirrors five constants from `benshi/frame.go`, and still should: the
