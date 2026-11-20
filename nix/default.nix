@@ -5,10 +5,10 @@
 buildGoModule rec {
   pname = "tncd";
   # This builds `src = ../.` -- the working tree, not a fetched tag -- so the
-  # version must describe what is actually being compiled. Matches
-  # internal/version's own default for untagged main; the release checklist
-  # bumps it to the tag at release time.
-  version = "2.0.0-dev";
+  # version must describe what is actually being compiled. Bumped to the release
+  # tag at release time; internal/version's default for untagged main is
+  # 2.0.0-dev.
+  version = "2.0.0";
 
   src = lib.cleanSource ../.;
 

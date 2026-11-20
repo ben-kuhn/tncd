@@ -133,7 +133,7 @@ Data flow: `AGWPE client → TCP → frontend/agwpe → engine/bridge → kiss.T
 - **Windows/macOS/FreeBSD**: `tncd.exe` (with an embedded manifest + version resource, `cmd/tncd/resource_windows_*.syso`, regenerated via `go generate ./cmd/tncd`) shipped as zips; macOS/FreeBSD as tarballs. On Windows, `tncd.exe` is also its own self-installer GUI + service.
 - **Nix**: `nix/default.nix` (`buildGoModule`), `nix/module.nix` (`services.tncd.*`); distributed via the `nix-ham-packages` overlay.
 - **Arch**: `packaging/PKGBUILD` (Go build).
-- **Release workflow**: `.github/workflows/release.yml` triggers on `v*` tags — cross-compiles all targets, packages them, and creates a GitHub Release. During the 2.0 beta the public APT/RPM/AUR repos + tncd.dev stay on the stable 1.3.x line (the `publish-repos` job is gated); they move to the Go line at v2.0.0.
+- **Release workflow**: `.github/workflows/release.yml` triggers on `v*` tags — cross-compiles all targets, packages them, and creates a GitHub Release. Since v2.0.0 the public APT/RPM/AUR repos + tncd.dev serve the Go line: the `publish-repos` job runs on non-beta tags (it was gated during the 2.0 beta so the stable 1.3.x Python line kept the public repos), and `website.yml`'s release pin follows the latest non-beta tag.
 
 ## Protocol Notes
 

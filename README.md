@@ -1,19 +1,16 @@
 # tncd — AGWPE-to-KISS Bridge
 
-> **Two release lines.** The stable **1.3.x** line (Python) documented here is the
-> recommended version for production Linux stations, and is what the public
-> `apt.tncd.dev` / `rpm.tncd.dev` repositories serve. A **2.0 line** (`v1.9x`/`v1.10x-Beta`
-> tags) is a from-scratch **Go rewrite** — a single static binary with no Python
-> runtime, plus AX.25 v2.2 (SABME/modulo-128, XID, SREJ), native Bluetooth SPP,
-> and **cross-platform builds**: Linux, **Windows** (with a self-installer GUI and
-> a native Windows service), macOS, and FreeBSD.
-> The 2.0 line is a **beta** and **not yet as thoroughly tested as the 1.3.x Python
-> line** — try it if you want the standalone binary or need Windows/macOS, but keep
-> 1.3.x on Linux if you need proven stability. Grab 2.0 betas (latest:
-> **v1.103-Beta**) from the
-> [GitHub releases](https://github.com/ben-kuhn/tncd/releases) or the
-> [nix-ham-packages](https://github.com/ben-kuhn/nix-ham-packages) overlay.
-> **Windows and macOS are available only on the 2.0 beta line.**
+> **tncd 2.0 (Go) is the current release.** It is a from-scratch **Go rewrite** —
+> a single static binary with no Python runtime, plus AX.25 v2.2
+> (SABME/modulo-128, XID, SREJ), native Bluetooth SPP, and **cross-platform
+> builds**: Linux, **Windows** (with a self-installer GUI and a native Windows
+> service), macOS, and FreeBSD. It is what the public `apt.tncd.dev` /
+> `rpm.tncd.dev` repositories serve, and what this README documents.
+> The **1.3.x Python line is maintenance-only** (security fixes only, no new
+> features) on the [`v1` branch](https://github.com/ben-kuhn/tncd/tree/v1); grab
+> the final Python release (**v1.3.3**) from the
+> [GitHub releases](https://github.com/ben-kuhn/tncd/releases) if you depend on
+> it. **Windows and macOS are available only on the 2.x Go line.**
 
 A userspace bridge that lets AGWPE-compatible applications (PAT/Winlink, Paracon,
 Xastir) communicate with KISS TNCs, including full AX.25 connected-mode support.
@@ -156,9 +153,9 @@ Connects to a KISS-over-TCP server (e.g. Dire Wolf, QtSoundModem).
 On **Linux**, tncd connects to Bluetooth TNCs natively using the BlueZ D-Bus
 Profile API. Set `type = bluetooth` in the config — no external tools needed.
 
-On **Windows** (2.0 beta), tncd connects natively over Winsock RFCOMM
+On **Windows**, tncd connects natively over Winsock RFCOMM
 (`AF_BTH`): pair the TNC once in Windows Settings, then set `type = bluetooth`
-and `bdaddr = AA:BB:CC:DD:EE:FF` (the 2.0 installer lists paired devices for
+and `bdaddr = AA:BB:CC:DD:EE:FF` (the installer lists paired devices for
 you). No virtual COM port needed.
 
 > [!NOTE]
@@ -244,10 +241,10 @@ Cross-compile for another platform with `GOOS`/`GOARCH`, e.g.
 > Building the older **1.3.x Python** line instead? It lives on the
 > [`v1` branch](https://github.com/ben-kuhn/tncd/tree/v1).
 
-### Windows (2.0 beta)
+### Windows
 
-> Windows is supported only on the **2.0 Go beta line** — there is no Windows
-> build of the stable 1.3.x Python line.
+> Windows is supported only on the **2.x Go line** — there is no Windows
+> build of the 1.3.x Python line.
 
 Download `tncd-<version>-windows-amd64.zip` (or `-arm64`) from the
 [GitHub releases](https://github.com/ben-kuhn/tncd/releases), unzip, and
@@ -261,9 +258,9 @@ Command-line equivalents are also available: `tncd.exe ports`,
 `tncd.exe install -c tncd.ini`, `tncd.exe service start|stop`,
 `tncd.exe uninstall`.
 
-### macOS / FreeBSD (2.0 beta)
+### macOS / FreeBSD
 
-> Also 2.0-beta-only, and without OS service integration — run it yourself or
+> Also 2.x-Go-line-only, and without OS service integration — run it yourself or
 > wrap it in a launchd/rc unit.
 
 Download the matching `tncd-<version>-macos-*.tar.gz` /

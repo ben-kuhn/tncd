@@ -307,6 +307,23 @@ Two real bugs fell out of the investigation and are fixed: the body was
 malformed (one byte instead of the two-byte PF record), and `SetPTT`
 discarded the reply status so the radio's rejection was invisible.
 
+### 18. A relink silently drops frames already handed to the transport
+Found 2026-10-09, in the retraction section of
+`docs/2026-10-08-uvpro-host-vs-firmware.md`: frames handed to the transport
+inside an `rx_wedge_timeout` relink window are lost when the SPP socket is torn
+down and rebuilt. That is the 70-73% "loss" the earlier arms measured, and it
+is explicable in a recovery path — the write may be mid-flight and the stream
+state is unknown, so re-sending blindly risks duplication. But nothing is
+logged: a frame vanishing between "handed over" and the relink is invisible
+today. At minimum, log the drop when a relink discards queued or in-flight
+frames; a stronger fix would requeue them behind the new link's sequence state.
+
+### 19. The Gentoo overlay still packages the 1.3.x Python line
+The newest tncd ebuild in `packaging/gentoo-overlay/` is the Python 1.0-era
+tree (with `dev-python/kiss3` and friends). Since v2.0.0 the public repos serve
+the Go line, so the overlay needs a `go-module` ebuild. The website's Gentoo
+tabs say so until one exists.
+
 ## Radio / operational (not tncd bugs, but they cost hours)
 
 ### The bench UV-PRO does not decode the TS-2000 (one direction only)
