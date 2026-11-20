@@ -33,16 +33,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p pkgs
-          # PINNED to v1.3.2 (stable Python line). The public apt/rpm.tncd.dev
-          # repos must keep serving 1.3.x while the 2.0 Go port is in beta —
-          # an unpinned "latest" download would promote a 2.0 pre-release to the
+          # PINNED to the current stable tag (v2.0.0, the Go line, since the
+          # 2.0 cutover on 2026-11-20). Bump this pin at each stable release
+          # so website/** pushes rebuild the public apt/rpm.tncd.dev repos
+          # from the same artifacts the release published. An unpinned
+          # "latest" download would promote a beta or intermediate tag to the
           # public repos on any website/** commit.
-          # CUTOVER: at the first stable tag (v2.0.0), bump this pin to that tag
-          # so website/** pushes rebuild the repos from the Go line, matching the
-          # release.yml `publish-repos` job (which is gated to non-beta tags).
-          # Do NOT bump before v2.0.0 exists — the download would 404 and the
-          # deploy would drop the live apt/rpm repos.
-          gh release download v1.3.2 --pattern '*.deb' --pattern '*.rpm' --dir pkgs/ \
+          gh release download v2.0.0 --pattern '*.deb' --pattern '*.rpm' --dir pkgs/ \
             || echo "No release found — deploying website only"
 
       - name: Build APT repository
