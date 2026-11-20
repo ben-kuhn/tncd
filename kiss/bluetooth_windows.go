@@ -89,6 +89,14 @@ func describeWSAError(err error) string {
 }
 
 // bluetoothTransport is a Windows Bluetooth SPP transport over Winsock RFCOMM.
+//
+// mu guards fd and open only. It is deliberately NOT held across the actual
+// WSARecv/WSASend syscalls: those block for as long as the radio takes, and
+// holding it there would make Close -- whose job is to interrupt blocked I/O
+// -- wait on the very call it is unblocking. Read and Write instead take a
+// snapshot of the handle via handle(), so a concurrent Close cannot
+// invalidate it between the check and the use. Same fix, same reasoning, as
+// the Linux transport (followups #2).
 type bluetoothTransport struct {
 	cfg     BluetoothConfig
 	mu      sync.Mutex
@@ -223,13 +231,27 @@ func (bt *bluetoothTransport) dial(sa *windows.SockaddrBth, route string) (windo
 		time.Since(started).Round(time.Millisecond), describeWSAError(lastErr))
 }
 
+// handle returns the current socket handle, or InvalidHandle when the
+// transport is not open. Callers use the returned value rather than re-reading
+// bt.fd, so a concurrent Close cannot invalidate it between the check and the
+// use.
+func (bt *bluetoothTransport) handle() windows.Handle {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	return bt.fd
+}
+
 func (bt *bluetoothTransport) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	fd := bt.handle()
+	if fd == windows.InvalidHandle {
+		return 0, fmt.Errorf("bluetooth: not open")
+	}
 	buf := windows.WSABuf{Len: uint32(len(p)), Buf: &p[0]}
 	var recvd, flags uint32
-	if err := windows.WSARecv(bt.fd, &buf, 1, &recvd, &flags, nil, nil); err != nil {
+	if err := windows.WSARecv(fd, &buf, 1, &recvd, &flags, nil, nil); err != nil {
 		return 0, err
 	}
 	if recvd == 0 {
@@ -241,6 +263,10 @@ func (bt *bluetoothTransport) Read(p []byte) (int, error) {
 func (bt *bluetoothTransport) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+	fd := bt.handle()
+	if fd == windows.InvalidHandle {
+		return 0, fmt.Errorf("bluetooth: not open")
 	}
 	// Send until the whole frame is gone.
 	//
@@ -260,7 +286,7 @@ func (bt *bluetoothTransport) Write(p []byte) (int, error) {
 		chunk := p[total:]
 		buf := windows.WSABuf{Len: uint32(len(chunk)), Buf: &chunk[0]}
 		var sent uint32
-		if err := windows.WSASend(bt.fd, &buf, 1, &sent, 0, nil, nil); err != nil {
+		if err := windows.WSASend(fd, &buf, 1, &sent, 0, nil, nil); err != nil {
 			// WSAETIMEDOUT here is SO_SNDTIMEO expiring, not a connect failure
 			// — but Windows renders it as "the connected party did not
 			// properly respond", which reads like one. Say which layer
@@ -289,6 +315,13 @@ func (bt *bluetoothTransport) Write(p []byte) (int, error) {
 
 // Close closes the socket (unblocking any in-flight WSARecv in the reader
 // goroutine) and releases the Winsock refcount.
+//
+// Unlike Read and Write, this holds mu across Closesocket: that call returns
+// immediately, unlike a data syscall that blocks for as long as the radio
+// takes, so there is nothing for it to contend with. Any WSARecv/WSASend
+// still in flight on the old handle value fails it with a Winsock error —
+// that failure IS the unblocking, and the callers' handle() snapshot means
+// no later call can pick up the stale value.
 func (bt *bluetoothTransport) Close() error {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
@@ -331,10 +364,7 @@ func (bt *bluetoothTransport) ExitKISS()        {}
 // routing 0xC0 to the KISS decoder and 0xFF 0x01 to the rig layer) in front
 // of both consumers. Not built here; that is the next task.
 func (bt *bluetoothTransport) ControlChannel() (io.ReadWriteCloser, error) {
-	bt.mu.Lock()
-	open := bt.open
-	bt.mu.Unlock()
-	if !open {
+	if bt.handle() == windows.InvalidHandle {
 		return nil, fmt.Errorf("bluetooth: not open")
 	}
 	return &selfControlChannel{ReadWriteCloser: bt}, nil
