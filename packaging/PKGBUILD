@@ -2,7 +2,7 @@
 pkgname=tncd
 # The underscore is deliberate: Arch pkgver may not contain a hyphen, and the
 # substitutions below turn it back into the real tag/dir name (v1.103-Beta).
-pkgver=1.103_Beta
+pkgver=2.0.0
 pkgrel=1
 pkgdesc="AGWPE-to-KISS Translation Bridge"
 arch=('x86_64' 'aarch64' 'armv7h' 'riscv64')
@@ -11,7 +11,7 @@ license=('GPL-3.0-only')
 makedepends=('go')
 # The Go binary is fully static (CGO_ENABLED=0); no runtime depends.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v${pkgver//_/-}.tar.gz")
-sha256sums=('95b79bb79dd1219f80dd670844e5cae50f8317b4c8f35a4ebe52ab5938dc79ed')
+sha256sums=('4cb0aad5d69dcfc715a05ec4f3dc26cf74b1c4f03c9dce1d9f0c1ca64f3e2d37')
 
 build() {
     cd "$pkgname-${pkgver//_/-}"
