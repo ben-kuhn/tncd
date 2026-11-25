@@ -2,7 +2,7 @@
 pkgname=tncd
 # The underscore is deliberate: Arch pkgver may not contain a hyphen, and the
 # substitutions below turn it back into the real tag/dir name (v1.103-Beta).
-pkgver=2.0.0
+pkgver=2.1.0
 pkgrel=1
 pkgdesc="AGWPE-to-KISS Translation Bridge"
 arch=('x86_64' 'aarch64' 'armv7h' 'riscv64')
