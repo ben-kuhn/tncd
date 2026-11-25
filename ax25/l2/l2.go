@@ -20,7 +20,7 @@ const ax25Overhead = 20
 // Derived from ota_baudrate via DeriveParams (tncd.py:1068-1087).
 type PortParams struct {
 	MaxWindow   int
-	Paclen      int // max I-frame info (N1); <=0 means maxIFrameInfo
+	Paclen      int // per-port max I-frame info (N1); <=0 means maxIFrameInfo
 	// T1Floor is the shortest T1 the RTT estimator may settle on: the time it
 	// physically takes to put the outstanding window on the air and get an
 	// answer back. Retransmitting sooner than this cannot be correct -- the
@@ -674,8 +674,8 @@ func (t *Table) Disconnect(c *Conn) {
 // before drops occur (tncd.py MAX_OUTBOUND_QUEUE = 512).
 const maxOutboundQueue = 512
 
-// maxIFrameInfo is the maximum info field size for an I-frame (tncd.py: 128 bytes).
-const maxIFrameInfo = 128
+// maxIFrameInfo is the default max info field size for an I-frame (N1).
+const maxIFrameInfo = 256
 
 // SendData fragments payload into ≤128-byte chunks, queues (chunk, pid), then
 // calls drainOutbound. Chunks that do not fit in the 512-entry queue are

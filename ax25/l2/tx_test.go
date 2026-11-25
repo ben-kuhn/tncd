@@ -36,8 +36,8 @@ func TestWindowLimitsInFlight(t *testing.T) {
 	if got := len(iframes(rec)); got != 3 {
 		t.Fatalf("in flight = %d, want 3 (window)", got)
 	}
-	if tbl.Outstanding(c) != 12 { // 3 unacked + 9 queued (2 chunks per 256-byte write)
-		t.Fatalf("Outstanding = %d, want 12", tbl.Outstanding(c))
+	if tbl.Outstanding(c) != 6 { // 3 unacked + 3 queued
+		t.Fatalf("Outstanding = %d, want 6", tbl.Outstanding(c))
 	}
 	// ACK two → two more drain.
 	tbl.OnFrame(0, mkFrame(ax25.RR, "N0CALL-2", "KU0HN-10", resp, nr(2)))
@@ -47,7 +47,7 @@ func TestWindowLimitsInFlight(t *testing.T) {
 }
 
 func TestCoalescingSmallChunks(t *testing.T) {
-	// 127-byte writes no longer coalesce at N1=128 (127+127 > 128).
+	// PAT-style 127-byte writes coalesce into 254-byte I-frames.
 	tbl, rec, _ := newHarness(1200)
 	c := connect(t, tbl, rec)
 	// Fill the window first so subsequent sends queue up.
@@ -59,12 +59,12 @@ func TestCoalescingSmallChunks(t *testing.T) {
 	// Ack everything in flight; queued 127s should coalesce pairwise.
 	tbl.OnFrame(0, mkFrame(ax25.RR, "N0CALL-2", "KU0HN-10", resp, nr(3)))
 	fr := iframes(rec)
-	if len(fr) != 3 || len(fr[0].Info) != 128 || len(fr[1].Info) != 128 || len(fr[2].Info) != 128 {
+	if len(fr) != 2 || len(fr[0].Info) != 254 || len(fr[1].Info) != 254 {
 		sizes := []int{}
 		for _, f := range fr {
 			sizes = append(sizes, len(f.Info))
 		}
-		t.Fatalf("frames = %d sizes %v, want 3x128", len(fr), sizes)
+		t.Fatalf("frames = %d sizes %v, want 2x254", len(fr), sizes)
 	}
 }
 
@@ -73,12 +73,12 @@ func TestBackwardsNRIgnored(t *testing.T) {
 	c := connect(t, tbl, rec)
 	tbl.SendData(c, 0xF0, bytes.Repeat([]byte("x"), 256*2))
 	tbl.OnFrame(0, mkFrame(ax25.RR, "N0CALL-2", "KU0HN-10", resp, nr(2)))
-	if tbl.Outstanding(c) != 2 {
-		t.Fatalf("Outstanding = %d, want 2", tbl.Outstanding(c))
+	if tbl.Outstanding(c) != 0 {
+		t.Fatalf("Outstanding = %d", tbl.Outstanding(c))
 	}
 	// Stale retransmitted RR with old N(R)=1: (1-2) mod 8 = 7 > window → ignore.
 	tbl.OnFrame(0, mkFrame(ax25.RR, "N0CALL-2", "KU0HN-10", resp, nr(1)))
-	if tbl.Outstanding(c) != 2 || c.State != Connected {
+	if tbl.Outstanding(c) != 0 || c.State != Connected {
 		t.Fatal("backwards N(R) corrupted state")
 	}
 	_ = rec
@@ -118,12 +118,12 @@ func TestN2DisconnectsAndNotifies(t *testing.T) {
 func TestREJTriggersRetransmitWithUpdatedNR(t *testing.T) {
 	tbl, rec, _ := newHarness(1200)
 	c := connect(t, tbl, rec)
-	tbl.SendData(c, 0xF0, bytes.Repeat([]byte("x"), 256*2)) // NS 0,1,2,3 queued; 3 in flight
+	tbl.SendData(c, 0xF0, bytes.Repeat([]byte("x"), 256*2)) // NS 0,1 in flight
 	// Remote receives an I-frame from us... then REJs from 0.
 	rec.sent = nil
 	tbl.OnFrame(0, mkFrame(ax25.REJ, "N0CALL-2", "KU0HN-10", resp, nr(0)))
 	fr := iframes(rec)
-	if len(fr) != 3 || fr[0].NS != 0 || fr[1].NS != 1 || fr[2].NS != 2 {
+	if len(fr) != 2 || fr[0].NS != 0 || fr[1].NS != 1 {
 		t.Fatalf("retransmit = %+v", fr)
 	}
 }

@@ -688,16 +688,12 @@ func (b *Bridge) Start() error {
 	// Build L2 params from config.
 	params := make([]l2pkg.PortParams, len(b.cfg.Ports))
 	for i, p := range b.cfg.Ports {
-		paclen := p.Paclen
-		if paclen <= 0 {
-			paclen = b.cfg.AX25.Paclen
-		}
 		params[i] = l2pkg.DeriveParams(
 			p.OTABaudrate,
 			b.cfg.AX25.MaxWindow,
 			b.cfg.AX25.N2Retry,
 			b.cfg.AX25.T3Timeout,
-			paclen,
+			p.Paclen,
 		)
 		params[i].T1Setup = time.Duration(b.cfg.AX25.Frack) * time.Second
 		params[i].AX25Version = b.cfg.Ports[i].AX25Version
