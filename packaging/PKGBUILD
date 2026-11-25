@@ -11,7 +11,7 @@ license=('GPL-3.0-only')
 makedepends=('go')
 # The Go binary is fully static (CGO_ENABLED=0); no runtime depends.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v${pkgver//_/-}.tar.gz")
-sha256sums=('7eed4d530a32c1f12f3cd697fb49424719cc612afb102c12ff9515676af61dd1')
+sha256sums=('8345c21573f3e515bc445f45f4b3ea24fa0accae33f706c28d381f8528efbb69')
 
 build() {
     cd "$pkgname-${pkgver//_/-}"
