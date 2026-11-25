@@ -350,7 +350,7 @@ func TestXIDCommandGetsResponse(t *testing.T) {
 	if got.SREJ != ax25.SREJNone {
 		t.Errorf("SREJ = %v, want none (must suppress Direwolf SREJ)", got.SREJ)
 	}
-	if got.Modulo != 128 || got.IFieldLenRxBytes != 256 {
+	if got.Modulo != 128 || got.IFieldLenRxBytes != 128 {
 		t.Errorf("params = %+v", got)
 	}
 	if got.WindowRx != 3 { // min(7, MaxWindow=3)
@@ -772,11 +772,11 @@ func TestSetupT1(t *testing.T) {
 }
 
 // TestDeriveParamsSeparatesSetupFromDataT1 pins the divergence: at 1200 baud the
-// data-phase T1 is ~13s, and the connection-setup timer must NOT inherit it.
+// data-phase T1 is ~8s at 128-byte frames, and the connection-setup timer must NOT inherit it.
 func TestDeriveParamsSeparatesSetupFromDataT1(t *testing.T) {
 	pp := DeriveParams(1200, 3, 10, 180)
-	if pp.T1 < 10*time.Second {
-		t.Fatalf("precondition: data-phase T1 = %v, expected the ~13s window-derived value", pp.T1)
+	if pp.T1 < 7*time.Second {
+		t.Fatalf("precondition: data-phase T1 = %v, expected the ~8s window-derived value", pp.T1)
 	}
 	if pp.T1Setup != defaultT1Setup {
 		t.Errorf("T1Setup = %v, want %v (must not inherit the data-phase T1)", pp.T1Setup, defaultT1Setup)
@@ -804,7 +804,7 @@ func TestConnectUsesSetupT1(t *testing.T) {
 // at a time must produce one retransmission per step.
 func TestSetupRetriesAreNotDataPhaseSpaced(t *testing.T) {
 	tbl, rec, clk := newHarness(1200)
-	if dataT1 := tbl.portParams(0).T1; dataT1 <= 4*defaultT1Setup {
+	if dataT1 := tbl.portParams(0).T1; dataT1 <= 2*defaultT1Setup {
 		t.Fatalf("precondition: data-phase T1 = %v, too close to the setup interval "+
 			"for this test to distinguish them", dataT1)
 	}
@@ -898,7 +898,7 @@ func TestT1FloorRespectsLinkSpeed(t *testing.T) {
 		baud      int
 		wantFloor time.Duration
 	}{
-		{1200, 6 * time.Second},  // must be well above the flat 3s
+		{1200, 3900 * time.Millisecond}, // 128-byte frames: > the flat 3s, < frameTime*3+1
 		{9600, 3 * time.Second},  // fast links keep the old floor
 		{19200, 3 * time.Second},
 	} {

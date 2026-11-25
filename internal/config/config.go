@@ -36,6 +36,10 @@ type AX25 struct {
 	// KPC-3+ uses 4, a TM-D710A 3). Scaled by 2m+1 for m digipeater hops.
 	// Distinct from the data-phase T1, which is derived from ota_baudrate.
 	Frack int
+	// Paclen is the maximum AX.25 I-frame info field size (N1), advertised in
+	// XID and used to fragment outbound data. Default 128 (classic AX.25);
+	// 63 is common at 300 baud, up to 256 on clean 1200+ links.
+	Paclen int
 }
 
 // KISSTCP holds the [kisstcp] section: a KISS-over-TCP passthrough listener.
@@ -89,6 +93,7 @@ type Port struct {
 
 	// common
 	OTABaudrate    int     // default 1200
+	Paclen         int     // N1 override for this port; 0 uses [ax25] paclen
 	InitString     string  // raw, with \r \n escapes unresolved
 	InitDelay      float64 // default 1.0
 	SendKISSExit   bool    // default true
@@ -165,7 +170,7 @@ var knownServerKeys = []string{
 
 // knownAX25Keys are the recognized keys in [ax25].
 var knownAX25Keys = []string{
-	"max_window", "n2_retry", "t3_timeout", "frack",
+	"max_window", "n2_retry", "t3_timeout", "frack", "paclen",
 }
 
 // knownRigCtlKeys are the recognized keys in [rigctl.N].
@@ -192,7 +197,7 @@ var knownClientKeys = []string{
 	"device", "serial_baudrate", "baudrate", "parity", "stopbits", "rtscts",
 	"host", "port",
 	"bdaddr", "channel", "reconnect", "reconnect_delay", "reconnect_max_delay",
-	"ota_baudrate", "init_string", "init_delay", "send_kiss_exit",
+	"ota_baudrate", "paclen", "init_string", "init_delay", "send_kiss_exit",
 	"host_exit_string", "exit_delay",
 	"ax25_version", "srej", "rx_wedge_timeout", "tx_pacing",
 }
@@ -493,6 +498,13 @@ func Load(path string) (*Config, error) {
 		N2Retry:   getInt(ax25Sec, "n2_retry", 10),
 		T3Timeout: getInt(ax25Sec, "t3_timeout", 180),
 		Frack:     getInt(ax25Sec, "frack", 3),
+		Paclen:    getInt(ax25Sec, "paclen", 128),
+	}
+	if cfg.AX25.Paclen < 1 {
+		cfg.AX25.Paclen = 1
+	}
+	if cfg.AX25.Paclen > 256 {
+		cfg.AX25.Paclen = 256
 	}
 	if cfg.AX25.Frack < 1 {
 		// A sub-second setup timer would retransmit SABMs faster than a
@@ -674,6 +686,7 @@ func Load(path string) (*Config, error) {
 			ReconnectDelay:    getFloat(s, "reconnect_delay", 5),
 			ReconnectMaxDelay: getFloat(s, "reconnect_max_delay", 60),
 			OTABaudrate:       getInt(s, "ota_baudrate", 1200),
+			Paclen:            getInt(s, "paclen", 0),
 			InitString:        getString(s, "init_string", ""),
 			InitDelay:         getFloat(s, "init_delay", 1.0),
 			SendKISSExit:      getBool(s, "send_kiss_exit", true),

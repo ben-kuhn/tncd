@@ -20,6 +20,7 @@ const ax25Overhead = 20
 // Derived from ota_baudrate via DeriveParams (tncd.py:1068-1087).
 type PortParams struct {
 	MaxWindow   int
+	Paclen      int // max I-frame info (N1); <=0 means maxIFrameInfo
 	// T1Floor is the shortest T1 the RTT estimator may settle on: the time it
 	// physically takes to put the outstanding window on the air and get an
 	// answer back. Retransmitting sooner than this cannot be correct -- the
@@ -69,11 +70,15 @@ func setupT1(base time.Duration, digis int) time.Duration {
 // DeriveParams computes PortParams from the on-air baud rate and config.
 // Mirrors tncd.py:1068-1087 for the data-phase timers; the connection-phase
 // timer (T1Setup) is a deliberate divergence, see defaultT1Setup.
-func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
+func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int, paclen ...int) PortParams {
 	if otaBaud <= 0 {
 		otaBaud = 1200
 	}
-	maxFrameBytes := 256 + ax25Overhead
+	maxInfo := maxIFrameInfo
+	if len(paclen) > 0 && paclen[0] > 0 {
+		maxInfo = paclen[0]
+	}
+	maxFrameBytes := maxInfo + ax25Overhead
 	frameTime := float64(maxFrameBytes*8) / float64(otaBaud) // seconds
 	turnaround := 1.0
 	t1Sec := 3.0
@@ -96,6 +101,7 @@ func DeriveParams(otaBaud, maxWindow, n2Retry, t3Seconds int) PortParams {
 	}
 	return PortParams{
 		MaxWindow: maxWindow,
+		Paclen:    maxInfo,
 		N2Retry:   n2Retry,
 		T1:        time.Duration(t1Sec * float64(time.Second)),
 		T1Floor:   time.Duration(t1FloorSec * float64(time.Second)),
@@ -194,7 +200,7 @@ func (t *Table) Hooks() *Hooks {
 // portParams returns the PortParams for the given port (clamped to last if out of range).
 func (t *Table) portParams(port int) PortParams {
 	if port < 0 || len(t.params) == 0 {
-		return PortParams{N2Retry: 10, T1: 3 * time.Second, T1Setup: defaultT1Setup, T1Floor: defaultT1Setup}
+		return PortParams{Paclen: maxIFrameInfo, N2Retry: 10, T1: 3 * time.Second, T1Setup: defaultT1Setup, T1Floor: defaultT1Setup}
 	}
 	if port >= len(t.params) {
 		return t.params[len(t.params)-1]
@@ -668,10 +674,10 @@ func (t *Table) Disconnect(c *Conn) {
 // before drops occur (tncd.py MAX_OUTBOUND_QUEUE = 512).
 const maxOutboundQueue = 512
 
-// maxIFrameInfo is the maximum info field size for an I-frame (tncd.py: 256 bytes).
-const maxIFrameInfo = 256
+// maxIFrameInfo is the maximum info field size for an I-frame (tncd.py: 128 bytes).
+const maxIFrameInfo = 128
 
-// SendData fragments payload into ≤256-byte chunks, queues (chunk, pid), then
+// SendData fragments payload into ≤128-byte chunks, queues (chunk, pid), then
 // calls drainOutbound. Chunks that do not fit in the 512-entry queue are
 // dropped; the count is returned so the caller can report the loss.
 // Mirrors tncd.py:366-389 ('D' handler).
@@ -679,13 +685,17 @@ func (t *Table) SendData(c *Conn, pid uint8, data []byte) (dropped int) {
 	if len(data) == 0 {
 		data = []byte{}
 	}
-	// Fragment into 256-byte chunks.
-	chunks := make([][]byte, 0, (len(data)+maxIFrameInfo-1)/maxIFrameInfo)
+	maxInfo := t.portParams(c.Port).Paclen
+	if maxInfo <= 0 {
+		maxInfo = maxIFrameInfo
+	}
+	// Fragment into maxInfo-byte chunks.
+	chunks := make([][]byte, 0, (len(data)+maxInfo-1)/maxInfo)
 	if len(data) == 0 {
 		chunks = append(chunks, []byte{})
 	} else {
-		for i := 0; i < len(data); i += maxIFrameInfo {
-			end := i + maxIFrameInfo
+		for i := 0; i < len(data); i += maxInfo {
+			end := i + maxInfo
 			if end > len(data) {
 				end = len(data)
 			}
@@ -719,6 +729,10 @@ func (t *Table) drainOutbound(c *Conn) {
 		return
 	}
 	pp := t.portParams(c.Port)
+	maxInfo := pp.Paclen
+	if maxInfo <= 0 {
+		maxInfo = maxIFrameInfo
+	}
 	sentAny := false
 	for len(c.outQueue) > 0 && int(c.unacked) < pp.MaxWindow {
 		// Pop first entry.
@@ -733,9 +747,9 @@ func (t *Table) drainOutbound(c *Conn) {
 		pid := entry.pid
 
 		// Coalesce adjacent entries with the same PID up to 256 bytes.
-		for len(c.outQueue) > 0 && len(chunk) < maxIFrameInfo {
+		for len(c.outQueue) > 0 && len(chunk) < maxInfo {
 			next := c.outQueue[0]
-			if next.pid != pid || len(chunk)+len(next.data) > maxIFrameInfo {
+			if next.pid != pid || len(chunk)+len(next.data) > maxInfo {
 				break
 			}
 			c.outQueue = c.outQueue[1:]
@@ -1527,7 +1541,7 @@ func (t *Table) sendXIDCommand(c *Conn) {
 		FullDuplex:       false,
 		SREJ:             ax25.SREJSingle,
 		Modulo:           128,
-		IFieldLenRxBytes: 256,
+		IFieldLenRxBytes: pp.Paclen,
 		WindowRx:         pp.MaxWindow,
 	}
 	f := cmdFrame(c.Remote, c.Local, c.Via, ax25.XID, true) // command, P=1
@@ -1595,7 +1609,7 @@ func (t *Table) dispatchXID(port int, f *ax25.Frame, src, dst string) {
 		FullDuplex:       false,
 		SREJ:             neg,
 		Modulo:           int(c.modulo),
-		IFieldLenRxBytes: 256,
+		IFieldLenRxBytes: pp.Paclen,
 		WindowRx:         window,
 	}
 	out := respFrame(src, dst, c.Via, ax25.XID, true) // response, F=1
