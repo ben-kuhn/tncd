@@ -8,7 +8,7 @@ buildGoModule rec {
   # version must describe what is actually being compiled. Bumped to the release
   # tag at release time; internal/version's default for untagged main is
   # 2.0.0-dev.
-  version = "2.0.0";
+  version = "2.1.0";
 
   src = lib.cleanSource ../.;
 
